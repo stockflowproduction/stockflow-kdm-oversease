@@ -16,7 +16,8 @@ const defaultProfile: StoreProfile = {
   state: "",
   defaultTaxRate: 0,
   defaultTaxLabel: 'None',
-  invoiceFormat: 'standard'
+  invoiceFormat: 'standard',
+  adminPin: '1234'
 };
 
 const initialData: AppState = {
@@ -28,7 +29,8 @@ const initialData: AppState = {
   upfrontOrders: [],
   cashSessions: [],
   expenses: [],
-  expenseCategories: ['General']
+  expenseCategories: ['General'],
+  expenseActivities: []
 };
 
 let memoryState: AppState = { ...initialData };
@@ -80,6 +82,7 @@ const syncFromCloud = async () => {
                     cashSessions: cloudData.cashSessions || [],
                     expenses: cloudData.expenses || [],
                     expenseCategories: cloudData.expenseCategories || ['General'],
+                    expenseActivities: cloudData.expenseActivities || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
                 };
                 if (memoryState.profile.defaultTaxRate === undefined) {
