@@ -245,9 +245,12 @@ export default function BarcodeSales() {
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
-          currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+          const receivedValue = cashReceived.trim();
+          if (receivedValue) {
+              const receivedAmount = Number(receivedValue);
+              if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
+              currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+          }
       }
       const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
       const newState = processTransaction(tx);

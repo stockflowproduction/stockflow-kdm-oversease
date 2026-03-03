@@ -360,15 +360,18 @@ export default function Sales() {
 
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
-              setCheckoutError('Received amount is less than total bill.');
-              return;
+          const receivedValue = cashReceived.trim();
+          if (receivedValue) {
+              const receivedAmount = Number(receivedValue);
+              if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
+                  setCheckoutError('Received amount is less than total bill.');
+                  return;
+              }
+              currentCashDetails = {
+                  cashReceived: receivedAmount,
+                  changeReturned: receivedAmount - total
+              };
           }
-          currentCashDetails = {
-              cashReceived: receivedAmount,
-              changeReturned: receivedAmount - total
-          };
       }
 
       const tx: Transaction = {
