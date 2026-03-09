@@ -7,6 +7,7 @@ import { Button, Card, CardContent, CardHeader, CardTitle, Badge } from '../comp
 import { FileText, Download, User, Users } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel, exportDetailedSalesToExcel } from '../services/excel';
+import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 
 export default function Reports() {
   const [products, setProducts] = useState(loadData().products);
@@ -190,6 +191,9 @@ export default function Reports() {
             doc.setFontSize(8);
             doc.setTextColor(80, 80, 80);
             doc.text(`Stock: ${product.stock}`, x + 3, stockY);
+            const vc = `${(product.variants || []).join('/') || NO_VARIANT} | ${(product.colors || []).join('/') || NO_COLOR}`;
+            doc.setFontSize(6);
+            doc.text(vc, x + 3, stockY + 4);
             
             // Buy Price: Below Stock
             const buyY = stockY + 5;

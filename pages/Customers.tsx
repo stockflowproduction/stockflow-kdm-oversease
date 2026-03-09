@@ -8,6 +8,7 @@ import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label } from '../components/ui';
+import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
 
 export default function Customers() {
@@ -63,17 +64,27 @@ export default function Customers() {
   const [filterType, setFilterType] = useState('all_time');
   const [sortBy, setSortBy] = useState<'spend' | 'due' | 'lastVisit'>('spend');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const refreshData = () => {
-    const data = loadData();
-    setCustomers(data.customers);
-    setTransactions(data.transactions);
-    setUpfrontOrders(data.upfrontOrders || []);
-    
-    if (viewingCustomer) {
-        const updatedC = data.customers.find(c => c.id === viewingCustomer.id);
-        if (updatedC) setViewingCustomer(updatedC);
-        else setViewingCustomer(null);
+    try {
+      const data = loadData();
+      setCustomers(data.customers);
+      setTransactions(data.transactions);
+      setUpfrontOrders(data.upfrontOrders || []);
+      setLoadError(null);
+
+      if (viewingCustomer) {
+          const updatedC = data.customers.find(c => c.id === viewingCustomer.id);
+          if (updatedC) setViewingCustomer(updatedC);
+          else setViewingCustomer(null);
+      }
+    } catch (error) {
+      console.error('[customers] load failed', error);
+      setLoadError('Unable to load customer data right now. Please try again.');
+    } finally {
+      setIsInitialLoading(false);
     }
   };
 
@@ -198,10 +209,16 @@ export default function Customers() {
           lastVisit: new Date().toISOString()
       };
       
-      addCustomer(customer);
-      refreshData();
-      setIsAddModalOpen(false);
-      setNewCustomer({ name: '', phone: '' });
+      try {
+          addCustomer(customer);
+          refreshData();
+          setIsAddModalOpen(false);
+          setNewCustomer({ name: '', phone: '' });
+      } catch (error) {
+          console.error('[customers] add customer failed', error);
+          const message = error instanceof Error ? error.message : 'Failed to create customer. Please try again.';
+          setAddCustomerError(message);
+      }
   };
 
   const handleSaveUpfrontOrder = () => {
@@ -521,6 +538,16 @@ export default function Customers() {
 
   return (
     <div className="space-y-6 pb-24 md:pb-0 relative">
+      {isInitialLoading && (
+        <div className="space-y-3 p-1">
+          <div className="h-8 w-56 animate-pulse rounded bg-muted" />
+          <div className="h-20 animate-pulse rounded-xl bg-muted" />
+          <div className="h-20 animate-pulse rounded-xl bg-muted" />
+        </div>
+      )}
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{loadError}</div>
+      )}
       <div className="sticky top-0 z-30 -mx-4 px-4 py-3 bg-background/80 backdrop-blur-md border-b shadow-sm space-y-3">
           <div className="flex justify-between items-center">
               <div>
@@ -909,7 +936,7 @@ export default function Customers() {
                                     {item.image ? <img src={item.image} className="w-full h-full object-contain" /> : <Package className="w-6 h-6 opacity-20" />}
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                    <p className="text-sm font-black text-slate-800 leading-tight truncate">{item.name}</p>
+                                    <p className="text-sm font-black text-slate-800 leading-tight truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
                                     <p className="text-[10px] font-bold text-muted-foreground mt-1 tracking-tight">
                                         Qty: {item.quantity} <span className="mx-1">•</span> ₹{item.sellPrice.toFixed(0)}
                                     </p>

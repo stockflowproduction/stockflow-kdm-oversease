@@ -8,13 +8,14 @@ import Transactions from './pages/Transactions';
 import Customers from './pages/Customers';
 import Settings from './pages/Settings';
 import Finance from './pages/Finance';
+import FreightBooking from './pages/FreightBooking';
 import Auth from './pages/Auth';
 import VerificationRequired from './pages/VerificationRequired';
 import { getCurrentUser, logout } from './services/auth';
 import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
-import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, ScanQrCode, RotateCcw, Layers, Menu, X, Settings as SettingsIcon, LogOut, Landmark } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, ScanQrCode, RotateCcw, Layers, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
 
 // --- Components ---
@@ -70,6 +71,8 @@ export default function App() {
   const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unverified' | 'unauthenticated'>('loading');
   const [currentEmail, setCurrentEmail] = useState<string | null>(getCurrentUser());
   const [storeName, setStoreName] = useState('StockFlow');
+  const [cloudStatus, setCloudStatus] = useState<{ status: string; message?: string }>({ status: navigator.onLine ? 'loading' : 'offline' });
+  const [opStatus, setOpStatus] = useState<{ phase: 'start' | 'success' | 'error'; message: string; op?: string } | null>(null);
 
   useEffect(() => {
     if (!auth) {
@@ -105,8 +108,30 @@ export default function App() {
       };
 
       window.addEventListener('local-storage-update', handleStorageUpdate);
-      return () => window.removeEventListener('local-storage-update', handleStorageUpdate);
+      const handleCloudStatus = (event: Event) => {
+        const detail = (event as CustomEvent<{ status: string; message?: string }>).detail;
+        if (detail) setCloudStatus(detail);
+      };
+      const handleOpStatus = (event: Event) => {
+        const detail = (event as CustomEvent<{ phase: 'start' | 'success' | 'error'; message?: string; error?: string; op?: string }>).detail;
+        if (!detail) return;
+        const message = detail.error || detail.message || (detail.phase === 'start' ? 'Saving…' : detail.phase === 'success' ? 'Saved.' : 'Operation failed.');
+        setOpStatus({ phase: detail.phase, message, op: detail.op });
+      };
+      window.addEventListener('cloud-sync-status', handleCloudStatus as EventListener);
+      window.addEventListener('data-op-status', handleOpStatus as EventListener);
+      return () => {
+        window.removeEventListener('local-storage-update', handleStorageUpdate);
+        window.removeEventListener('cloud-sync-status', handleCloudStatus as EventListener);
+        window.removeEventListener('data-op-status', handleOpStatus as EventListener);
+      };
   }, [authStatus]);
+
+  useEffect(() => {
+    if (!opStatus || opStatus.phase === 'start') return;
+    const t = setTimeout(() => setOpStatus(null), 3000);
+    return () => clearTimeout(t);
+  }, [opStatus]);
 
   const handleLoginSuccess = () => {
       setAuthStatus('authenticated');
@@ -128,6 +153,17 @@ export default function App() {
     <Router>
       <MenuController setIsMenuOpen={setIsMenuOpen} />
       <div className="flex h-screen bg-background overflow-hidden">
+        {(cloudStatus.status === 'offline' || cloudStatus.status === 'missing_store' || cloudStatus.status === 'error') && (
+          <div className="fixed top-0 left-0 right-0 z-[80] bg-red-600 text-white text-xs px-3 py-2 text-center">
+            {cloudStatus.message || 'Live cloud data unavailable. Business data operations are blocked until connection is restored.'}
+          </div>
+        )}
+        {opStatus && (
+          <div className={`fixed bottom-4 right-4 z-[90] rounded-lg px-3 py-2 text-xs shadow-lg ${opStatus.phase === 'error' ? 'bg-red-600 text-white' : opStatus.phase === 'success' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-white'}`}>
+            <div className="font-semibold">{opStatus.op || 'Data'}</div>
+            <div>{opStatus.message}</div>
+          </div>
+        )}
         {/* Sidebar */}
         <div className="w-64 border-r bg-card flex flex-col hidden md:flex">
           <div className="p-6">
@@ -147,6 +183,7 @@ export default function App() {
             <NavItem to="/pdf" icon={FileText} label="Reports" />
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
             <NavItem to="/finance" icon={Landmark} label="Finance" />
+            <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />
 
             <div className="pt-6">
                 <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Quick Actions</p>
@@ -221,6 +258,12 @@ export default function App() {
                               </div>
                               <span className="font-medium text-sm">Finance</span>
                          </Link>
+                         <Link to="/freight-booking" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                              <div className="p-3 bg-orange-100 text-orange-600 rounded-full mb-2">
+                                  <Truck className="w-6 h-6" />
+                              </div>
+                              <span className="font-medium text-sm">Freight Booking</span>
+                         </Link>
                          <Link to="/settings" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-gray-100 text-gray-600 rounded-full mb-2">
                                   <SettingsIcon className="w-6 h-6" />
@@ -248,6 +291,7 @@ export default function App() {
               <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
               <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
               <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
+              <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />
               
               {/* Unprotected Route (POS) */}
               <Route path="/sales" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Sales /></ProtectedRoute>} />

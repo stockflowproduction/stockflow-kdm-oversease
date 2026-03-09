@@ -11,7 +11,7 @@ export default function Settings() {
     storeName: '', ownerName: '', gstin: '', email: '', phone: '',
     addressLine1: '', addressLine2: '', state: '',
     bankName: '', bankAccount: '', bankIfsc: '', bankHolder: '',
-    defaultTaxRate: 0, defaultTaxLabel: 'None', signatureImage: ''
+    defaultTaxRate: 0, defaultTaxLabel: 'None', signatureImage: '', adminPin: '1234'
   });
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -172,6 +172,25 @@ export default function Settings() {
                   ) : (
                       <p>Standard format generates a professional A4 PDF document for downloading or sharing.</p>
                   )}
+              </div>
+           </CardContent>
+        </Card>
+
+
+        <Card>
+           <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Security</CardTitle></CardHeader>
+           <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Manager Unlock PIN (for opening balance edit)</Label>
+                <Input
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={profile.adminPin || ''}
+                  onChange={e => setProfile({ ...profile, adminPin: e.target.value.replace(/[^\d]/g, '').slice(0, 6) })}
+                  placeholder="Enter PIN (e.g. 1234)"
+                />
+                <p className="text-xs text-muted-foreground">This PIN is saved in your store profile and used in Finance to unlock opening balance edits.</p>
               </div>
            </CardContent>
         </Card>

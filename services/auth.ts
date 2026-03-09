@@ -9,22 +9,16 @@ import {
 } from 'firebase/auth';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 
-const SESSION_KEY = 'stockflow_active_session';
-
 const GENERIC_AUTH_ERROR = 'Unable to complete the request. Please check your credentials and try again.';
 const GENERIC_RESET_RESPONSE = 'If the email exists, a password reset link has been sent.';
 
 export const getCurrentUser = (): string | null => {
-  return localStorage.getItem(SESSION_KEY);
+  return auth?.currentUser?.email || null;
 };
 
 if (auth) {
-  onAuthStateChanged(auth, (user) => {
-    if (user && user.emailVerified) {
-      localStorage.setItem(SESSION_KEY, user.email || '');
-    } else {
-      localStorage.removeItem(SESSION_KEY);
-    }
+  onAuthStateChanged(auth, () => {
+    // intentionally no business/session local persistence for incident hardening
   });
 }
 
@@ -37,7 +31,6 @@ export const login = async (email: string, password: string): Promise<{ success:
 
     if (!user.emailVerified) {
       await signOut(auth);
-      localStorage.removeItem(SESSION_KEY);
       return {
         success: false,
         requiresVerification: true,
@@ -60,7 +53,6 @@ export const login = async (email: string, password: string): Promise<{ success:
       }
     }
 
-    localStorage.setItem(SESSION_KEY, user.email || '');
     return { success: true };
   } catch (error: any) {
     console.error('Firebase Login Error:', error);
@@ -88,7 +80,6 @@ export const register = async (email: string, password: string, name: string): P
     await sendEmailVerification(user);
 
     await signOut(auth);
-    localStorage.removeItem(SESSION_KEY);
 
     return { success: true };
   } catch (error: any) {
@@ -135,6 +126,5 @@ export const logout = async () => {
   if (auth) {
     await signOut(auth);
   }
-  localStorage.removeItem(SESSION_KEY);
   window.location.reload();
 };

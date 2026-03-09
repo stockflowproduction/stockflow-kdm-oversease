@@ -3,7 +3,8 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
 import { Product } from '../types';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory } from '../services/storage';
+import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -13,6 +14,8 @@ export default function Admin() {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [storeName, setStoreName] = useState('StockFlow');
+  const [variantsMaster, setVariantsMaster] = useState<string[]>([]);
+  const [colorsMaster, setColorsMaster] = useState<string[]>([]);
   
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
@@ -36,7 +39,9 @@ export default function Admin() {
 
   // Form State
   const [formData, setFormData] = useState<any>({
-    name: '', barcode: '', buyPrice: '', sellPrice: '', stock: '', description: '', category: '', hsn: ''
+    name: '', barcode: '', buyPrice: '', sellPrice: '', stock: '', description: '', category: '', hsn: '',
+    variants: [] as string[], colors: [] as string[], stockByVariantColor: [] as Array<{ variant: string; color: string; stock: number }>,
+    variantInput: '', colorInput: ''
   });
   const [newCategoryName, setNewCategoryName] = useState('');
   const [editingCategory, setEditingCategory] = useState<string | null>(null);
@@ -52,6 +57,8 @@ export default function Admin() {
     setProducts(data.products);
     setCategories(data.categories);
     setStoreName(data.profile.storeName || 'StockFlow');
+    setVariantsMaster(data.variantsMaster || []);
+    setColorsMaster(data.colorsMaster || []);
   };
 
   useEffect(() => {
@@ -103,19 +110,29 @@ export default function Admin() {
     if (isSaving) return;
     // Strict Validation
     if (!formData.name || !formData.barcode || !formData.category || 
-        formData.buyPrice === '' || formData.sellPrice === '' || formData.stock === '') {
+        formData.buyPrice === '' || formData.sellPrice === '') {
         setError("Please fill in all required fields marked with *");
         return;
     }
     setError(null);
 
+    const hasCombos = Array.isArray(formData.stockByVariantColor) && formData.stockByVariantColor.length > 0;
+    const totalComboStock = hasCombos ? formData.stockByVariantColor.reduce((sum: number, row: any) => sum + (Number(row.stock) || 0), 0) : Number(formData.stock);
+
     const productPayload = {
       id: editingProduct ? editingProduct.id : Date.now().toString(),
-      image: formData.image || '', // Empty string if no image
-      ...formData,
+      image: formData.image || '',
+      name: formData.name,
+      barcode: formData.barcode,
+      description: formData.description || '',
+      category: formData.category,
+      hsn: formData.hsn || '',
       buyPrice: Number(formData.buyPrice),
       sellPrice: Number(formData.sellPrice),
-      stock: Number(formData.stock)
+      stock: Number(totalComboStock) || 0,
+      variants: hasCombos ? (formData.variants || []) : [],
+      colors: hasCombos ? (formData.colors || []) : [],
+      stockByVariantColor: hasCombos ? formData.stockByVariantColor : []
     } as Product;
 
     setIsSaving(true);
@@ -197,11 +214,45 @@ export default function Admin() {
       setEditingCategory(null);
   };
 
+
+
+  const rebuildStockRows = (nextVariants: string[], nextColors: string[]) => {
+    const variants = nextVariants.length ? nextVariants : [NO_VARIANT];
+    const colors = nextColors.length ? nextColors : [NO_COLOR];
+    const existingRows = Array.isArray(formData.stockByVariantColor) ? formData.stockByVariantColor : [];
+    const nextRows: Array<{ variant: string; color: string; stock: number }> = [];
+    variants.forEach(v => {
+      colors.forEach(c => {
+        const existing = existingRows.find((row: any) => row.variant === v && row.color === c);
+        nextRows.push({ variant: v, color: c, stock: Number(existing?.stock || 0) });
+      });
+    });
+    return nextRows;
+  };
+
+  const addVariantToForm = () => {
+    const value = (formData.variantInput || '').trim();
+    if (!value) return;
+    const nextMaster = addVariantMaster(value);
+    setVariantsMaster(nextMaster);
+    const nextVariants = Array.from(new Set([...(formData.variants || []), value]));
+    setFormData({ ...formData, variants: nextVariants, variantInput: '', stockByVariantColor: rebuildStockRows(nextVariants, formData.colors || []) });
+  };
+
+  const addColorToForm = () => {
+    const value = (formData.colorInput || '').trim();
+    if (!value) return;
+    const nextMaster = addColorMaster(value);
+    setColorsMaster(nextMaster);
+    const nextColors = Array.from(new Set([...(formData.colors || []), value]));
+    setFormData({ ...formData, colors: nextColors, colorInput: '', stockByVariantColor: rebuildStockRows(formData.variants || [], nextColors) });
+  };
+
   const openModal = (product?: Product) => {
     setError(null);
     if (product) {
       setEditingProduct(product);
-      setFormData(product);
+      setFormData({ ...product, variants: product.variants || [], colors: product.colors || [], stockByVariantColor: product.stockByVariantColor || [], variantInput: '', colorInput: '' });
     } else {
       setEditingProduct(null);
       setFormData({ 
@@ -212,7 +263,12 @@ export default function Admin() {
           stock: '', 
           description: '', 
           category: '',
-          hsn: ''
+          hsn: '',
+          variants: [],
+          colors: [],
+          stockByVariantColor: [],
+          variantInput: '',
+          colorInput: ''
       });
     }
     setIsModalOpen(true);
@@ -942,9 +998,56 @@ export default function Admin() {
                         </div>
                         <div className="space-y-2">
                             <Label>Stock Qty</Label>
-                            <Input type="number" value={formData.stock ?? ''} onChange={e => setFormData({...formData, stock: e.target.value})} placeholder="0" />
+                            {(!formData.variants?.length && !formData.colors?.length) ? (
+                              <Input type="number" value={formData.stock ?? ''} onChange={e => setFormData({...formData, stock: e.target.value})} placeholder="0" />
+                            ) : (
+                              <Input value={(formData.stockByVariantColor || []).reduce((sum: number, row: any) => sum + (Number(row.stock) || 0), 0)} readOnly />
+                            )}
                         </div>
                     </div>
+                </div>
+
+                <div className="p-4 bg-muted/20 rounded-lg border space-y-3">
+                    <h4 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Variant / Color (Optional)</h4>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <Label className="text-xs">Variant master</Label>
+                        <div className="flex gap-2 mt-1">
+                          <Input list="variant-master" value={formData.variantInput || ''} onChange={e => setFormData({ ...formData, variantInput: e.target.value })} placeholder="Search or add variant" />
+                          <Button type="button" variant="outline" onClick={addVariantToForm}>+</Button>
+                        </div>
+                        <datalist id="variant-master">{variantsMaster.map(v => <option key={v} value={v} />)}</datalist>
+                        <div className="mt-1 flex flex-wrap gap-1">{(formData.variants || []).map((v: string) => <span key={v}><Badge variant="outline">{v}</Badge></span>)}</div>
+                      </div>
+                      <div>
+                        <Label className="text-xs">Color master</Label>
+                        <div className="flex gap-2 mt-1">
+                          <Input list="color-master" value={formData.colorInput || ''} onChange={e => setFormData({ ...formData, colorInput: e.target.value })} placeholder="Search or add color" />
+                          <Button type="button" variant="outline" onClick={addColorToForm}>+</Button>
+                        </div>
+                        <datalist id="color-master">{colorsMaster.map(v => <option key={v} value={v} />)}</datalist>
+                        <div className="mt-1 flex flex-wrap gap-1">{(formData.colors || []).map((v: string) => <span key={v}><Badge variant="outline">{v}</Badge></span>)}</div>
+                      </div>
+                    </div>
+
+                    {(formData.variants?.length || formData.colors?.length) && (
+                      <div className="border rounded-md overflow-hidden">
+                        <div className="grid grid-cols-3 bg-muted px-2 py-1 text-xs font-semibold">
+                          <div>Variant</div><div>Color</div><div>Stock</div>
+                        </div>
+                        {(formData.stockByVariantColor || []).map((row: any, idx: number) => (
+                          <div className="grid grid-cols-3 px-2 py-1 border-t" key={`${row.variant}-${row.color}-${idx}`}>
+                            <div className="text-xs py-2">{row.variant || NO_VARIANT}</div>
+                            <div className="text-xs py-2">{row.color || NO_COLOR}</div>
+                            <Input type="number" min="0" value={row.stock} onChange={e => {
+                              const next = [...(formData.stockByVariantColor || [])];
+                              next[idx] = { ...next[idx], stock: Math.max(0, Number(e.target.value) || 0) };
+                              setFormData({ ...formData, stockByVariantColor: next });
+                            }} />
+                          </div>
+                        ))}
+                      </div>
+                    )}
                 </div>
                 
                 <div className="space-y-2">

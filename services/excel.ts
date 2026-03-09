@@ -1,6 +1,7 @@
 
 import * as XLSX from 'xlsx';
 import { Product, Transaction, Customer } from '../types';
+import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { loadData } from './storage';
 
 /**
@@ -18,6 +19,8 @@ export const exportProductsToExcel = (products: Product[]) => {
         'Barcode': p.barcode,
         'Product Name': p.name,
         'Category': p.category || '-',
+        'Variants': (p.variants || []).join(', ') || NO_VARIANT,
+        'Colors': (p.colors || []).join(', ') || NO_COLOR,
         'HSN/SAC': p.hsn || '-',
         'Buy Price (₹)': p.buyPrice,
         'Sell Price (₹)': p.sellPrice,
@@ -103,6 +106,8 @@ export const exportDetailedSalesToExcel = (transactions: Transaction[]) => {
                 'Type': t.type.toUpperCase(),
                 'Customer': t.customerName || 'Walk-in',
                 'Item Name': item.name,
+                'Variant': item.selectedVariant || NO_VARIANT,
+                'Color': item.selectedColor || NO_COLOR,
                 'Barcode': item.barcode,
                 'Quantity': item.quantity,
                 'Unit Price (₹)': item.sellPrice,
@@ -191,7 +196,7 @@ export const exportInvoiceToExcel = (transaction: Transaction) => {
     const itemsHeader = [['#', 'Item Name', 'HSN', 'Qty', 'Price', 'Discount', 'Total']];
     const itemsData = transaction.items.map((item, idx) => [
         idx + 1,
-        item.name,
+`${item.name} - ${item.selectedVariant || NO_VARIANT} - ${item.selectedColor || NO_COLOR}`,
         item.hsn || '-',
         item.quantity,
         item.sellPrice,

@@ -3,6 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer } from '../types';
+import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { loadData } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
@@ -21,12 +22,22 @@ export default function Transactions() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportType, setExportType] = useState<'summary' | 'invoice'>('summary');
   const [txToExport, setTxToExport] = useState<Transaction | null>(null);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     const refreshData = () => {
-      const data = loadData();
-      setTransactions(data.transactions);
-      setCustomers(data.customers);
+      try {
+        const data = loadData();
+        setTransactions(data.transactions);
+        setCustomers(data.customers);
+        setLoadError(null);
+      } catch (error) {
+        console.error('[transactions] load failed', error);
+        setLoadError('Unable to load transactions right now. Please try again.');
+      } finally {
+        setIsInitialLoading(false);
+      }
     };
 
     refreshData();
@@ -231,6 +242,16 @@ export default function Transactions() {
 
   return (
     <div className="space-y-6 pb-20 md:pb-0">
+      {isInitialLoading && (
+        <div className="space-y-3 p-1">
+          <div className="h-8 w-48 animate-pulse rounded bg-muted" />
+          <div className="h-24 animate-pulse rounded-xl bg-muted" />
+          <div className="h-24 animate-pulse rounded-xl bg-muted" />
+        </div>
+      )}
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{loadError}</div>
+      )}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
             <h1 className="text-3xl font-bold tracking-tight">Transactions</h1>
@@ -668,7 +689,7 @@ export default function Transactions() {
                                               <p className="font-medium text-sm">₹{((item.sellPrice * item.quantity) - (item.discountAmount || 0)).toFixed(2)}</p>
                                           </div>
                                           <div className="flex justify-between items-center mt-1">
-                                              <p className="text-xs text-muted-foreground">SKU: {item.barcode}</p>
+                                              <p className="text-xs text-muted-foreground">SKU: {item.barcode} • {item.selectedVariant || NO_VARIANT} / {item.selectedColor || NO_COLOR}</p>
                                               <div className="flex flex-col items-end">
                                                   <Badge variant="secondary" className="text-[10px] h-4 px-1.5 font-normal">
                                                       {item.quantity} x ₹{item.sellPrice}

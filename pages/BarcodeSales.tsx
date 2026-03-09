@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
+import { formatItemNameWithVariant, getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
@@ -32,6 +33,7 @@ export default function BarcodeSales() {
 
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerTab, setCustomerTab] = useState<'search' | 'new'>('search');
+  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number }> }>({ open: false, product: null, rows: [] });
   const [transactionComplete, setTransactionComplete] = useState<Transaction | null>(null);
   
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -102,7 +104,7 @@ export default function BarcodeSales() {
     const product = loadData().products.find(p => p.barcode.toLowerCase() === targetCode.toLowerCase() || p.id === targetCode);
     if (product) {
         const currentCart = cartRef.current;
-        const inCart = currentCart.find(c => c.id === product.id)?.quantity || 0;
+        const inCart = currentCart.filter(c => c.id === product.id).reduce((sum, c) => sum + c.quantity, 0);
         let error = null;
         if (isReturnMode) {
             const sold = product.totalSold || 0;
@@ -129,59 +131,70 @@ export default function BarcodeSales() {
                 setTimeout(() => setScanMessage(null), 1500);
             }
         } else {
-            addToCart(product, explicitQty);
+            const rows = getProductStockRows(product).filter(r => r.stock > 0);
+        if (productHasCombinationStock(product)) {
+            const selected = rows[0];
+            if (!selected) { setCartError('Out of stock!'); return; }
+            addToCart(product, explicitQty, selected.variant, selected.color);
+        } else {
+            addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
+        }
             if (isScan) { isScanLocked.current = true; setScanMessage({ type: 'success', text: `${product.name} Added` }); setTimeout(() => { setScanMessage(null); isScanLocked.current = false; }, 1500); }
         }
     } else if (isScan) { isScanLocked.current = true; setScanMessage({ type: 'error', text: "Unknown Product" }); setTimeout(() => { setScanMessage(null); isScanLocked.current = false; }, 2000); }
   };
 
-  const addToCart = (product: Product, qty: number) => {
+  const lineKey = (id: string, variant?: string, color?: string) => `${id}__${variant || NO_VARIANT}__${color || NO_COLOR}`;
+
+  const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
     setCart(prev => {
-        const existing = prev.find(item => item.id === product.id);
+        const existing = prev.find(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(product.id, selectedVariant, selectedColor));
         if (existing) {
             const newQty = existing.quantity + qty;
             if (newQty <= 0) return prev.filter(item => item.id !== product.id);
-            return prev.map(item => item.id === product.id ? { ...item, quantity: newQty } : item);
+            return prev.map(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(product.id, selectedVariant, selectedColor) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0 }];
+        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
     });
   };
 
-  const updateQuantity = (id: string, delta: number) => {
-      const item = cart.find(i => i.id === id);
+  const updateQuantity = (id: string, delta: number, variant?: string, color?: string) => {
+      const key = lineKey(id, variant, color);
+      const item = cart.find(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key);
       const product = products.find(p => p.id === id);
       if (!item || !product) return;
       const newQty = item.quantity + delta;
-      if (newQty <= 0) { setCart(prev => prev.filter(i => i.id !== id)); return; }
+      if (newQty <= 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
       if (delta > 0) {
           if (isReturnMode) { const sold = product.totalSold || 0; if (sold < newQty) { setCartError(`Max return: ${sold}`); return; } }
           else { if (product.stock < newQty) { setCartError(`Stock limit: ${product.stock}`); return; } }
       }
-      setCart(prev => prev.map(i => i.id === id ? { ...i, quantity: newQty } : i));
+      setCart(prev => prev.map(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key ? { ...i, quantity: newQty } : i));
   };
 
-  const setManualQuantity = (id: string, value: string) => {
+  const setManualQuantity = (id: string, value: string, variant?: string, color?: string) => {
       const num = parseInt(value) || 0;
-      const item = cart.find(i => i.id === id);
+      const key = lineKey(id, variant, color);
+      const item = cart.find(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key);
       const product = products.find(p => p.id === id);
       if (!item || !product) return;
       if (num < 0) return;
-      if (num === 0) { setCart(prev => prev.filter(i => i.id !== id)); return; }
+      if (num === 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
       if (isReturnMode) {
           const sold = product.totalSold || 0;
           if (sold < num) { setCartError(`Max return: ${sold}`); return; }
       } else {
           if (product.stock < num) { setCartError(`Stock limit: ${product.stock}`); return; }
       }
-      setCart(prev => prev.map(i => i.id === id ? { ...i, quantity: num } : i));
+      setCart(prev => prev.map(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key ? { ...i, quantity: num } : i));
   };
 
-  const updatePrice = (id: string, value: string) => {
+  const updatePrice = (id: string, value: string, variant?: string, color?: string) => {
       const num = value === '' ? 0 : parseFloat(value);
       if (isNaN(num) || num < 0) return;
       setCart(prev => prev.map(i => {
-          if (i.id !== id) return i;
+          if (lineKey(i.id, i.selectedVariant, i.selectedColor) !== lineKey(id, variant, color)) return i;
           const newGross = num * i.quantity;
           let newAmount = i.discountAmount || 0;
           let newPercent = i.discountPercent || 0;
@@ -194,10 +207,10 @@ export default function BarcodeSales() {
       }));
   };
 
-  const updateDiscount = (id: string, val: string | number, type: 'percent' | 'amount') => {
+  const updateDiscount = (id: string, val: string | number, type: 'percent' | 'amount', variant?: string, color?: string) => {
       const numVal = parseFloat(val.toString()) || 0;
       setCart(prev => prev.map(i => {
-          if (i.id !== id) return i;
+          if (lineKey(i.id, i.selectedVariant, i.selectedColor) !== lineKey(id, variant, color)) return i;
           let newPercent = i.discountPercent || 0;
           let newAmount = i.discountAmount || 0;
           const gross = i.sellPrice * i.quantity;
@@ -207,9 +220,24 @@ export default function BarcodeSales() {
       }));
   };
 
+
+  const hasOpenShift = () => {
+      const sessions = loadData().cashSessions || [];
+      return sessions.some(session => session.status === 'open');
+  };
+
+  const validateOpenShiftForPos = () => {
+      if (hasOpenShift()) return true;
+      const message = 'Shift is closed. Start a shift in Finance before making a transaction.';
+      setCheckoutError(message);
+      setCartError(message);
+      return false;
+  };
+
   const initiateCheckout = (e?: React.MouseEvent) => {
       e?.stopPropagation();
       if (cart.length === 0) return;
+      if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
       if (isReturnMode) setPaymentMethod('Cash');
       setIsCustomerModalOpen(true);
@@ -217,6 +245,7 @@ export default function BarcodeSales() {
 
   const completeCheckout = () => {
       setCheckoutError(null);
+      if (!validateOpenShiftForPos()) return;
       let finalCustomer = selectedCustomer;
       if (customerTab === 'new') {
           const nameTrimmed = newCustomerName.trim();
@@ -227,8 +256,17 @@ export default function BarcodeSales() {
           const alreadyExists = customers.some(c => c.name.toLowerCase().trim() === nameTrimmed.toLowerCase() && c.phone.replace(/\D/g, '') === phoneClean);
           if (alreadyExists) { setCheckoutError("Customer with this name and number already exists."); return; }
           const freshCustomer: Customer = { id: Date.now().toString(), name: nameTrimmed, phone: phoneTrimmed, totalSpend: 0, totalDue: 0, lastVisit: new Date().toISOString(), visitCount: 0 };
-          addCustomer(freshCustomer);
-          finalCustomer = freshCustomer;
+          try {
+              const createdCustomers = addCustomer(freshCustomer);
+              finalCustomer = createdCustomers.find(c => c.id === freshCustomer.id) || freshCustomer;
+              setSelectedCustomer(finalCustomer);
+              setCustomerSearch(finalCustomer.name);
+              setCustomerTab('search');
+          } catch (error) {
+              console.error('[barcode-sales] add customer failed', error);
+              setCheckoutError(error instanceof Error ? error.message : 'Failed to create customer. Please try again.');
+              return;
+          }
       }
       if (isReturnMode && finalCustomer) {
           for (const item of cart) {
@@ -245,9 +283,12 @@ export default function BarcodeSales() {
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedAmount = Number(cashReceived);
-          if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
-          currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+          const receivedValue = cashReceived.trim();
+          if (receivedValue) {
+              const receivedAmount = Number(receivedValue);
+              if (!Number.isFinite(receivedAmount) || receivedAmount < total) { setCheckoutError('Received amount is less than total bill.'); return; }
+              currentCashDetails = { cashReceived: receivedAmount, changeReturned: receivedAmount - total };
+          }
       }
       const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
       const newState = processTransaction(tx);
@@ -304,6 +345,39 @@ export default function BarcodeSales() {
         </div>
       </div>
 
+
+      {variantPicker.open && variantPicker.product && (
+          <div className="fixed inset-0 bg-black/70 z-[95] flex items-center justify-center p-4" onClick={() => setVariantPicker({ open: false, product: null, rows: [] })}>
+              <Card className="w-full max-w-md" onClick={e => e.stopPropagation()}>
+                  <CardHeader><CardTitle>{variantPicker.product.name} Variants</CardTitle></CardHeader>
+                  <CardContent className="space-y-3">
+                      {variantPicker.rows.map((row, idx) => {
+                          const disabled = row.stock <= 0;
+                          const label = formatItemNameWithVariant('', row.variant, row.color).replace(/^ - /, '');
+                          return (
+                              <div key={`${row.variant}-${row.color}-${idx}`} className="flex items-center justify-between border rounded p-2">
+                                  <div><div className="font-medium text-sm">{label}</div><div className="text-xs text-muted-foreground">Stock: {row.stock}</div></div>
+                                  <div className="flex items-center gap-2">
+                                      <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty <= 0} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.max(0, r.qty - 1) } : r) }))}><Minus className="w-3 h-3" /></Button>
+                                      <div className="w-8 text-center text-sm font-bold">{row.qty}</div>
+                                      <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty >= row.stock} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.min(r.stock, r.qty + 1) } : r) }))}><Plus className="w-3 h-3" /></Button>
+                                  </div>
+                              </div>
+                          );
+                      })}
+                      <div className="flex justify-end gap-2">
+                          <Button variant="outline" onClick={() => setVariantPicker({ open: false, product: null, rows: [] })}>Cancel</Button>
+                          <Button onClick={() => {
+                              if (!variantPicker.product) return;
+                              variantPicker.rows.filter(r => r.qty > 0).forEach(r => addToCart(variantPicker.product as Product, r.qty, r.variant, r.color));
+                              setVariantPicker({ open: false, product: null, rows: [] });
+                          }}>Confirm</Button>
+                      </div>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
       <div className={`md:col-span-4 flex flex-col h-full transition-all duration-300 ${isCartExpanded ? 'fixed inset-0 bg-background z-[70]' : 'fixed bottom-16 left-0 right-0 h-16 md:static md:h-full md:bg-transparent z-40'}`}>
           <div className={`flex flex-col h-full bg-card md:rounded-xl md:border shadow-xl md:shadow-sm overflow-hidden ${isReturnMode ? 'border-orange-200' : 'border-border'}`}>
               <div className={`p-4 flex items-center justify-between cursor-pointer md:cursor-default ${isReturnMode ? 'bg-orange-50' : 'bg-muted/30'}`} onClick={() => window.innerWidth < 768 && setIsCartExpanded(!isCartExpanded)}>
@@ -320,32 +394,32 @@ export default function BarcodeSales() {
                   {cart.length === 0 ? (
                       <div className="h-full flex flex-col items-center justify-center text-muted-foreground/40 space-y-2"><ShoppingCart className="w-12 h-12" /><p className="text-sm font-medium">Cart is empty</p></div>
                   ) : cart.map(item => (
-                      <div key={item.id} className="flex flex-col gap-3 p-3 rounded-xl border bg-card shadow-sm hover:border-primary/20 transition-all">
+                      <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}`} className="flex flex-col gap-3 p-3 rounded-xl border bg-card shadow-sm hover:border-primary/20 transition-all">
                           <div className="flex gap-3">
                               <div className="h-12 w-12 shrink-0 bg-muted rounded-lg border overflow-hidden">
                                 {item.image ? <img src={item.image} alt="" className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-20" />}
                               </div>
                               <div className="flex-1 min-w-0">
-                                  <p className="font-bold text-sm truncate leading-tight mb-1">{item.name}</p>
+                                  <p className="font-bold text-sm truncate leading-tight mb-1">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
                                   <div className="flex items-center gap-1">
                                       <span className="text-xs text-muted-foreground">₹</span>
-                                      <Input className="h-6 w-20 px-1 py-0 text-xs font-medium bg-transparent border-muted-foreground/30 focus-visible:ring-1" value={item.sellPrice ?? ''} type="number" onChange={(e) => updatePrice(String(item.id), e.target.value)} />
+                                      <Input className="h-6 w-20 px-1 py-0 text-xs font-medium bg-transparent border-muted-foreground/30 focus-visible:ring-1" value={item.sellPrice ?? ''} type="number" onChange={(e) => updatePrice(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)} />
                                   </div>
                               </div>
                               <div className="text-right shrink-0"><p className="font-bold text-sm text-primary">₹{(item.sellPrice * item.quantity).toFixed(0)}</p></div>
                           </div>
                           <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center rounded-lg border h-8 overflow-hidden bg-background">
-                                  <button className="px-2 h-full hover:bg-muted border-r transition-colors" onClick={() => updateQuantity(String(item.id), -1)}><Minus className="w-3.5 h-3.5" /></button>
-                                  <Input className="w-10 h-full border-0 text-center text-sm font-bold p-0 bg-transparent focus-visible:ring-0" value={item.quantity ?? ''} type="number" onChange={(e) => setManualQuantity(String(item.id), e.target.value)} />
-                                  <button className="px-2 h-full hover:bg-muted border-l transition-colors" onClick={() => updateQuantity(String(item.id), 1)}><Plus className="w-3.5 h-3.5" /></button>
+                                  <button className="px-2 h-full hover:bg-muted border-r transition-colors" onClick={() => updateQuantity(String(item.id), -1, item.selectedVariant, item.selectedColor)}><Minus className="w-3.5 h-3.5" /></button>
+                                  <Input className="w-10 h-full border-0 text-center text-sm font-bold p-0 bg-transparent focus-visible:ring-0" value={item.quantity ?? ''} type="number" onChange={(e) => setManualQuantity(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)} />
+                                  <button className="px-2 h-full hover:bg-muted border-l transition-colors" onClick={() => updateQuantity(String(item.id), 1, item.selectedVariant, item.selectedColor)}><Plus className="w-3.5 h-3.5" /></button>
                               </div>
                               <div className="flex items-center gap-2 ml-auto">
                                   <div className="flex items-center rounded-lg border h-8 bg-background px-2 group">
-                                      <Input className="h-full w-8 border-0 text-center text-xs p-0 bg-transparent focus-visible:ring-0" placeholder="0" value={item.discountPercent ?? ''} onChange={(e) => updateDiscount(String(item.id), e.target.value, 'percent')} />
+                                      <Input className="h-full w-8 border-0 text-center text-xs p-0 bg-transparent focus-visible:ring-0" placeholder="0" value={item.discountPercent ?? ''} onChange={(e) => updateDiscount(String(item.id), e.target.value, 'percent', item.selectedVariant, item.selectedColor)} />
                                       <span className="text-[10px] font-bold text-muted-foreground">%</span>
                                   </div>
-                                  <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg hover:bg-destructive/10 hover:text-destructive" onClick={() => updateQuantity(String(item.id), -item.quantity)}><Trash2 className="w-4 h-4" /></Button>
+                                  <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg hover:bg-destructive/10 hover:text-destructive" onClick={() => updateQuantity(String(item.id), -item.quantity, item.selectedVariant, item.selectedColor)}><Trash2 className="w-4 h-4" /></Button>
                               </div>
                           </div>
                       </div>

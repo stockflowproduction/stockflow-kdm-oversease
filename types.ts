@@ -11,12 +11,21 @@ export interface Product {
   category: string;
   totalSold?: number;
   hsn?: string;
+  variants?: string[];
+  colors?: string[];
+  stockByVariantColor?: Array<{
+    variant: string;
+    color: string;
+    stock: number;
+  }>;
 }
 
 export interface CartItem extends Product {
   quantity: number;
   discountPercent?: number;
   discountAmount?: number;
+  selectedVariant?: string;
+  selectedColor?: string;
 }
 
 export interface Customer {
@@ -63,6 +72,7 @@ export interface StoreProfile {
   defaultTaxLabel?: string;
   signatureImage?: string; // Base64 encoded signature
   invoiceFormat?: 'standard' | 'thermal';
+  adminPin?: string;
 }
 
 export interface AdminUser {
@@ -96,7 +106,9 @@ export interface CashSession {
   openingBalance: number;
   closingBalance?: number;
   systemCashTotal?: number;
+  sessionExpenseTotal?: number;
   difference?: number;
+  closingDenominationCounts?: Record<string, number>;
   status: 'open' | 'closed';
 }
 
@@ -109,6 +121,233 @@ export interface Expense {
   createdAt: string;
 }
 
+
+export type FreightInquiryStatus = 'draft' | 'saved' | 'confirmed' | 'converted';
+export type ProcurementSourceType = 'inventory' | 'new';
+export type FreightConfirmedOrderStatus = 'draft' | 'confirmed' | 'converted_to_purchase' | 'cancelled';
+export type FreightPurchaseStatus = 'draft' | 'approved' | 'partially_received' | 'received' | 'cancelled';
+
+export interface ProcurementLineSnapshot {
+  id: string;
+  sourceType: ProcurementSourceType;
+  sourceProductId?: string;
+  barcode?: string;
+  productPhoto?: string;
+  productName: string;
+  variant?: string;
+  color?: string;
+  category?: string;
+  hsn?: string;
+  baseProductDetails?: string;
+  quantity: number;
+  piecesPerCartoon?: number;
+  numberOfCartoons?: number;
+  rmbPricePerPiece?: number;
+  inrPricePerPiece?: number;
+  exchangeRate?: number;
+  cbmPerCartoon?: number;
+  cbmRate?: number;
+  cbmCost?: number;
+  cbmPerPiece?: number;
+  productCostPerPiece?: number;
+  sellingPrice?: number;
+  profitPerPiece?: number;
+  profitPercent?: number;
+  notes?: string;
+}
+
+export interface FreightBroker {
+  id: string;
+  name: string;
+  phone?: string;
+  email?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type VariantSelectionMode = 'none' | 'exact' | 'unknown';
+export type InquiryPricingMode = 'common' | 'line_wise';
+export type InquiryQuantityMode = 'order_level' | 'line_level';
+export type InquiryFreightMode = 'order_level' | 'line_level';
+export type InquiryCbmInputMode = 'from_cartons' | 'manual_total';
+
+export interface FreightInquiry {
+  id: string;
+  status: FreightInquiryStatus;
+  source: 'inventory' | 'new';
+  sourceProductId?: string;
+  inventoryProductId?: string;
+  productPhoto?: string;
+  productName: string;
+  variant?: string;
+  color?: string;
+  category?: string;
+  baseProductDetails?: string;
+  orderType: 'in_house' | 'customer_trade';
+  brokerId?: string;
+  brokerName?: string;
+  brokerType: 'broker' | 'owner';
+  totalPieces: number;
+  piecesPerCartoon: number;
+  numberOfCartoons: number;
+  rmbPricePerPiece: number;
+  totalRmb: number;
+  inrPricePerPiece: number;
+  totalInr: number;
+  exchangeRate: number;
+  freightPerCbm: number;
+  cbmPerCartoon: number;
+  totalCbm: number;
+  cbmRate: number;
+  cbmCost: number;
+  cbmPerPiece: number;
+  productCostPerPiece: number;
+  sellingPrice: number;
+  profitPerPiece: number;
+  profitPercent: number;
+  futureOrderId?: string;
+  convertedAt?: string;
+  convertedBy?: string;
+  isDeleted?: boolean;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt: string;
+  updatedBy?: string;
+  variantSelectionMode?: VariantSelectionMode;
+  pricingMode?: InquiryPricingMode;
+  quantityMode?: InquiryQuantityMode;
+  freightMode?: InquiryFreightMode;
+  cbmInputMode?: InquiryCbmInputMode;
+  lines?: ProcurementLineSnapshot[];
+}
+
+export interface FreightConfirmedOrder {
+  id: string;
+  status: FreightConfirmedOrderStatus;
+  sourceInquiryId: string;
+  sourceProductId?: string;
+  source: ProcurementSourceType;
+  inventoryProductId?: string;
+  productPhoto?: string;
+  productName: string;
+  variant?: string;
+  color?: string;
+  category?: string;
+  orderType: 'in_house' | 'customer_trade';
+  brokerId?: string;
+  brokerName?: string;
+  brokerType: 'broker' | 'owner';
+  totalPieces: number;
+  piecesPerCartoon: number;
+  numberOfCartoons: number;
+  rmbPricePerPiece: number;
+  totalRmb: number;
+  inrPricePerPiece: number;
+  totalInr: number;
+  exchangeRate: number;
+  freightPerCbm: number;
+  cbmPerCartoon: number;
+  totalCbm: number;
+  cbmRate: number;
+  cbmCost: number;
+  cbmPerPiece: number;
+  productCostPerPiece: number;
+  sellingPrice: number;
+  profitPerPiece: number;
+  profitPercent: number;
+  purchaseId?: string;
+  isDeleted?: boolean;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt: string;
+  updatedBy?: string;
+  lines: ProcurementLineSnapshot[];
+}
+
+export interface FreightPurchase {
+  id: string;
+  status: FreightPurchaseStatus;
+  sourceConfirmedOrderId: string;
+  sourceInquiryId?: string;
+  sourceProductId?: string;
+  source: ProcurementSourceType;
+  inventoryProductId?: string;
+  productPhoto?: string;
+  productName: string;
+  variant?: string;
+  color?: string;
+  category?: string;
+  orderType: 'in_house' | 'customer_trade';
+  brokerId?: string;
+  brokerName?: string;
+  brokerType: 'broker' | 'owner';
+  totalPieces: number;
+  piecesPerCartoon: number;
+  numberOfCartoons: number;
+  rmbPricePerPiece: number;
+  totalRmb: number;
+  inrPricePerPiece: number;
+  totalInr: number;
+  exchangeRate: number;
+  freightPerCbm: number;
+  cbmPerCartoon: number;
+  totalCbm: number;
+  cbmRate: number;
+  cbmCost: number;
+  cbmPerPiece: number;
+  productCostPerPiece: number;
+  sellingPrice: number;
+  profitPerPiece: number;
+  profitPercent: number;
+  isDeleted?: boolean;
+  createdAt: string;
+  createdBy?: string;
+  updatedAt: string;
+  updatedBy?: string;
+  lines: ProcurementLineSnapshot[];
+}
+
+export interface PurchaseReceiptInventoryDelta {
+  lineId: string;
+  sourceProductId?: string;
+  productId: string;
+  variant?: string;
+  color?: string;
+  quantityDelta: number;
+  autoCreatedProduct?: boolean;
+}
+
+export interface PurchaseReceiptPosting {
+  id: string;
+  sourcePurchaseId: string;
+  sourceConfirmedOrderId?: string;
+  sourceInquiryId?: string;
+  postedAt: string;
+  postedBy?: string;
+  note?: string;
+  deltas: PurchaseReceiptInventoryDelta[];
+}
+
+export interface ExpenseActivity {
+  id: string;
+  action: 'add_expense' | 'delete_expense' | 'add_category' | 'delete_category';
+  message: string;
+  createdAt: string;
+}
+
+
+export interface CustomerProductStatsBackfillMarker {
+  status: 'pending' | 'completed';
+  completedAt?: string;
+  version?: string;
+  strictModeEnabled?: boolean;
+}
+
+export interface MigrationMarkers {
+  customerProductStatsBackfill?: CustomerProductStatsBackfillMarker;
+}
+
 export interface AppState {
   products: Product[];
   transactions: Transaction[];
@@ -119,6 +358,15 @@ export interface AppState {
   cashSessions?: CashSession[];
   expenses?: Expense[];
   expenseCategories?: string[];
+  expenseActivities?: ExpenseActivity[];
+  freightInquiries?: FreightInquiry[];
+  freightConfirmedOrders?: FreightConfirmedOrder[];
+  freightPurchases?: FreightPurchase[];
+  purchaseReceiptPostings?: PurchaseReceiptPosting[];
+  freightBrokers?: FreightBroker[];
+  variantsMaster?: string[];
+  colorsMaster?: string[];
+  migrationMarkers?: MigrationMarkers;
 }
 
 export const TAX_OPTIONS = [

@@ -3,6 +3,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer } from '../types';
 import { loadData } from './storage';
+import { NO_COLOR, NO_VARIANT } from './productVariants';
 
 type ReceiptPaymentDetails = {
     cashReceived?: number;
@@ -84,7 +85,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     // --- Items Table ---
     const tableData = transaction.items.map((item, idx) => [
         idx + 1,
-        item.name,
+        `${item.name} - ${item.selectedVariant || NO_VARIANT} - ${item.selectedColor || NO_COLOR}`,
         item.hsn || "-",
         item.quantity,
         `Rs. ${item.sellPrice.toFixed(2)}`,
@@ -384,7 +385,7 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
         <tr>
           <td>${idx + 1}</td>
           <td>
-            <strong>${item.name}</strong>
+            <strong>${item.name}${item.selectedVariant && item.selectedVariant !== NO_VARIANT ? ` - ${item.selectedVariant}` : ''}${item.selectedColor && item.selectedColor !== NO_COLOR ? ` - ${item.selectedColor}` : ''}</strong>
             ${item.hsn ? `<br><small>HSN: ${item.hsn}</small>` : ''}
           </td>
           <td>${item.quantity}</td>
