@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { addCategory, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
-import { FreightBroker, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
+import { addCategory, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
+import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
 import { getProductStockRows } from '../services/productVariants';
 import { AlertTriangle, ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, Clock3, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
 
@@ -58,6 +58,7 @@ export default function FreightBooking() {
   const [activeTab, setActiveTab] = useState<FreightTab>('inquiries');
   const [products, setProducts] = useState<Product[]>([]);
   const [inquiries, setInquiries] = useState<FreightInquiry[]>([]);
+  const [confirmedOrders, setConfirmedOrders] = useState<FreightConfirmedOrder[]>([]);
   const [brokers, setBrokers] = useState<FreightBroker[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
 
@@ -94,13 +95,28 @@ export default function FreightBooking() {
   const [cbmMode, setCbmMode] = useState<CbmMode>('undecided');
   const [cartonCbmDrafts, setCartonCbmDrafts] = useState<Record<string, CartonCbmDraft>>({});
   const [showConfirmSave, setShowConfirmSave] = useState(false);
+  const [convertingInquiryId, setConvertingInquiryId] = useState<string | null>(null);
 
   const refresh = () => {
     const data = loadData();
     setProducts(data.products || []);
     setCategories(data.categories || []);
     setInquiries(getFreightInquiries());
+    setConfirmedOrders(getFreightConfirmedOrders());
     setBrokers(getFreightBrokers());
+  };
+
+  const convertToConfirmedOrder = async (inquiry: FreightInquiry) => {
+    if (convertingInquiryId) return;
+    setConvertingInquiryId(inquiry.id);
+    try {
+      await convertInquiryToConfirmedOrder(inquiry.id);
+      refresh();
+    } catch (error: any) {
+      alert(error?.message || 'Unable to convert inquiry to confirmed order.');
+    } finally {
+      setConvertingInquiryId(null);
+    }
   };
 
   useEffect(() => {
@@ -521,7 +537,43 @@ export default function FreightBooking() {
       </div>
 
       {activeTab === 'orders' && (
-        <Card><CardContent className="pt-6 text-sm text-muted-foreground">Orders tab is reserved for future confirmed order flow.</CardContent></Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Confirmed Orders</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-slate-700">Ready to confirm from inquiries</div>
+              {inquiries.filter(inquiry => !confirmedOrders.some(order => order.sourceInquiryId === inquiry.id)).slice(0, 8).map(inquiry => (
+                <div key={inquiry.id} className="flex flex-col gap-2 rounded-xl border p-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="font-medium text-slate-900">{inquiry.productName}</div>
+                    <div className="text-xs text-muted-foreground">{inquiry.category || '—'} · {formatNumber(inquiry.totalPieces || 0, 0)} pcs · ₹{formatNumber(inquiry.totalInr || 0)}</div>
+                  </div>
+                  <Button size="sm" onClick={() => convertToConfirmedOrder(inquiry)} disabled={!!convertingInquiryId}>
+                    {convertingInquiryId === inquiry.id ? 'Converting...' : 'Confirm Order'}
+                  </Button>
+                </div>
+              ))}
+              {!inquiries.some(inquiry => !confirmedOrders.some(order => order.sourceInquiryId === inquiry.id)) && (
+                <div className="text-sm text-muted-foreground">All inquiries are already converted.</div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-slate-700">Existing confirmed orders</div>
+              {confirmedOrders.map(order => (
+                <div key={order.id} className="rounded-xl border p-3">
+                  <div className="font-medium text-slate-900">{order.productName}</div>
+                  <div className="text-xs text-muted-foreground">
+                    Status: {order.status} · {formatNumber(order.totalPieces || 0, 0)} pcs · ₹{formatNumber(order.totalInr || 0)} · {new Date(order.updatedAt || order.createdAt).toLocaleDateString('en-GB')}
+                  </div>
+                </div>
+              ))}
+              {!confirmedOrders.length && <div className="text-sm text-muted-foreground">No confirmed orders yet.</div>}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {activeTab === 'brokers' && (

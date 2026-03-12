@@ -19,6 +19,7 @@ export default function handler(req: any, res: any) {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
   const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  const uploadFolder = (process.env.CLOUDINARY_UPLOAD_FOLDER || 'stockflow/products').trim();
 
   if (!cloudName || !apiKey || !apiSecret) {
     res.status(500).json(JSON.parse(serverError.body));
@@ -28,13 +29,14 @@ export default function handler(req: any, res: any) {
   const timestamp = Math.floor(Date.now() / 1000);
   const signature = crypto
     .createHash('sha1')
-    .update(`timestamp=${timestamp}${apiSecret}`)
+    .update(`folder=${uploadFolder}&timestamp=${timestamp}${apiSecret}`)
     .digest('hex');
 
   res.status(200).json({
     timestamp,
     signature,
     apiKey,
-    cloudName
+    cloudName,
+    uploadFolder
   });
 }

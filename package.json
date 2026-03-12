@@ -9,7 +9,9 @@
     "lint": "tsc --noEmit",
     "preview": "vite preview",
     "migrate-images": "node scripts/migrate-images-to-cloudinary.js",
-    "backfill:customer-product-stats": "node scripts/backfill-customer-product-stats.js"
+    "backfill:customer-product-stats": "node scripts/backfill-customer-product-stats.js",
+    "verify:customer-product-stats-backfill": "node scripts/verify-customer-product-stats-backfill.js",
+    "verify:image-migration-status": "node scripts/verify-image-migration-status.js"
   },
   "dependencies": {
     "@google/genai": "^1.31.0",
