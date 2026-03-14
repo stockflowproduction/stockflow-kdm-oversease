@@ -40,6 +40,8 @@ export function UploadImportModal({ title, open, onClose, onDownloadTemplate, on
   const moduleNotes: Record<string, string[]> = {
     'Import Inventory': [
       'Most exported product fields are editable and import-supported.',
+      'This file can set opening baseline values: Total Purchase, Total Sold, and Current Stock.',
+      'Current Stock must equal Total Purchase - Total Sold for every row.',
       'Product ID / Barcode are used to match existing records during updates.',
     ],
     'Import Customers': [

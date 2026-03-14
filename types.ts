@@ -9,6 +9,7 @@ export interface Product {
   stock: number;
   image: string; // Base64 or URL
   category: string;
+  totalPurchase?: number;
   totalSold?: number;
   hsn?: string;
   variants?: string[];

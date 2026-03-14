@@ -1293,7 +1293,7 @@ export const resetData = () => {
 
 export const addProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: 0 });
+  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: Math.max(0, Number(product.totalSold) || 0), totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0) });
   const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = [...data.products.filter(p => p.id !== preparedProduct.id), preparedProduct];
 
@@ -1321,7 +1321,7 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
 
 export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const sanitized = sanitizeVariantColorStock(product);
+  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: Math.max(0, Number(product.totalSold) || 0), totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0) });
   const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
 

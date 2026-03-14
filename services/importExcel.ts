@@ -120,8 +120,8 @@ const runThrottled = async <T>(items: T[], worker: (item: T, index: number) => P
 
 export const downloadInventoryTemplate = () => writeTemplate(
   'Inventory',
-  ['Product ID', 'Barcode', 'Product Name', 'Category', 'Buy Price', 'Sell Price', 'Stock', 'HSN/SAC', 'Image Source', 'Description'],
-  ['product-001', 'SKU-1001', 'Cotton Shirt', 'Apparel', 250, 499, 20, '6109', 'https://example.com/images/shirt.jpg', 'Regular fit cotton shirt'],
+  ['Product ID', 'Barcode', 'Product Name', 'Category', 'Buy Price', 'Sell Price', 'Total Purchase', 'Total Sold', 'Current Stock', 'HSN/SAC', 'Image Source', 'Description'],
+  ['product-001', 'SKU-1001', 'Cotton Shirt', 'Apparel', 250, 499, 30, 10, 20, '6109', 'https://example.com/images/shirt.jpg', 'Regular fit cotton shirt'],
   [
     { field: 'Product ID', behavior: 'Lookup-only', required: 'Preferred', format: 'Text', notes: 'Stable identity for update matching. Keep unchanged for existing records.', example: 'product-001' },
     { field: 'Barcode', behavior: 'Editable', required: 'Mandatory', format: 'Text', notes: 'Must be unique. Duplicate barcode rows are rejected.', example: 'SKU-1001' },
@@ -129,7 +129,9 @@ export const downloadInventoryTemplate = () => writeTemplate(
     { field: 'Category', behavior: 'Editable', required: 'Mandatory', format: 'Text', notes: 'Will be auto-created if not present.', example: 'Apparel' },
     { field: 'Buy Price', behavior: 'Editable', required: 'Mandatory', format: 'Number >= 0', notes: 'Cost price.', example: '250' },
     { field: 'Sell Price', behavior: 'Editable', required: 'Mandatory', format: 'Number >= 0', notes: 'Selling price.', example: '499' },
-    { field: 'Stock', behavior: 'Editable', required: 'Mandatory', format: 'Number >= 0', notes: 'Opening stock quantity.', example: '20' },
+    { field: 'Total Purchase', behavior: 'Editable', required: 'Optional', format: 'Number >= 0', notes: 'Opening/baseline total purchased quantity.', example: '30' },
+    { field: 'Total Sold', behavior: 'Editable', required: 'Optional', format: 'Number >= 0', notes: 'Opening/baseline total sold quantity.', example: '10' },
+    { field: 'Current Stock', behavior: 'Editable', required: 'Mandatory', format: 'Number >= 0', notes: 'Current stock quantity. Must equal Total Purchase - Total Sold.', example: '20' },
     { field: 'HSN/SAC', behavior: 'Editable', required: 'Optional', format: 'Text', notes: 'Tax code.', example: '6109' },
     { field: 'Image Source', behavior: 'Editable', required: 'Optional', format: 'Cloudinary URL | public https image URL | data:image base64', notes: 'Public URL is fetched and uploaded to Cloudinary. Local file paths are not supported.', example: 'https://example.com/images/shirt.jpg' },
     { field: 'Description', behavior: 'Editable', required: 'Optional', format: 'Text', notes: 'Product notes.', example: 'Regular fit cotton shirt' },
@@ -204,7 +206,9 @@ export const downloadInventoryData = () => {
     'Category': p.category || '',
     'Buy Price': p.buyPrice,
     'Sell Price': p.sellPrice,
-    'Stock': p.stock,
+    'Total Purchase': p.totalPurchase ?? ((p.stock || 0) + (p.totalSold || 0)),
+    'Total Sold': p.totalSold || 0,
+    'Current Stock': p.stock,
     'HSN/SAC': p.hsn || '',
     'Image Source': p.image || '',
     'Description': p.description || '',
@@ -216,7 +220,9 @@ export const downloadInventoryData = () => {
     { field: 'Category', behavior: 'Editable', required: 'Mandatory', format: 'Text', notes: 'Stored on product. Category is auto-created if missing.', example: 'Apparel' },
     { field: 'Buy Price', behavior: 'Editable', required: 'Mandatory', format: 'Number >= 0', notes: 'Stored buy/cost price.', example: '250' },
     { field: 'Sell Price', behavior: 'Editable', required: 'Mandatory', format: 'Number >= 0', notes: 'Stored selling price.', example: '499' },
-    { field: 'Stock', behavior: 'Editable', required: 'Mandatory', format: 'Number >= 0', notes: 'Stored stock quantity.', example: '20' },
+    { field: 'Total Purchase', behavior: 'Editable', required: 'Optional', format: 'Number >= 0', notes: 'Stored opening/baseline total purchased quantity.', example: '30' },
+    { field: 'Total Sold', behavior: 'Editable', required: 'Optional', format: 'Number >= 0', notes: 'Stored opening/baseline total sold quantity.', example: '10' },
+    { field: 'Current Stock', behavior: 'Editable', required: 'Mandatory', format: 'Number >= 0', notes: 'Stored current stock quantity. Must equal Total Purchase - Total Sold.', example: '20' },
     { field: 'HSN/SAC', behavior: 'Editable', required: 'Optional', format: 'Text', notes: 'Stored tax code.', example: '6109' },
     { field: 'Image Source', behavior: 'Editable', required: 'Optional', format: 'Cloudinary URL | public https image URL | data:image base64', notes: 'Stored image input. Public URLs are fetched; Cloudinary URLs are preserved; local paths are rejected.', example: 'https://res.cloudinary.com/.../image/upload/...' },
     { field: 'Description', behavior: 'Editable', required: 'Optional', format: 'Text', notes: 'Stored product notes/description.', example: 'Regular fit cotton shirt' },
@@ -391,7 +397,12 @@ export const importInventoryFromFile = async (file: File, onProgress?: (progress
     const category = toStr(row['Category']);
     const buyPrice = toNum(row['Buy Price']);
     const sellPrice = toNum(row['Sell Price']);
-    const stock = toNum(row['Stock']);
+    const currentStockRaw = row['Current Stock'] !== undefined && row['Current Stock'] !== '' ? row['Current Stock'] : row['Stock'];
+    const stock = toNum(currentStockRaw);
+    const totalPurchaseInput = row['Total Purchase'];
+    const totalSoldInput = row['Total Sold'];
+    const totalSold = totalSoldInput === '' || totalSoldInput === undefined || totalSoldInput === null ? 0 : toNum(totalSoldInput);
+    const totalPurchase = totalPurchaseInput === '' || totalPurchaseInput === undefined || totalPurchaseInput === null ? (Number.isFinite(stock) && Number.isFinite(totalSold) ? stock + totalSold : NaN) : toNum(totalPurchaseInput);
 
     if (productId && seenIds.has(productId)) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Product ID', message: 'Duplicate Product ID in file' });
     if (productId) seenIds.add(productId);
@@ -401,7 +412,12 @@ export const importInventoryFromFile = async (file: File, onProgress?: (progress
     if (!category) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Category', message: 'Category is required' });
     if (!Number.isFinite(buyPrice) || buyPrice < 0) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Buy Price', message: 'Buy Price must be a valid non-negative number' });
     if (!Number.isFinite(sellPrice) || sellPrice < 0) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Sell Price', message: 'Sell Price must be a valid non-negative number' });
-    if (!Number.isFinite(stock) || stock < 0) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Stock', message: 'Stock must be a valid non-negative number' });
+    if (!Number.isFinite(stock) || stock < 0) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Current Stock', message: 'Current Stock must be a valid non-negative number' });
+    if (!Number.isFinite(totalPurchase) || totalPurchase < 0) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Total Purchase', message: 'Total Purchase must be a valid non-negative number' });
+    if (!Number.isFinite(totalSold) || totalSold < 0) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Total Sold', message: 'Total Sold must be a valid non-negative number' });
+    if (Number.isFinite(stock) && Number.isFinite(totalPurchase) && Number.isFinite(totalSold) && stock !== (totalPurchase - totalSold)) {
+      errors.push({ sheet: 'Inventory', row: rowNo, field: 'Current Stock', message: 'Current Stock must equal Total Purchase - Total Sold' });
+    }
 
     const key = barcode.toLowerCase();
     if (key && seen.has(key)) errors.push({ sheet: 'Inventory', row: rowNo, field: 'Barcode', message: 'Duplicate barcode in file' });
@@ -425,7 +441,8 @@ export const importInventoryFromFile = async (file: File, onProgress?: (progress
         image: '',
         description: toStr(row['Description']),
         hsn: toStr(row['HSN/SAC']),
-        totalSold: 0,
+        totalPurchase,
+        totalSold,
         __rowNo: rowNo,
         __imageSourceRaw: toStr(row['Image Source'] || row['Image'] || row['Image URL']),
       });

@@ -24,8 +24,9 @@ export const exportProductsToExcel = (products: Product[]) => {
         'HSN/SAC': p.hsn || '-',
         'Buy Price (₹)': p.buyPrice,
         'Sell Price (₹)': p.sellPrice,
-        'Current Stock': p.stock,
+        'Total Purchase': p.totalPurchase ?? ((p.stock || 0) + (p.totalSold || 0)),
         'Total Sold': p.totalSold || 0,
+        'Current Stock': p.stock,
         'Stock Value (Buy)': p.stock * p.buyPrice,
         'Stock Value (Sell)': p.stock * p.sellPrice,
         'Status': p.stock <= 0 ? 'Out of Stock' : p.stock < 5 ? 'Low Stock' : 'Available'
