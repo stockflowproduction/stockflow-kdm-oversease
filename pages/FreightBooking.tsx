@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { addCategory, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
-import { FreightBroker, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
+import { addCategory, convertInquiryToConfirmedOrder, createFreightBroker, createFreightInquiry, getFreightBrokers, getFreightConfirmedOrders, getFreightInquiries, loadData, updateFreightInquiry } from '../services/storage';
+import { FreightBroker, FreightConfirmedOrder, FreightInquiry, ProcurementLineSnapshot, Product } from '../types';
 import { getProductStockRows } from '../services/productVariants';
 import { AlertTriangle, ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, Clock3, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, X } from 'lucide-react';
 
@@ -18,6 +18,12 @@ type DraftLine = {
   stock: number;
   pcs: number | '';
   rmbPerPcs: number | '';
+  piecesPerCarton?: number | '';
+  totalCartons?: number | '';
+  conversionRate?: number | '';
+  cbmPerCarton?: number | '';
+  cbmRate?: number | '';
+  sellingPrice?: number | '';
 };
 
 type LineCartonAssignment = { cartonId: string; qty: number | '' };
@@ -27,7 +33,16 @@ type CartonCbmDraft = { cartons: number; cbmPerCarton: number | ''; cbmRate: num
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const to2 = (n: number) => Number.isFinite(n) ? Number(n.toFixed(2)) : 0;
 const toNum = (v: number | '') => (v === '' ? 0 : Number(v));
-const formatNumber = (value: number, digits = 2) => value.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+const toNumberInputValue = (value: unknown) => {
+  if (value === '' || value === null || value === undefined) return '';
+  if (typeof value === 'string' && value.trim().toLowerCase() === 'undefined') return '';
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? String(parsed) : '';
+};
+const formatNumber = (value: number, digits = 2) => {
+  const safe = Number.isFinite(value) ? value : 0;
+  return safe.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+};
 const todayLabel = () => new Date().toLocaleDateString('en-GB');
 
 function SummaryCard({ label, value }: { label: string; value: string }) {
@@ -58,6 +73,7 @@ export default function FreightBooking() {
   const [activeTab, setActiveTab] = useState<FreightTab>('inquiries');
   const [products, setProducts] = useState<Product[]>([]);
   const [inquiries, setInquiries] = useState<FreightInquiry[]>([]);
+  const [confirmedOrders, setConfirmedOrders] = useState<FreightConfirmedOrder[]>([]);
   const [brokers, setBrokers] = useState<FreightBroker[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
 
@@ -76,6 +92,7 @@ export default function FreightBooking() {
 
   const [newProductName, setNewProductName] = useState('');
   const [newProductCategory, setNewProductCategory] = useState('');
+  const [newCategoryError, setNewCategoryError] = useState('');
   const [newProductImage, setNewProductImage] = useState('');
   const [newProductDetails, setNewProductDetails] = useState('');
 
@@ -90,17 +107,33 @@ export default function FreightBooking() {
   const [draftCartons, setDraftCartons] = useState<CartonInfo[]>([{ id: 'carton-1', label: 'Carton 1' }]);
   const [selectedCartonIds, setSelectedCartonIds] = useState<string[]>(['carton-1']);
   const [lineAssignments, setLineAssignments] = useState<Record<string, LineCartonAssignment>>({});
+  const [useCartonPlanning, setUseCartonPlanning] = useState(false);
 
   const [cbmMode, setCbmMode] = useState<CbmMode>('undecided');
   const [cartonCbmDrafts, setCartonCbmDrafts] = useState<Record<string, CartonCbmDraft>>({});
   const [showConfirmSave, setShowConfirmSave] = useState(false);
+  const [convertingInquiryId, setConvertingInquiryId] = useState<string | null>(null);
 
   const refresh = () => {
     const data = loadData();
     setProducts(data.products || []);
     setCategories(data.categories || []);
     setInquiries(getFreightInquiries());
+    setConfirmedOrders(getFreightConfirmedOrders());
     setBrokers(getFreightBrokers());
+  };
+
+  const convertToConfirmedOrder = async (inquiry: FreightInquiry) => {
+    if (convertingInquiryId) return;
+    setConvertingInquiryId(inquiry.id);
+    try {
+      await convertInquiryToConfirmedOrder(inquiry.id);
+      refresh();
+    } catch (error: any) {
+      alert(error?.message || 'Unable to convert inquiry to confirmed order.');
+    } finally {
+      setConvertingInquiryId(null);
+    }
   };
 
   useEffect(() => {
@@ -156,9 +189,20 @@ export default function FreightBooking() {
 
   const activeLines = useMemo(() => {
     if (sourceMode === 'new') {
-      const key = 'new-product-default';
-      const base = pricingEntries[key] || { key, label: 'Default', stock: 0, pcs: '', rmbPerPcs: '' };
-      return [base];
+      const rows = Object.values(pricingEntries || {}) as DraftLine[];
+      const baseRows = rows.length ? rows : [{ key: 'new-product-default', label: 'Variant 1', stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice } as DraftLine];
+      return baseRows.map(row => {
+        const piecesPerCarton = toNum(row.piecesPerCarton ?? '');
+        const totalCartons = toNum(row.totalCartons ?? '');
+        const pcs = piecesPerCarton > 0 && totalCartons > 0 ? piecesPerCarton * totalCartons : '';
+        return {
+          ...row,
+          stock: 0,
+          pcs,
+          conversionRate: row.conversionRate ?? exchangeRate,
+          sellingPrice: row.sellingPrice ?? sellingPrice,
+        };
+      });
     }
     return selectedVariants.map(variant => pricingEntries[variant.key] || {
       key: variant.key,
@@ -169,17 +213,26 @@ export default function FreightBooking() {
       variant: variant.variant,
       color: variant.color,
     });
-  }, [sourceMode, selectedVariants, pricingEntries]);
+  }, [sourceMode, selectedVariants, pricingEntries, exchangeRate, sellingPrice]);
 
   const distributedLines = useMemo(() => activeLines.flatMap(line => {
     const assignment = lineAssignments[line.key];
     if (!assignment || !assignment.cartonId || toNum(assignment.qty) <= 0) return [];
     const qty = toNum(assignment.qty);
     const rmbPerPcs = toNum(line.rmbPerPcs);
-    const inrRate = toNum(exchangeRate);
+    const inrRate = sourceMode === 'new' ? toNum(line.conversionRate ?? '') : toNum(exchangeRate);
     const totalRmb = qty * rmbPerPcs;
     const totalInr = totalRmb * inrRate;
     const ratePerPcs = qty > 0 ? totalInr / qty : 0;
+    const cbmPerCarton = toNum(line.cbmPerCarton ?? '');
+    const totalCartons = toNum(line.totalCartons ?? '');
+    const totalCbm = cbmPerCarton * totalCartons;
+    const cbmRate = toNum(line.cbmRate ?? '');
+    const totalCbmCost = totalCbm * cbmRate;
+    const cbmPerPiece = qty > 0 ? totalCbmCost / qty : 0;
+    const productCost = ratePerPcs + cbmPerPiece;
+    const lineSellingPrice = toNum(line.sellingPrice ?? '');
+    const profitPercent = lineSellingPrice > 0 ? ((lineSellingPrice - productCost) / lineSellingPrice) * 100 : 0;
     const cartonLabel = draftCartons.find(c => c.id === assignment.cartonId)?.label || assignment.cartonId;
     return [{
       ...line,
@@ -190,12 +243,57 @@ export default function FreightBooking() {
       totalInr,
       inrRate,
       ratePerPcs,
-      productCost: ratePerPcs,
+      totalCbm,
+      totalCbmCost,
+      cbmPerPiece,
+      productCost,
+      lineSellingPrice,
+      profitPercent,
       partyRate: ratePerPcs,
     }];
-  }), [activeLines, lineAssignments, exchangeRate, draftCartons]);
+  }), [activeLines, lineAssignments, exchangeRate, draftCartons, sourceMode]);
 
-  const draftTotals = useMemo(() => distributedLines.reduce((acc, l) => ({ totalPcs: acc.totalPcs + l.qty, totalRmb: acc.totalRmb + l.totalRmb, totalInr: acc.totalInr + l.totalInr }), { totalPcs: 0, totalRmb: 0, totalInr: 0 }), [distributedLines]);
+  const effectiveDistributedLines = useMemo(() => {
+    if (sourceMode !== 'new' || useCartonPlanning) return distributedLines;
+    return activeLines
+      .filter(line => toNum(line.pcs) > 0)
+      .map(line => {
+        const qty = toNum(line.pcs);
+        const rmbPerPcs = toNum(line.rmbPerPcs);
+        const inrRate = toNum(line.conversionRate ?? '');
+        const totalRmb = qty * rmbPerPcs;
+        const totalInr = totalRmb * inrRate;
+        const ratePerPcs = qty > 0 ? totalInr / qty : 0;
+        const cbmPerCarton = toNum(line.cbmPerCarton ?? '');
+        const totalCartons = toNum(line.totalCartons ?? '');
+        const totalCbm = cbmPerCarton * totalCartons;
+        const cbmRate = toNum(line.cbmRate ?? '');
+        const totalCbmCost = totalCbm * cbmRate;
+        const cbmPerPiece = qty > 0 ? totalCbmCost / qty : 0;
+        const productCost = ratePerPcs + cbmPerPiece;
+        const lineSellingPrice = toNum(line.sellingPrice ?? '');
+        const profitPercent = lineSellingPrice > 0 ? ((lineSellingPrice - productCost) / lineSellingPrice) * 100 : 0;
+        return {
+          ...line,
+          qty,
+          cartonId: 'carton-1',
+          cartonLabel: 'Carton 1',
+          totalRmb,
+          totalInr,
+          inrRate,
+          ratePerPcs,
+          totalCbm,
+          totalCbmCost,
+          cbmPerPiece,
+          productCost,
+          lineSellingPrice,
+          profitPercent,
+          partyRate: ratePerPcs,
+        };
+      });
+  }, [sourceMode, useCartonPlanning, distributedLines, activeLines]);
+
+  const draftTotals = useMemo(() => effectiveDistributedLines.reduce((acc, l) => ({ totalPcs: acc.totalPcs + l.qty, totalRmb: acc.totalRmb + l.totalRmb, totalInr: acc.totalInr + l.totalInr }), { totalPcs: 0, totalRmb: 0, totalInr: 0 }), [effectiveDistributedLines]);
 
   const nextCartonNumber = useMemo(() => {
     const nums = draftCartons.map(c => Number(c.label.replace(/[^0-9]/g, '')) || 0);
@@ -219,9 +317,15 @@ export default function FreightBooking() {
   }), [cbmTargets, cartonCbmDrafts]);
 
   const canGoVariantsNext = sourceMode === 'new' ? true : selectedVariantKeys.length > 0;
-  const canGoCartonsNext = activeLines.length > 0 && toNum(exchangeRate) > 0 && activeLines.every(l => toNum(l.pcs) > 0 && toNum(l.rmbPerPcs) > 0);
-  const canGoReviewNext = selectedCartonIds.length > 0 && validateDistribution && distributedLines.length > 0 && !hasUnusedExtraCartons;
-  const canSave = canGoReviewNext && cbmMode !== 'undecided' && hasValidCbmData;
+  const canGoCartonsNext = sourceMode === 'new'
+    ? activeLines.length > 0 && activeLines.every(l => toNum(l.piecesPerCarton ?? '') > 0 && toNum(l.totalCartons ?? '') > 0 && toNum(l.pcs) > 0 && toNum(l.rmbPerPcs) > 0 && toNum(l.conversionRate ?? '') > 0 && toNum(l.cbmPerCarton ?? '') > 0 && toNum(l.cbmRate ?? '') > 0 && toNum(l.sellingPrice ?? '') > 0)
+    : activeLines.length > 0 && toNum(exchangeRate) > 0 && activeLines.every(l => toNum(l.pcs) > 0 && toNum(l.rmbPerPcs) > 0);
+  const canGoReviewNext = sourceMode === 'new'
+    ? (useCartonPlanning
+      ? selectedCartonIds.length > 0 && validateDistribution && distributedLines.length > 0 && !hasUnusedExtraCartons
+      : activeLines.length > 0 && activeLines.every(l => toNum(l.pcs) > 0))
+    : selectedCartonIds.length > 0 && validateDistribution && distributedLines.length > 0 && !hasUnusedExtraCartons;
+  const canSave = sourceMode === 'new' ? canGoReviewNext : (canGoReviewNext && cbmMode !== 'undecided' && hasValidCbmData);
 
   const resetWizard = () => {
     setEditingInquiry(null);
@@ -232,6 +336,7 @@ export default function FreightBooking() {
     setSelectedVariantKeys([]);
     setNewProductName('');
     setNewProductCategory('');
+    setNewCategoryError('');
     setNewProductImage('');
     setNewProductDetails('');
     setOrderType('in_house');
@@ -242,6 +347,7 @@ export default function FreightBooking() {
     setDraftCartons([{ id: 'carton-1', label: 'Carton 1' }]);
     setSelectedCartonIds(['carton-1']);
     setLineAssignments({});
+    setUseCartonPlanning(false);
     setCbmMode('undecided');
     setCartonCbmDrafts({});
     setShowConfirmSave(false);
@@ -295,10 +401,23 @@ export default function FreightBooking() {
     });
     setPricingEntries(priceSeed);
     setLineAssignments(assignSeed);
+    setUseCartonPlanning(true);
 
     setWizardStep('review');
     setIsModalOpen(true);
   };
+
+  useEffect(() => {
+    if (sourceMode !== 'new' || useCartonPlanning) return;
+    setSelectedCartonIds(['carton-1']);
+    setLineAssignments(prev => {
+      const next = { ...prev };
+      activeLines.forEach(line => {
+        next[line.key] = { cartonId: 'carton-1', qty: toNum(line.pcs) > 0 ? toNum(line.pcs) : '' };
+      });
+      return next;
+    });
+  }, [sourceMode, useCartonPlanning, activeLines]);
 
   const selectProduct = (product: Product) => {
     setSelectedProduct(product);
@@ -312,7 +431,7 @@ export default function FreightBooking() {
     const seed: Record<string, DraftLine> = {};
     const assignmentSeed: Record<string, LineCartonAssignment> = {};
     if (sourceMode === 'new') {
-      seed['new-product-default'] = pricingEntries['new-product-default'] || { key: 'new-product-default', label: 'Default', stock: 0, pcs: '', rmbPerPcs: '' };
+      seed['new-product-default'] = pricingEntries['new-product-default'] || { key: 'new-product-default', label: 'Variant 1', stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice };
       assignmentSeed['new-product-default'] = lineAssignments['new-product-default'] || { cartonId: selectedCartonIds[0], qty: '' };
     } else {
       selectedVariants.forEach(v => {
@@ -325,9 +444,27 @@ export default function FreightBooking() {
     setWizardStep('pricing');
   };
 
-  const updatePricingEntry = (key: string, field: 'pcs' | 'rmbPerPcs', value: string) => {
+  const updatePricingEntry = (key: string, field: 'label' | 'pcs' | 'piecesPerCarton' | 'totalCartons' | 'rmbPerPcs' | 'conversionRate' | 'cbmPerCarton' | 'cbmRate' | 'sellingPrice', value: string) => {
+    if (field === 'label') {
+      setPricingEntries(prev => {
+        const current = prev[key] || { key, label: 'Selected Variant', stock: 0, pcs: '', rmbPerPcs: '' };
+        return { ...prev, [key]: { ...current, label: value } };
+      });
+      return;
+    }
     const parsed = value === '' ? '' : Number(value);
-    setPricingEntries(prev => ({ ...prev, [key]: { ...prev[key], [field]: Number.isNaN(parsed) ? '' : parsed } }));
+    setPricingEntries(prev => {
+      const current = prev[key] || { key, label: 'Selected Variant', stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice: '' };
+      return { ...prev, [key]: { ...current, [field]: Number.isNaN(parsed) ? '' : parsed } };
+    });
+  };
+
+  const addNewVariantPricingLine = () => {
+    const key = `new-variant-${uid()}`;
+    setPricingEntries(prev => ({
+      ...prev,
+      [key]: { key, label: `Variant ${(Object.keys(prev).length || 0) + 1}`, stock: 0, pcs: '', rmbPerPcs: '', piecesPerCarton: '', totalCartons: '', conversionRate: exchangeRate, cbmPerCarton: '', cbmRate: '', sellingPrice: sellingPrice === '' ? '' : sellingPrice }
+    }));
   };
 
   const updateAssignment = (lineKey: string, field: 'cartonId' | 'qty', value: string) => {
@@ -392,6 +529,40 @@ export default function FreightBooking() {
     refresh();
   };
 
+  const createBrokerQuick = async () => {
+    const name = window.prompt('Enter broker name')?.trim();
+    if (!name) return;
+    const broker = await createFreightBroker({ name });
+    setBrokerId(broker.id);
+    refresh();
+  };
+
+  const addCategoryQuick = async () => {
+    const name = newProductCategory.trim();
+    if (!name) return;
+    const exists = categories.some(c => c.toLowerCase() === name.toLowerCase());
+    if (exists) {
+      setNewCategoryError('Category already exists.');
+      alert('Category already exists.');
+      return;
+    }
+    await addCategory(name);
+    setNewProductCategory(name);
+    setNewCategoryError('');
+    refresh();
+  };
+
+  const handleNewProductImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      setNewProductImage(result);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const ensureCategory = async (name: string) => {
     const c = name.trim();
     if (!c) return;
@@ -402,16 +573,25 @@ export default function FreightBooking() {
 
   const saveInquiry = async (status: 'draft' | 'saved') => {
     const cartonMap = new Map(draftCartons.map(c => [c.id, c.label]));
-    const lines: ProcurementLineSnapshot[] = distributedLines.map((line, idx) => {
+    const lines: ProcurementLineSnapshot[] = effectiveDistributedLines.map((line, idx) => {
       const totalInr = line.totalInr;
       const qty = line.qty;
       const cbmTarget = cbmMode === 'wholeOrder' ? 'whole-order' : line.cartonId;
       const cbm = cartonCbmDrafts[cbmTarget];
-      const perLineCbmCost = cbmMode === 'wholeOrder'
-        ? (draftTotals.totalPcs > 0 ? (toNum(cbm?.totalCbmCost || 0) * (qty / draftTotals.totalPcs)) : 0)
-        : toNum(cbm?.totalCbmCost || 0);
+      const perLineCbmCost = sourceMode === 'new'
+        ? toNum((line as any).totalCbmCost || 0)
+        : cbmMode === 'wholeOrder'
+          ? (draftTotals.totalPcs > 0 ? (toNum(cbm?.totalCbmCost || 0) * (qty / draftTotals.totalPcs)) : 0)
+          : toNum(cbm?.totalCbmCost || 0);
       const cbmPerPiece = qty > 0 ? perLineCbmCost / qty : 0;
-      const productCostPerPiece = qty > 0 ? (totalInr / qty) + cbmPerPiece : 0;
+      const productCostPerPiece = sourceMode === 'new' ? toNum((line as any).productCost || 0) : (qty > 0 ? (totalInr / qty) + cbmPerPiece : 0);
+      const lineConversionRate = sourceMode === 'new' ? toNum((line as any).conversionRate ?? '') : toNum(exchangeRate);
+      const lineSellingPrice = sourceMode === 'new' ? toNum((line as any).lineSellingPrice || (line as any).sellingPrice || 0) : toNum(sellingPrice);
+      const lineTotalCartons = sourceMode === 'new' ? toNum((line as any).totalCartons || 0) : 0;
+      const linePcsPerCarton = sourceMode === 'new' ? toNum((line as any).piecesPerCarton || 0) : 0;
+      const lineCbmPerCarton = sourceMode === 'new' ? toNum((line as any).cbmPerCarton || 0) : toNum(cbm?.cbmPerCarton || 0);
+      const lineCbmRate = sourceMode === 'new' ? toNum((line as any).cbmRate || 0) : toNum(cbm?.cbmRate || 0);
+      const lineProfitPercent = lineSellingPrice > 0 ? to2(((lineSellingPrice - productCostPerPiece) / lineSellingPrice) * 100) : 0;
       return {
         id: `${line.key}-${idx}-${uid()}`,
         sourceType: sourceMode,
@@ -423,17 +603,19 @@ export default function FreightBooking() {
         category: sourceMode === 'inventory' ? selectedProduct?.category : newProductCategory,
         baseProductDetails: sourceMode === 'new' ? newProductDetails : selectedProduct?.description,
         quantity: qty,
+        piecesPerCartoon: linePcsPerCarton,
+        numberOfCartoons: lineTotalCartons,
         rmbPricePerPiece: toNum(line.rmbPerPcs),
         inrPricePerPiece: qty > 0 ? totalInr / qty : 0,
-        exchangeRate: toNum(exchangeRate),
-        cbmPerCartoon: toNum(cbm?.cbmPerCarton || 0),
-        cbmRate: toNum(cbm?.cbmRate || 0),
+        exchangeRate: lineConversionRate,
+        cbmPerCartoon: lineCbmPerCarton,
+        cbmRate: lineCbmRate,
         cbmCost: to2(perLineCbmCost),
         cbmPerPiece: to2(cbmPerPiece),
         productCostPerPiece: to2(productCostPerPiece),
-        sellingPrice: toNum(sellingPrice),
-        profitPerPiece: to2(toNum(sellingPrice) - productCostPerPiece),
-        profitPercent: productCostPerPiece > 0 ? to2(((toNum(sellingPrice) - productCostPerPiece) / productCostPerPiece) * 100) : 0,
+        sellingPrice: lineSellingPrice,
+        profitPerPiece: to2(lineSellingPrice - productCostPerPiece),
+        profitPercent: lineProfitPercent,
         notes: cartonMap.get(line.cartonId),
       };
     });
@@ -442,8 +624,12 @@ export default function FreightBooking() {
     const totalRmb = lines.reduce((s, l) => s + ((l.quantity || 0) * (l.rmbPricePerPiece || 0)), 0);
     const totalInr = lines.reduce((s, l) => s + ((l.quantity || 0) * (l.inrPricePerPiece || 0), 0), 0);
     const cbmDraftValues = Object.values(cartonCbmDrafts) as CartonCbmDraft[];
-    const totalCbm = cbmDraftValues.reduce((s, c) => s + (c.totalCbm || 0), 0);
-    const cbmCost = cbmDraftValues.reduce((s, c) => s + (c.totalCbmCost || 0), 0);
+    const totalCbm = sourceMode === 'new'
+      ? lines.reduce((s, l) => s + ((l.cbmPerCartoon || 0) * (l.numberOfCartoons || 0)), 0)
+      : cbmDraftValues.reduce((s, c) => s + (c.totalCbm || 0), 0);
+    const cbmCost = sourceMode === 'new'
+      ? lines.reduce((s, l) => s + (l.cbmCost || 0), 0)
+      : cbmDraftValues.reduce((s, c) => s + (c.totalCbmCost || 0), 0);
     const cbmPerPiece = totalPieces > 0 ? cbmCost / totalPieces : 0;
     const productCostPerPiece = totalPieces > 0 ? ((totalInr + cbmCost) / totalPieces) : 0;
     const now = new Date().toISOString();
@@ -521,7 +707,43 @@ export default function FreightBooking() {
       </div>
 
       {activeTab === 'orders' && (
-        <Card><CardContent className="pt-6 text-sm text-muted-foreground">Orders tab is reserved for future confirmed order flow.</CardContent></Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Confirmed Orders</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-slate-700">Ready to confirm from inquiries</div>
+              {inquiries.filter(inquiry => !confirmedOrders.some(order => order.sourceInquiryId === inquiry.id)).slice(0, 8).map(inquiry => (
+                <div key={inquiry.id} className="flex flex-col gap-2 rounded-xl border p-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="font-medium text-slate-900">{inquiry.productName}</div>
+                    <div className="text-xs text-muted-foreground">{inquiry.category || '—'} · {formatNumber(inquiry.totalPieces || 0, 0)} pcs · ₹{formatNumber(inquiry.totalInr || 0)}</div>
+                  </div>
+                  <Button size="sm" onClick={() => convertToConfirmedOrder(inquiry)} disabled={!!convertingInquiryId}>
+                    {convertingInquiryId === inquiry.id ? 'Converting...' : 'Confirm Order'}
+                  </Button>
+                </div>
+              ))}
+              {!inquiries.some(inquiry => !confirmedOrders.some(order => order.sourceInquiryId === inquiry.id)) && (
+                <div className="text-sm text-muted-foreground">All inquiries are already converted.</div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-slate-700">Existing confirmed orders</div>
+              {confirmedOrders.map(order => (
+                <div key={order.id} className="rounded-xl border p-3">
+                  <div className="font-medium text-slate-900">{order.productName}</div>
+                  <div className="text-xs text-muted-foreground">
+                    Status: {order.status} · {formatNumber(order.totalPieces || 0, 0)} pcs · ₹{formatNumber(order.totalInr || 0)} · {new Date(order.updatedAt || order.createdAt).toLocaleDateString('en-GB')}
+                  </div>
+                </div>
+              ))}
+              {!confirmedOrders.length && <div className="text-sm text-muted-foreground">No confirmed orders yet.</div>}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {activeTab === 'brokers' && (
@@ -621,8 +843,24 @@ export default function FreightBooking() {
             <button onClick={() => setWizardStep('source')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
             <div className="grid gap-4 md:grid-cols-2">
               <div><Label>Product Name</Label><Input value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder="Enter product name" /></div>
-              <div><Label>Category</Label><Input value={newProductCategory} onChange={e => setNewProductCategory(e.target.value)} placeholder="Enter category" /></div>
-              <div><Label>Product Image URL / data URL</Label><Input value={newProductImage} onChange={e => setNewProductImage(e.target.value)} placeholder="https://..." /></div>
+              <div>
+                <Label>Category</Label>
+                <div className="mt-1 flex gap-2">
+                  <Input list="freight-category-options" value={newProductCategory} onChange={e => { setNewProductCategory(e.target.value); setNewCategoryError(''); }} placeholder="Select or create category" />
+                  <Button type="button" variant="outline" onClick={addCategoryQuick} title="Add category"><Plus className="h-4 w-4" /></Button>
+                </div>
+                <datalist id="freight-category-options">{categories.map(c => <option key={c} value={c} />)}</datalist>
+                {newCategoryError && <p className="mt-1 text-xs text-rose-600">{newCategoryError}</p>}
+              </div>
+              <div>
+                <Label>Product Image</Label>
+                <div className="mt-1 flex items-center gap-3 rounded-xl border border-dashed border-slate-300 p-3">
+                  <div className="h-14 w-14 overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+                    {newProductImage ? <img src={newProductImage} alt="Product preview" className="h-full w-full object-cover" /> : null}
+                  </div>
+                  <Input type="file" accept="image/*" onChange={handleNewProductImageUpload} className="text-xs" />
+                </div>
+              </div>
               <div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>
               <div className="md:col-span-2"><Label>Additional Product Details</Label><textarea value={newProductDetails} onChange={e => setNewProductDetails(e.target.value)} className="w-full rounded-md border px-3 py-2 text-sm" rows={4} /></div>
             </div>
@@ -640,28 +878,163 @@ export default function FreightBooking() {
         {wizardStep === 'pricing' && (
           <div>
             <button onClick={() => setWizardStep(sourceMode === 'new' ? 'newInquiry' : 'variants')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="mb-5 grid gap-4 lg:grid-cols-2"><div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900"><IndianRupee className="h-4 w-4" /> Pricing Setup</div><div className="grid gap-4 md:grid-cols-2"><div><Label>Exchange Rate</Label><Input type="number" value={exchangeRate} onChange={e => setExchangeRate(e.target.value === '' ? '' : Number(e.target.value))} /></div><div><Label>Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div><div><Label>Selling Price (per pcs)</Label><Input type="number" value={sellingPrice} onChange={e => setSellingPrice(e.target.value === '' ? '' : Number(e.target.value))} /></div><div><Label>Order Type</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={orderType} onChange={e => setOrderType(e.target.value as any)}><option value="in_house">In-house</option><option value="customer_trade">Customer trade</option></select></div>{orderType !== 'customer_trade' && <div className="md:col-span-2 grid md:grid-cols-2 gap-2"><div><Label>Broker</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select broker</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div><div><Label>Create Broker</Label><div className="flex gap-2"><Input value={newBrokerName} onChange={e => setNewBrokerName(e.target.value)} /><Button type="button" variant="outline" onClick={createBroker}><Plus className="w-4 h-4" /></Button></div></div></div>}</div></div><div className="rounded-3xl border border-slate-200 bg-white p-4"><div className="mb-3 text-sm font-semibold text-slate-900">Entered Totals</div><div className="grid grid-cols-2 gap-3"><SummaryCard label="Entered Pcs" value={formatNumber(activeLines.reduce((s, l) => s + toNum(l.pcs), 0), 0)} /><SummaryCard label="Entered RMB" value={formatNumber(activeLines.reduce((s, l) => s + (toNum(l.pcs) * toNum(l.rmbPerPcs)), 0))} /><SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} /><SummaryCard label="Exchange" value={`${exchangeRate || 0}`} /></div></div></div>
-            <div className="space-y-4">{activeLines.map(line => { const pcs = toNum(line.pcs); const totalRmb = pcs * toNum(line.rmbPerPcs); const totalInr = totalRmb * toNum(exchangeRate); const ratePerPcs = pcs > 0 ? totalInr / pcs : 0; return <div key={line.key} className="rounded-3xl border border-slate-200 p-4"><div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between"><div><h4 className="text-base font-semibold text-slate-900">{line.label}</h4><p className="text-sm text-slate-500">Stock: {line.stock}</p></div><div className="grid grid-cols-2 gap-2 md:grid-cols-4"><SummaryCard label="Tot. RMB" value={formatNumber(totalRmb)} /><SummaryCard label="INR" value={`₹${formatNumber(totalInr)}`} /><SummaryCard label="Rate/Pcs" value={`₹${formatNumber(ratePerPcs)}`} /><SummaryCard label="Entered Pcs" value={formatNumber(pcs, 0)} /></div></div><div className="grid gap-4 md:grid-cols-2"><div><Label>Total Pcs for this variant</Label><Input type="number" value={line.pcs} onChange={e => updatePricingEntry(line.key, 'pcs', e.target.value)} /></div><div><Label>RMB/Pcs</Label><Input type="number" value={line.rmbPerPcs} onChange={e => updatePricingEntry(line.key, 'rmbPerPcs', e.target.value)} /></div></div></div>; })}</div>
-            <div className="mt-6 flex justify-end"><button onClick={() => setWizardStep('cartons')} disabled={!canGoCartonsNext} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next <ArrowRight className="h-4 w-4" /></button></div>
+
+            {sourceMode === 'new' && (
+              <div className="mb-4 rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                <div className="grid gap-4 md:grid-cols-[110px_1fr]">
+                  <div className="h-24 w-24 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                    {newProductImage ? <img src={newProductImage} alt={newProductName || 'New product'} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-xs text-slate-400">No Image</div>}
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <SummaryCard label="Product" value={newProductName || '—'} />
+                    <SummaryCard label="Category" value={newProductCategory || '—'} />
+                    <SummaryCard label="Order Type" value={orderType === 'in_house' ? 'In-House' : 'Customer Trade'} />
+                    <SummaryCard label="Broker" value={brokers.find(b => b.id === brokerId)?.name || (orderType === 'in_house' ? 'Owner / Self' : '—')} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              {sourceMode === 'new' && (
+                <div className="flex justify-end">
+                  <Button type="button" variant="outline" onClick={addNewVariantPricingLine}><Plus className="h-4 w-4 mr-1" /> Add Variant</Button>
+                </div>
+              )}
+
+              {activeLines.map((line, idx) => {
+                const pcs = toNum(line.pcs);
+                const piecesPerCarton = toNum(line.piecesPerCarton ?? '');
+                const totalCartons = toNum(line.totalCartons ?? '');
+                const rmbPerPcs = toNum(line.rmbPerPcs);
+                const totalRmb = pcs * rmbPerPcs;
+                const conversionRate = sourceMode === 'new' ? toNum(line.conversionRate ?? '') : toNum(exchangeRate);
+                const totalInr = totalRmb * conversionRate;
+                const ratePerPcs = pcs > 0 ? totalInr / pcs : 0;
+                const cbmPerCarton = toNum(line.cbmPerCarton ?? '');
+                const totalCbm = cbmPerCarton * totalCartons;
+                const cbmRate = toNum(line.cbmRate ?? '');
+                const totalCbmCost = totalCbm * cbmRate;
+                const cbmPerPiece = pcs > 0 ? totalCbmCost / pcs : 0;
+                const productCost = ratePerPcs + cbmPerPiece;
+                const lineSellingPrice = toNum(line.sellingPrice ?? '');
+                const profitPercent = lineSellingPrice > 0 ? ((lineSellingPrice - productCost) / lineSellingPrice) * 100 : 0;
+
+                return (
+                  <div key={line.key} className="rounded-3xl border border-slate-200 bg-white p-4">
+                    <div className="mb-3 text-sm font-semibold text-slate-900">Variant {idx + 1}</div>
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <div>
+                        <Label>Product Name / Variant Name</Label>
+                        <Input value={line.label} onChange={e => updatePricingEntry(line.key, 'label', e.target.value)} placeholder={`${newProductName || 'Product'} / Variant`} />
+                        {sourceMode === 'new' && <div className="mt-1 text-xs text-slate-500">{newProductName || 'New Product'} · {line.label || `Variant ${idx + 1}`}</div>}
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <div><Label>Pcs/CTN</Label><Input type="number" value={toNumberInputValue(line.piecesPerCarton ?? '')} onChange={e => updatePricingEntry(line.key, 'piecesPerCarton', e.target.value)} /></div>
+                        <div><Label>Total Cartons</Label><Input type="number" value={toNumberInputValue(line.totalCartons ?? '')} onChange={e => updatePricingEntry(line.key, 'totalCartons', e.target.value)} /></div>
+                        <div><Label>Total Pcs</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(pcs, 0)}</div></div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid gap-3 md:grid-cols-4">
+                      <div><Label>RMB/Pcs</Label><Input type="number" value={toNumberInputValue(line.rmbPerPcs)} onChange={e => updatePricingEntry(line.key, 'rmbPerPcs', e.target.value)} /></div>
+                      <div><Label>Total RMB</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(totalRmb)}</div></div>
+                      <div><Label>Conversion Rate</Label><Input type="number" value={toNumberInputValue(sourceMode === 'new' ? (line.conversionRate ?? '') : exchangeRate)} onChange={e => sourceMode === 'new' ? updatePricingEntry(line.key, 'conversionRate', e.target.value) : setExchangeRate(e.target.value === '' ? '' : Number(e.target.value))} /></div>
+                      <div><Label>INR</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(totalInr)}</div></div>
+                      <div><Label>INR Rate/Pcs</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(ratePerPcs)}</div></div>
+                      <div><Label>CBM/CTN</Label><Input type="number" value={toNumberInputValue(line.cbmPerCarton ?? '')} onChange={e => updatePricingEntry(line.key, 'cbmPerCarton', e.target.value)} /></div>
+                      <div><Label>Total CBM</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(totalCbm, 3)}</div></div>
+                      <div><Label>CBM Rate</Label><Input type="number" value={toNumberInputValue(line.cbmRate ?? '')} onChange={e => updatePricingEntry(line.key, 'cbmRate', e.target.value)} /></div>
+                      <div><Label>Total CBM Cost</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(totalCbmCost)}</div></div>
+                      <div><Label>CBM/Piece</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(cbmPerPiece)}</div></div>
+                      <div><Label>Product Cost</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(productCost)}</div></div>
+                      <div><Label>Selling Price</Label><Input type="number" value={toNumberInputValue(sourceMode === 'new' ? (line.sellingPrice ?? '') : sellingPrice)} onChange={e => sourceMode === 'new' ? updatePricingEntry(line.key, 'sellingPrice', e.target.value) : setSellingPrice(e.target.value === '' ? '' : Number(e.target.value))} /></div>
+                      <div><Label>Profit %</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(profitPercent)}%</div></div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50 p-4">
+              <h3 className="text-sm font-semibold text-slate-900">Grand Totals</h3>
+              <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+                <SummaryCard label="Total Variants" value={formatNumber(activeLines.length, 0)} />
+                <SummaryCard label="Grand Total Pcs" value={formatNumber(draftTotals.totalPcs, 0)} />
+                <SummaryCard label="Grand Total RMB" value={formatNumber(draftTotals.totalRmb)} />
+                <SummaryCard label="Grand Total INR" value={`₹${formatNumber(draftTotals.totalInr)}`} />
+                <SummaryCard label="Grand Total CBM" value={formatNumber(activeLines.reduce((s, l) => s + (toNum(l.cbmPerCarton ?? '') * toNum(l.totalCartons ?? '')), 0), 3)} />
+                <SummaryCard label="Grand CBM Cost" value={`₹${formatNumber(activeLines.reduce((s, l) => s + ((toNum(l.cbmPerCarton ?? '') * toNum(l.totalCartons ?? '')) * toNum(l.cbmRate ?? '')), 0))}`} />
+              </div>
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => setWizardStep(sourceMode === 'new' ? (useCartonPlanning ? 'cartons' : 'review') : 'cartons')}
+                disabled={!canGoCartonsNext}
+                className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                Next: {sourceMode === 'new' && !useCartonPlanning ? 'Review' : 'Carton Planning'}
+              </button>
+            </div>
           </div>
         )}
 
         {wizardStep === 'cartons' && (
           <div>
             <button onClick={() => setWizardStep('pricing')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]"><div className="rounded-3xl border border-slate-200 p-4"><h3 className="text-base font-semibold text-slate-900">Select Cartons</h3><div className="mt-4 grid gap-3 md:grid-cols-2">{draftCartons.map(carton => { const selected = selectedCartonIds.includes(carton.id); return <div key={carton.id} className={`rounded-2xl border p-4 ${selected ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><button type="button" onClick={() => toggleCartonSelection(carton.id)} className="flex-1 text-left"><div className="text-sm font-semibold">{carton.label}</div></button><div className="flex items-center gap-2"><div className={`flex h-6 w-6 items-center justify-center rounded-full border ${selected ? 'border-white bg-white text-slate-900' : 'border-slate-300 text-transparent'}`}><Check className="h-4 w-4" /></div>{carton.id !== 'carton-1' && <button type="button" onClick={() => removeCarton(carton.id)} className={`rounded-xl border p-2 ${selected ? 'border-slate-700 text-white hover:bg-slate-800' : 'border-slate-200 text-slate-700 hover:bg-slate-50'}`}><Trash2 className="h-4 w-4" /></button>}</div></div></div>; })}</div><button type="button" onClick={createNewCarton} className="mt-4 inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"><Plus className="h-4 w-4" /> Create New Carton</button></div><div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="mb-3 text-sm font-semibold text-slate-900">Assign Carton to Products and Quantity</div><div className="space-y-3">{activeLines.map(line => { const assignment = lineAssignments[line.key] || { cartonId: selectedCartonIds[0], qty: '' }; const remaining = toNum(line.pcs) - toNum(assignment.qty); return <div key={line.key} className="rounded-2xl bg-white p-4"><div className="mb-3 flex items-start justify-between gap-3"><div><div className="text-sm font-semibold text-slate-900">{line.label}</div></div><div className={`rounded-full px-3 py-1 text-xs font-medium ${remaining === 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>Remaining: {remaining}</div></div><div className="grid gap-3 md:grid-cols-2"><div><Label>Carton</Label><select value={assignment.cartonId} onChange={e => updateAssignment(line.key, 'cartonId', e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-slate-400">{selectedCartonIds.map(cartonId => <option key={cartonId} value={cartonId}>{draftCartons.find(c => c.id === cartonId)?.label || cartonId}</option>)}</select></div><div><Label>Quantity</Label><Input type="number" value={assignment.qty} onChange={e => updateAssignment(line.key, 'qty', e.target.value)} /></div></div></div>; })}</div>{!validateDistribution && <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4" />Total assigned carton quantity must match each variant total quantity before moving forward.</div>}{hasUnusedExtraCartons && <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4" />One or more cartons are unused. Remove or assign them.</div>}</div></div>
-            <div className="mt-6 flex justify-end"><button onClick={() => setWizardStep('review')} disabled={!canGoReviewNext} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next <ArrowRight className="h-4 w-4" /></button></div>
+            {sourceMode === 'new' && (
+              <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <label className="inline-flex items-center gap-3 text-sm font-medium text-slate-800">
+                  <input type="checkbox" checked={useCartonPlanning} onChange={e => setUseCartonPlanning(e.target.checked)} className="h-4 w-4 rounded border-slate-300" />
+                  Use carton planning
+                </label>
+                <p className="mt-2 text-xs text-slate-500">Turn this on only when you want to split variant quantity across multiple cartons.</p>
+              </div>
+            )}
+
+            {sourceMode === 'new' && !useCartonPlanning ? (
+              <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                Carton planning is turned off. All variant quantities will be saved under Carton 1 automatically.
+              </div>
+            ) : (
+              <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]"><div className="rounded-3xl border border-slate-200 p-4"><h3 className="text-base font-semibold text-slate-900">Select Cartons</h3><div className="mt-4 grid gap-3 md:grid-cols-2">{draftCartons.map(carton => { const selected = selectedCartonIds.includes(carton.id); return <div key={carton.id} className={`rounded-2xl border p-4 ${selected ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><button type="button" onClick={() => toggleCartonSelection(carton.id)} className="text-left"><div className="text-sm font-semibold">{carton.label}</div><div className={`mt-1 text-xs ${selected ? 'text-slate-300' : 'text-slate-500'}`}>{selected ? 'Selected' : 'Not selected'}</div></button>{carton.id !== 'carton-1' && <button type="button" onClick={() => removeCarton(carton.id)} className={`rounded-full border p-1 ${selected ? 'border-slate-600 text-white' : 'border-slate-300 text-slate-500'}`}><Trash2 className="h-3.5 w-3.5" /></button>}</div></div>; })}</div><button onClick={createNewCarton} className="mt-3 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><Plus className="h-4 w-4" /> Add Carton</button></div><div className="rounded-3xl border border-slate-200 p-4"><h3 className="text-base font-semibold text-slate-900">Assign Quantity to Cartons</h3><div className="mt-4 space-y-3">{activeLines.map(line => <div key={line.key} className="rounded-2xl border border-slate-200 p-3"><div className="text-sm font-semibold text-slate-900">{line.label}</div><div className="mt-2 grid gap-3 md:grid-cols-2"><div><Label>Carton</Label><select value={lineAssignments[line.key]?.cartonId || selectedCartonIds[0]} onChange={e => updateAssignment(line.key, 'cartonId', e.target.value)} className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm"><option value="">Select carton</option>{selectedCartonIds.map(id => <option key={id} value={id}>{draftCartons.find(c => c.id === id)?.label || id}</option>)}</select></div><div><Label>Qty</Label><Input type="number" value={toNumberInputValue(lineAssignments[line.key]?.qty ?? '')} onChange={e => updateAssignment(line.key, 'qty', e.target.value)} /></div></div><div className="mt-2 text-xs text-slate-500">Expected qty: {formatNumber(toNum(line.pcs), 0)}</div></div>)}</div>{!validateDistribution && <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4" />Assign each variant fully to a selected carton before continuing.</div>}{hasUnusedExtraCartons && <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4" />Remove or use every selected carton before continuing.</div>}</div></div>
+            )}
+            <div className="mt-6 flex justify-end"><button onClick={() => setWizardStep('review')} disabled={!canGoReviewNext} className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next: Review</button></div>
           </div>
         )}
 
         {wizardStep === 'review' && (
           <div>
-            <button onClick={() => setWizardStep('cartons')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="grid gap-4 lg:grid-cols-[1fr_360px]"><div className="rounded-3xl border border-slate-200 p-4"><h3 className="text-base font-semibold text-slate-900">Review Entry</h3><div className="mt-4 space-y-4">{selectedCartonIds.map(cartonId => { const cartonLabel = draftCartons.find(c => c.id === cartonId)?.label || cartonId; const lines = distributedLines.filter(l => l.cartonId === cartonId); if (!lines.length) return null; return <div key={cartonId} className="rounded-2xl border border-slate-200 p-4"><div className="mb-3"><div className="text-sm font-semibold text-slate-900">{cartonLabel}</div></div><div className="overflow-auto rounded-2xl border border-slate-200"><table className="min-w-[760px] w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr>{['Variant', 'Pcs', 'RMB/Pcs', 'Tot. RMB', 'INR', 'Rate/Pcs', 'Total INR'].map(h => <th key={h} className="whitespace-nowrap border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-wide">{h}</th>)}</tr></thead><tbody>{lines.map((line, i) => <tr key={`${line.key}-${i}`} className="border-b border-slate-100 last:border-b-0"><td className="px-4 py-3 font-medium text-slate-900">{line.label}</td><td className="px-4 py-3">{formatNumber(line.qty, 0)}</td><td className="px-4 py-3">{formatNumber(toNum(line.rmbPerPcs))}</td><td className="px-4 py-3">{formatNumber(line.totalRmb)}</td><td className="px-4 py-3">₹{formatNumber(line.totalInr)}</td><td className="px-4 py-3">₹{formatNumber(line.ratePerPcs)}</td><td className="px-4 py-3 font-semibold text-slate-900">₹{formatNumber(line.totalInr)}</td></tr>)}</tbody></table></div></div>; })}</div></div><div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="text-sm font-semibold text-slate-900">Review Summary</div><div className="mt-4 space-y-3"><div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Product</div><div className="font-medium text-slate-900">{sourceMode === 'inventory' ? selectedProduct?.name : newProductName}</div></div><div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Cartons</div><div className="font-medium text-slate-900">{selectedCartonIds.map(id => draftCartons.find(c => c.id === id)?.label || id).join(', ')}</div></div></div><div className="mt-4 rounded-2xl bg-white p-4"><div className="mb-2 text-sm font-semibold text-slate-900">Future CBM Preference</div><div className="grid gap-2"><button type="button" onClick={() => setCbmMode('perCarton')} className={`rounded-2xl border px-3 py-3 text-left text-sm font-medium ${cbmMode === 'perCarton' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-700'}`}>Create CBM for each separate carton</button><button type="button" onClick={() => setCbmMode('wholeOrder')} className={`rounded-2xl border px-3 py-3 text-left text-sm font-medium ${cbmMode === 'wholeOrder' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-700'}`}>Create CBM for the whole order</button></div></div><div className="mt-4 grid grid-cols-2 gap-3"><SummaryCard label="Total Pcs" value={formatNumber(draftTotals.totalPcs, 0)} /><SummaryCard label="Total RMB" value={formatNumber(draftTotals.totalRmb)} /><SummaryCard label="Total INR" value={`₹${formatNumber(draftTotals.totalInr)}`} /><SummaryCard label="Lines" value={formatNumber(distributedLines.length, 0)} /></div><button onClick={() => setWizardStep('cbm')} disabled={!canGoReviewNext || cbmMode === 'undecided'} className="mt-4 w-full rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next: CBM Setup</button></div></div>
+            <button onClick={() => setWizardStep(sourceMode === 'new' ? (useCartonPlanning ? 'cartons' : 'pricing') : 'cartons')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
+            <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
+              <div className="rounded-3xl border border-slate-200 p-4">
+                <h3 className="text-base font-semibold text-slate-900">Review Entry</h3>
+                <div className="mt-4 space-y-4">
+                  {(sourceMode === 'new' && !useCartonPlanning ? ['carton-1'] : selectedCartonIds).map(cartonId => {
+                    const cartonLabel = draftCartons.find(c => c.id === cartonId)?.label || cartonId;
+                    const lines = effectiveDistributedLines.filter(l => l.cartonId === cartonId);
+                    if (!lines.length) return null;
+                    return <div key={cartonId} className="rounded-2xl border border-slate-200 p-4"><div className="mb-3"><div className="text-sm font-semibold text-slate-900">{sourceMode === 'new' && !useCartonPlanning ? 'All Variants' : cartonLabel}</div></div><div className="overflow-auto rounded-2xl border border-slate-200"><table className="min-w-[760px] w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr>{['Variant', 'Pcs', 'RMB/Pcs', 'Tot. RMB', 'INR', 'Rate/Pcs', 'Total INR'].map(h => <th key={h} className="whitespace-nowrap border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-wide">{h}</th>)}</tr></thead><tbody>{lines.map((line, i) => <tr key={`${line.key}-${i}`} className="border-b border-slate-100 last:border-b-0"><td className="px-4 py-3 font-medium text-slate-900">{line.label}</td><td className="px-4 py-3">{formatNumber(line.qty, 0)}</td><td className="px-4 py-3">{formatNumber(toNum(line.rmbPerPcs))}</td><td className="px-4 py-3">{formatNumber(line.totalRmb)}</td><td className="px-4 py-3">₹{formatNumber(line.totalInr)}</td><td className="px-4 py-3">₹{formatNumber(line.ratePerPcs)}</td><td className="px-4 py-3 font-semibold text-slate-900">₹{formatNumber(line.totalInr)}</td></tr>)}</tbody></table></div></div>;
+                  })}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm font-semibold text-slate-900">Review Summary</div>
+                <div className="mt-4 space-y-3">
+                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Product</div><div className="font-medium text-slate-900">{sourceMode === 'inventory' ? selectedProduct?.name : newProductName}</div></div>
+                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Category</div><div className="font-medium text-slate-900">{sourceMode === 'inventory' ? selectedProduct?.category : newProductCategory || '—'}</div></div>
+                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Carton Planning</div><div className="font-medium text-slate-900">{sourceMode === 'new' ? (useCartonPlanning ? 'Enabled' : 'Disabled') : 'Enabled'}</div></div>
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-3"><SummaryCard label="Total Pcs" value={formatNumber(draftTotals.totalPcs, 0)} /><SummaryCard label="Total RMB" value={formatNumber(draftTotals.totalRmb)} /><SummaryCard label="Total INR" value={`₹${formatNumber(draftTotals.totalInr)}`} /><SummaryCard label="Lines" value={formatNumber(effectiveDistributedLines.length, 0)} /></div>
+                <button onClick={() => sourceMode === 'new' ? setShowConfirmSave(true) : setWizardStep('cbm')} disabled={!canGoReviewNext} className="mt-4 w-full rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">{sourceMode === 'new' ? 'Review Save Confirmation' : 'Next: CBM Setup'}</button>
+              </div>
+            </div>
           </div>
         )}
 
-        {wizardStep === 'cbm' && (
+        {sourceMode !== 'new' && wizardStep === 'cbm' && (
           <div>
             <button onClick={() => setWizardStep('review')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
             <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="mb-2 text-sm font-semibold text-slate-900">CBM Details</div><div className="space-y-4">{cbmTargets.map(target => { const label = target === 'whole-order' ? 'Common CBM' : (draftCartons.find(c => c.id === target)?.label || target); const count = cbmMode === 'wholeOrder' ? Math.max(selectedCartonIds.length, 1) : 1; const draft = cartonCbmDrafts[target] || { cartons: count, cbmPerCarton: '', cbmRate: '', totalCbm: 0, totalCbmCost: 0 }; return <div key={target} className="rounded-2xl border border-slate-200 bg-white p-4"><div className="mb-3 text-sm font-semibold text-slate-900">{label}</div><div className="grid gap-4 md:grid-cols-2"><div><Label>Total Carton</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{count}</div></div><div><Label>CBM/CTN</Label><Input type="number" value={draft.cbmPerCarton} onChange={e => updateCartonCbm(target, 'cbmPerCarton', e.target.value)} /></div><div><Label>CBM Rate</Label><Input type="number" value={draft.cbmRate} onChange={e => updateCartonCbm(target, 'cbmRate', e.target.value)} /></div><div><Label>Total CBM</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(draft.totalCbm, 3)}</div></div><div className="md:col-span-2"><Label>Total CBM Cost</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(draft.totalCbmCost)}</div></div></div></div>; })}</div>{!hasValidCbmData && <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4" />Fill CBM/CTN and CBM Rate for all required CBM sections before moving forward.</div>}</div>
@@ -673,8 +1046,8 @@ export default function FreightBooking() {
       <Modal open={showConfirmSave} onClose={() => setShowConfirmSave(false)} title="Confirm Save or Edit Details">
         <div className="space-y-4">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">Review summary below. Save now or go back and edit details first.</div>
-          <div className="grid gap-4 lg:grid-cols-[1fr_320px]"><div className="space-y-4">{selectedCartonIds.map(cartonId => { const label = draftCartons.find(c => c.id === cartonId)?.label || cartonId; const lines = distributedLines.filter(l => l.cartonId === cartonId); if (!lines.length) return null; return <div key={cartonId} className="rounded-2xl border border-slate-200 p-4"><div className="mb-2 text-sm font-semibold text-slate-900">{label}</div><div className="text-xs text-slate-500">{lines.map(line => `${line.label} (${line.qty})`).join(', ')}</div></div>; })}</div><div className="space-y-3"><SummaryCard label="Total Pcs" value={formatNumber(draftTotals.totalPcs, 0)} /><SummaryCard label="Total RMB" value={formatNumber(draftTotals.totalRmb)} /><SummaryCard label="Total INR" value={`₹${formatNumber(draftTotals.totalInr)}`} /></div></div>
-          <div className="grid gap-2 md:grid-cols-3">{([{ label: 'Edit Pricing', step: 'pricing' }, { label: 'Edit Cartons', step: 'cartons' }, { label: 'Edit CBM', step: 'cbm' }] as Array<{ label: string; step: WizardStep }>).map(item => <button key={item.label} onClick={() => { setWizardStep(item.step); setShowConfirmSave(false); }} className="flex items-center justify-between rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">{item.label}<Pencil className="h-4 w-4" /></button>)}</div>
+          <div className="grid gap-4 lg:grid-cols-[1fr_320px]"><div className="space-y-4">{(sourceMode === 'new' && !useCartonPlanning ? ['carton-1'] : selectedCartonIds).map(cartonId => { const label = draftCartons.find(c => c.id === cartonId)?.label || cartonId; const lines = effectiveDistributedLines.filter(l => l.cartonId === cartonId); if (!lines.length) return null; return <div key={cartonId} className="rounded-2xl border border-slate-200 p-4"><div className="mb-2 text-sm font-semibold text-slate-900">{sourceMode === 'new' && !useCartonPlanning ? 'All Variants' : label}</div><div className="text-xs text-slate-500">{lines.map(line => `${line.label} (${line.qty})`).join(', ')}</div></div>; })}</div><div className="space-y-3"><SummaryCard label="Total Pcs" value={formatNumber(draftTotals.totalPcs, 0)} /><SummaryCard label="Total RMB" value={formatNumber(draftTotals.totalRmb)} /><SummaryCard label="Total INR" value={`₹${formatNumber(draftTotals.totalInr)}`} /></div></div>
+          <div className="grid gap-2 md:grid-cols-3">{((sourceMode === 'new' ? [{ label: 'Edit Pricing', step: 'pricing' }, { label: 'Edit Cartons', step: 'cartons' }] : [{ label: 'Edit Pricing', step: 'pricing' }, { label: 'Edit Cartons', step: 'cartons' }, { label: 'Edit CBM', step: 'cbm' }]) as Array<{ label: string; step: WizardStep }>).map(item => <button key={item.label} onClick={() => { setWizardStep(item.step); setShowConfirmSave(false); }} className="flex items-center justify-between rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">{item.label}<Pencil className="h-4 w-4" /></button>)}</div>
           <div className="flex justify-end gap-3"><button onClick={() => setShowConfirmSave(false)} className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">Close</button><button onClick={() => saveInquiry('saved')} className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800">Confirm Save</button><button onClick={() => saveInquiry('draft')} className="rounded-2xl border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-900 hover:bg-slate-50">Save Draft</button></div>
         </div>
       </Modal>

@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
 import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder } from '../services/storage';
+import { UploadImportModal } from '../components/UploadImportModal';
+import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
 import { ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, ClipboardList, Filter, IndianRupee, Package, Pencil, Plus, Search, Truck, User, X } from 'lucide-react';
 
@@ -127,6 +129,7 @@ export default function PurchasePanel() {
   const [newPartyNotes, setNewPartyNotes] = useState('');
 
   const [showPartyPopup, setShowPartyPopup] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [showReceivePopup, setShowReceivePopup] = useState(false);
   const [receiveTargetOrder, setReceiveTargetOrder] = useState<PurchaseOrder | null>(null);
   const [receivePriceMethod, setReceivePriceMethod] = useState<ReceivePriceMethod>('no_change');
@@ -464,7 +467,11 @@ export default function PurchasePanel() {
                   <option value="party">Party</option>
                 </select>
               </div>
-              <Button onClick={openCreateOrder}><Plus className="h-4 w-4 mr-1" /> Create Purchase Order</Button>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={downloadPurchaseData}>Download Data</Button>
+                <Button variant="outline" onClick={() => setIsImportModalOpen(true)}>Upload Existing File</Button>
+                <Button onClick={openCreateOrder}><Plus className="h-4 w-4 mr-1" /> Create Purchase Order</Button>
+              </div>
             </div>
           </div>
 
@@ -510,6 +517,18 @@ export default function PurchasePanel() {
           </div>
         </>
       )}
+
+      <UploadImportModal
+        open={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        title="Import Purchase Orders"
+        onDownloadTemplate={downloadPurchaseTemplate}
+        onImportFile={async (file) => {
+          const result = await importPurchaseFromFile(file);
+          refresh();
+          return result;
+        }}
+      />
 
       <Modal
         open={isModalOpen}

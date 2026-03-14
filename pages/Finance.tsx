@@ -227,7 +227,9 @@ export default function Finance() {
     return { matched, short, over };
   }, [filteredCashHistory, data.transactions, expenses]);
 
-  const isAdmin = true;
+  const currentUserEmail = (getCurrentUser() || '').trim().toLowerCase();
+  const profileAdminEmail = (data.profile.email || '').trim().toLowerCase();
+  const isAdmin = !profileAdminEmail || currentUserEmail === profileAdminEmail;
   const todayKey = todayISO();
   const isOpenSessionToday = !!openSession && isSameDay(openSession.startTime, todayKey);
   const cashierName = getCurrentUser() || 'Cashier';
@@ -414,7 +416,11 @@ export default function Finance() {
   };
 
   const handleManagerUnlock = () => {
-    const requiredPin = data.profile.adminPin || '1234';
+    const requiredPin = (data.profile.adminPin || '').trim();
+    if (!requiredPin) {
+      setErrors('Manager PIN is not configured. Set it in Settings first.');
+      return;
+    }
     if (!unlockPinInput.trim()) {
       setErrors('Please enter manager PIN.');
       return;
@@ -804,7 +810,7 @@ export default function Finance() {
                   <CardContent className="space-y-3">
                     <p className="text-sm text-muted-foreground">Enter PIN to edit opening balance.</p>
                     <Label>PIN</Label>
-                    <Input type="password" inputMode="numeric" value={unlockPinInput} onChange={e => setUnlockPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} placeholder="PIN (demo: 1234)" />
+                    <Input type="password" inputMode="numeric" value={unlockPinInput} onChange={e => setUnlockPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} placeholder="Enter manager PIN" />
                     <div className="flex gap-2">
                       <Button variant="outline" onClick={() => { setIsOpeningUnlockModalOpen(false); setUnlockPinInput(''); }}>Close</Button>
                       <Button onClick={handleManagerUnlock}>Unlock</Button>

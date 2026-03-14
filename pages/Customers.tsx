@@ -7,6 +7,8 @@ import { loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOr
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
+import { UploadImportModal } from '../components/UploadImportModal';
+import { downloadCustomersData, downloadCustomersTemplate, importCustomersFromFile } from '../services/importExcel';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label } from '../components/ui';
 import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
@@ -29,6 +31,7 @@ export default function Customers() {
   const [editingUpfrontOrder, setEditingUpfrontOrder] = useState<UpfrontOrder | null>(null);
   const [selectedUpfrontOrder, setSelectedUpfrontOrder] = useState<UpfrontOrder | null>(null);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [exportType, setExportType] = useState<'statement' | 'dues_report' | 'invoice'>('statement');
   const [txToExport, setTxToExport] = useState<Transaction | null>(null);
 
@@ -555,6 +558,8 @@ export default function Customers() {
                 <p className="text-xs md:text-sm text-muted-foreground hidden sm:block font-medium">Credit tracking and customer database.</p>
               </div>
               <div className="flex gap-2">
+                  <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={downloadCustomersData}>Download Data</Button>
+                  <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={() => setIsImportModalOpen(true)}>Upload Existing File</Button>
                   <Button onClick={() => setIsAddModalOpen(true)} size="sm" className="h-8 md:h-9 bg-primary shadow-sm">
                       <Plus className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Add Customer</span>
                   </Button>
@@ -1139,6 +1144,18 @@ export default function Customers() {
               </Card>
           </div>
       )}
+      <UploadImportModal
+        open={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        title="Import Customers"
+        onDownloadTemplate={downloadCustomersTemplate}
+        onImportFile={async (file) => {
+          const result = await importCustomersFromFile(file);
+          refreshData();
+          return result;
+        }}
+      />
+
       <ExportModal 
         isOpen={isExportModalOpen} 
         onClose={() => setIsExportModalOpen(false)} 

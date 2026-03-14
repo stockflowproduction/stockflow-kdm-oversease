@@ -9,6 +9,8 @@ import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label,
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel } from '../services/excel';
+import { UploadImportModal } from '../components/UploadImportModal';
+import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
 
 export default function Admin() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -21,6 +23,7 @@ export default function Admin() {
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [isLowStockModalOpen, setIsLowStockModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [exportType, setExportType] = useState<'inventory' | 'low-stock'>('inventory');
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   
@@ -132,7 +135,15 @@ export default function Admin() {
       stock: Number(totalComboStock) || 0,
       variants: hasCombos ? (formData.variants || []) : [],
       colors: hasCombos ? (formData.colors || []) : [],
-      stockByVariantColor: hasCombos ? formData.stockByVariantColor : []
+      stockByVariantColor: hasCombos
+        ? (formData.stockByVariantColor || []).map((row: any) => ({
+            variant: row.variant,
+            color: row.color,
+            stock: Math.max(0, Number(row.stock) || 0),
+            buyPrice: row.buyPrice === '' || row.buyPrice === undefined ? undefined : Math.max(0, Number(row.buyPrice) || 0),
+            sellPrice: row.sellPrice === '' || row.sellPrice === undefined ? undefined : Math.max(0, Number(row.sellPrice) || 0),
+          }))
+        : []
     } as Product;
 
     setIsSaving(true);
@@ -220,11 +231,17 @@ export default function Admin() {
     const variants = nextVariants.length ? nextVariants : [NO_VARIANT];
     const colors = nextColors.length ? nextColors : [NO_COLOR];
     const existingRows = Array.isArray(formData.stockByVariantColor) ? formData.stockByVariantColor : [];
-    const nextRows: Array<{ variant: string; color: string; stock: number }> = [];
+    const nextRows: Array<{ variant: string; color: string; stock: number; buyPrice: number | ''; sellPrice: number | '' }> = [];
     variants.forEach(v => {
       colors.forEach(c => {
         const existing = existingRows.find((row: any) => row.variant === v && row.color === c);
-        nextRows.push({ variant: v, color: c, stock: Number(existing?.stock || 0) });
+        nextRows.push({
+          variant: v,
+          color: c,
+          stock: Number(existing?.stock || 0),
+          buyPrice: Number.isFinite(existing?.buyPrice) ? Number(existing.buyPrice) : '',
+          sellPrice: Number.isFinite(existing?.sellPrice) ? Number(existing.sellPrice) : '',
+        });
       });
     });
     return nextRows;
@@ -832,6 +849,8 @@ export default function Admin() {
                    <Button variant="outline" size="icon" onClick={() => { setExportType('inventory'); setIsExportModalOpen(true); }} title="Download Catalog" className="shrink-0">
                        <FileDown className="w-4 h-4" />
                    </Button>
+                   <Button variant="outline" onClick={downloadInventoryData} className="h-9">Download Data</Button>
+                   <Button variant="outline" onClick={() => setIsImportModalOpen(true)} className="h-9">Upload Existing File</Button>
                    
                    <Button onClick={() => openModal()} className="bg-primary hover:bg-primary/90 text-white shadow-md hover:shadow-lg transition-all flex-1 md:flex-none">
                        <Plus className="w-4 h-4 mr-2" /> <span className="md:inline">Add Product</span>
@@ -1032,16 +1051,26 @@ export default function Admin() {
 
                     {(formData.variants?.length || formData.colors?.length) && (
                       <div className="border rounded-md overflow-hidden">
-                        <div className="grid grid-cols-3 bg-muted px-2 py-1 text-xs font-semibold">
-                          <div>Variant</div><div>Color</div><div>Stock</div>
+                        <div className="grid grid-cols-5 gap-2 bg-muted px-2 py-1 text-xs font-semibold">
+                          <div>Variant</div><div>Color</div><div>Stock</div><div>Buy Price</div><div>Sell Price</div>
                         </div>
                         {(formData.stockByVariantColor || []).map((row: any, idx: number) => (
-                          <div className="grid grid-cols-3 px-2 py-1 border-t" key={`${row.variant}-${row.color}-${idx}`}>
+                          <div className="grid grid-cols-5 gap-2 px-2 py-1 border-t" key={`${row.variant}-${row.color}-${idx}`}>
                             <div className="text-xs py-2">{row.variant || NO_VARIANT}</div>
                             <div className="text-xs py-2">{row.color || NO_COLOR}</div>
                             <Input type="number" min="0" value={row.stock} onChange={e => {
                               const next = [...(formData.stockByVariantColor || [])];
                               next[idx] = { ...next[idx], stock: Math.max(0, Number(e.target.value) || 0) };
+                              setFormData({ ...formData, stockByVariantColor: next });
+                            }} />
+                            <Input type="number" min="0" value={row.buyPrice ?? ''} placeholder="0.00" onChange={e => {
+                              const next = [...(formData.stockByVariantColor || [])];
+                              next[idx] = { ...next[idx], buyPrice: e.target.value === '' ? '' : Math.max(0, Number(e.target.value) || 0) };
+                              setFormData({ ...formData, stockByVariantColor: next });
+                            }} />
+                            <Input type="number" min="0" value={row.sellPrice ?? ''} placeholder="0.00" onChange={e => {
+                              const next = [...(formData.stockByVariantColor || [])];
+                              next[idx] = { ...next[idx], sellPrice: e.target.value === '' ? '' : Math.max(0, Number(e.target.value) || 0) };
                               setFormData({ ...formData, stockByVariantColor: next });
                             }} />
                           </div>
@@ -1325,6 +1354,18 @@ export default function Admin() {
               </Card>
           </div>
       )}
+      <UploadImportModal
+        open={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        title="Import Inventory"
+        onDownloadTemplate={downloadInventoryTemplate}
+        onImportFile={async (file) => {
+          const result = await importInventoryFromFile(file);
+          refreshData();
+          return result;
+        }}
+      />
+
       {/* Export Modal */}
       <ExportModal 
             isOpen={isExportModalOpen} 

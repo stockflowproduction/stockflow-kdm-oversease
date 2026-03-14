@@ -10,6 +10,8 @@ import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button 
 import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
+import { UploadImportModal } from '../components/UploadImportModal';
+import { downloadTransactionsData, downloadTransactionsTemplate, importTransactionsFromFile } from '../services/importExcel';
 
 export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -20,6 +22,7 @@ export default function Transactions() {
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [viewMode, setViewMode] = useState<'default' | 'list' | 'list-details' | 'medium'>('list-details');
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [exportType, setExportType] = useState<'summary' | 'invoice'>('summary');
   const [txToExport, setTxToExport] = useState<Transaction | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -297,6 +300,9 @@ export default function Transactions() {
             <Button onClick={() => { setExportType('summary'); setIsExportModalOpen(true); }} variant="outline" size="icon" title="Download Report">
                 <Download className="w-4 h-4" />
             </Button>
+
+            <Button variant="outline" onClick={downloadTransactionsData} className="h-9 text-sm">Download Data</Button>
+            <Button variant="outline" onClick={() => setIsImportModalOpen(true)} className="h-9 text-sm">Upload Existing File</Button>
 
             <div className="w-px h-6 bg-border mx-1 hidden md:block"></div>
 
@@ -746,6 +752,20 @@ export default function Transactions() {
               </Card>
           </div>
       )}
+
+      <UploadImportModal
+        open={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        title="Import Transactions"
+        onDownloadTemplate={downloadTransactionsTemplate}
+        onImportFile={async (file) => {
+          const result = await importTransactionsFromFile(file);
+          const data = loadData();
+          setTransactions(data.transactions);
+          setCustomers(data.customers);
+          return result;
+        }}
+      />
 
       <ExportModal 
         isOpen={isExportModalOpen} 

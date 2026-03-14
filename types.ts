@@ -17,6 +17,8 @@ export interface Product {
     variant: string;
     color: string;
     stock: number;
+    buyPrice?: number;
+    sellPrice?: number;
   }>;
 }
 

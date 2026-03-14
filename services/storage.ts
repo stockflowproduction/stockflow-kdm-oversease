@@ -16,7 +16,7 @@ import {
   PurchaseParty,
 } from '../types';
 import { db, auth } from './firebase';
-import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, arrayUnion } from 'firebase/firestore';
+import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 
 let isCloudSynced = false;
@@ -63,12 +63,11 @@ const OPERATION_TYPES = {
 
 let cloudSyncStatus: (typeof CLOUD_SYNC_STATUSES)[keyof typeof CLOUD_SYNC_STATUSES] = CLOUD_SYNC_STATUSES.IDLE;
 
-// Phase 1 migration: products moved to stores/{uid}/products/{productId}
-// TODO(phase1-cleanup): remove root-array fallback reads once migration verification completes.
+// Products/customers/transactions are sourced from per-entity subcollections.
 const MIGRATION_PHASES = {
-  PRODUCTS: 'phase1_products_subcollection',
-  CUSTOMERS: 'phase1_customers_subcollection',
-  TRANSACTIONS: 'phase1_transactions_subcollection',
+  PRODUCTS: 'products_subcollection',
+  CUSTOMERS: 'customers_subcollection',
+  TRANSACTIONS: 'transactions_subcollection',
 } as const;
 const PRODUCTS_MIGRATION_PHASE = MIGRATION_PHASES.PRODUCTS;
 const CUSTOMERS_MIGRATION_PHASE = MIGRATION_PHASES.CUSTOMERS;
@@ -77,14 +76,6 @@ const CUSTOMER_PRODUCT_STATS_BACKFILL_MARKER_VERSION = 'v1';
 const ENFORCE_CUSTOMER_PRODUCT_STATS_BACKFILL = String((import.meta as any).env?.VITE_ENFORCE_CUSTOMER_PRODUCT_STATS_BACKFILL || '').toLowerCase() === 'true';
 
 let isCustomerProductStatsBackfillComplete = false;
-const DELETION_MARKER_KEYS = {
-  PRODUCTS: 'deletedProductIds',
-  CUSTOMERS: 'deletedCustomerIds',
-  TRANSACTIONS: 'deletedTransactionIds',
-} as const;
-let deletedProductIdsMarker = new Set<string>();
-let deletedCustomerIdsMarker = new Set<string>();
-let deletedTransactionIdsMarker = new Set<string>();
 
 type AuditOperation = (typeof AUDIT_OPERATIONS)[keyof typeof AUDIT_OPERATIONS];
 type DataOpPhase = (typeof DATA_OP_PHASES)[keyof typeof DATA_OP_PHASES];
@@ -118,13 +109,6 @@ export const STORAGE_FLOW_REGISTRY = Object.freeze({
   migrationPhases: MIGRATION_PHASES,
 });
 
-
-const mergeById = <T extends { id: string }>(primary: T[], fallback: T[]): T[] => {
-  const merged = new Map<string, T>();
-  fallback.forEach(item => merged.set(item.id, item));
-  primary.forEach(item => merged.set(item.id, item));
-  return Array.from(merged.values());
-};
 
 const sortTransactionsDesc = (transactions: Transaction[]) =>
   [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -269,14 +253,10 @@ const commitProcessTransactionAtomically = async ({
   transaction,
   legacyCustomerProductStatsSeed,
   allowLegacySeed,
-  fallbackProductsById,
-  fallbackCustomersById,
 }: {
   transaction: Transaction;
   legacyCustomerProductStatsSeed: Record<string, { soldQty: number; returnedQty: number }>;
   allowLegacySeed: boolean;
-  fallbackProductsById: Record<string, Product>;
-  fallbackCustomersById: Record<string, Customer>;
 }): Promise<{ created: boolean; committedProducts: Product[]; committedCustomer: Customer | null }> => {
   const user = await assertCloudWriteReady('processTransaction_atomic');
 
@@ -333,14 +313,11 @@ const commitProcessTransactionAtomically = async ({
     for (const [productId, delta] of productDeltas.entries()) {
       const productRef = doc(db!, 'stores', user.uid, 'products', productId);
       const productSnap = productSnapshots.get(productId)!;
-      const fallbackProduct = fallbackProductsById[productId];
-      if (!productSnap.exists() && !fallbackProduct) {
+      if (!productSnap.exists()) {
         failValidation('PRODUCT_NOT_FOUND', 'Transaction item product not found in cloud state.', { itemId: productId });
       }
 
-      const currentProduct = productSnap.exists()
-        ? ({ ...(productSnap.data() as Product), id: productSnap.id })
-        : ({ ...fallbackProduct, id: productId });
+      const currentProduct = { ...(productSnap.data() as Product), id: productSnap.id };
       const availableStock = getAvailableStockForItem(currentProduct, delta.variant, delta.color);
       if (transaction.type === 'sale' && Math.abs(delta.quantityDelta) > availableStock) {
         failValidation('OVERSALE_STOCK', 'Insufficient stock for product in cloud state.', {
@@ -374,14 +351,11 @@ const commitProcessTransactionAtomically = async ({
     if (transaction.customerId) {
       const customerRef = doc(db!, 'stores', user.uid, 'customers', transaction.customerId);
       const currentCustomerSnap = customerSnap;
-      const fallbackCustomer = fallbackCustomersById[transaction.customerId];
-      if (!currentCustomerSnap?.exists() && !fallbackCustomer) {
+      if (!currentCustomerSnap?.exists()) {
         failValidation('CUSTOMER_NOT_FOUND', 'Transaction customer not found in cloud state.', { customerId: transaction.customerId });
       }
 
-      const currentCustomer = currentCustomerSnap?.exists()
-        ? ({ ...(currentCustomerSnap.data() as Customer), id: currentCustomerSnap.id })
-        : ({ ...fallbackCustomer, id: transaction.customerId });
+      const currentCustomer = { ...(currentCustomerSnap.data() as Customer), id: currentCustomerSnap.id };
       const amount = Math.abs(transaction.total);
       let newTotalSpend = currentCustomer.totalSpend;
       let newTotalDue = currentCustomer.totalDue;
@@ -616,14 +590,9 @@ const syncFromCloud = async () => {
               .map(docItem => ({ ...(docItem.data() as Product), id: docItem.id }))
               .filter(p => !((p as any).isDeleted));
 
-            const fallbackProducts = (memoryState.products || []).filter(p => !deletedProductIdsMarker.has(p.id));
-            const mergedProducts = mergeById(products, fallbackProducts);
-            // Keep fallback-root entities while phased migration is incomplete.
-            if (mergedProducts.length > 0 || products.length > 0) {
-              memoryState = { ...memoryState, products: mergedProducts };
-              console.debug('[migration-trace] products snapshot applied', { snapshotCount: products.length, mergedCount: mergedProducts.length, deletedProductMarkerCount: deletedProductIdsMarker.size });
-              emitLocalStorageUpdate();
-            }
+            memoryState = { ...memoryState, products };
+            console.debug('[migration-trace] products snapshot applied', { snapshotCount: products.length });
+            emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to product subcollection:', error);
         });
@@ -633,14 +602,9 @@ const syncFromCloud = async () => {
               .map(docItem => ({ ...(docItem.data() as Customer), id: docItem.id }))
               .filter(c => !((c as any).isDeleted));
 
-            const fallbackCustomers = (memoryState.customers || []).filter(c => !deletedCustomerIdsMarker.has(c.id));
-            const mergedCustomers = mergeById(customers, fallbackCustomers);
-            // Keep fallback-root entities while phased migration is incomplete.
-            if (mergedCustomers.length > 0 || customers.length > 0) {
-              memoryState = { ...memoryState, customers: mergedCustomers };
-              console.debug('[migration-trace] customers snapshot applied', { snapshotCount: customers.length, mergedCount: mergedCustomers.length });
-              emitLocalStorageUpdate();
-            }
+            memoryState = { ...memoryState, customers };
+            console.debug('[migration-trace] customers snapshot applied', { snapshotCount: customers.length });
+            emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to customer subcollection:', error);
         });
@@ -650,14 +614,10 @@ const syncFromCloud = async () => {
               .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
               .filter(t => !((t as any).isDeleted));
 
-            const fallbackTransactions = (memoryState.transactions || []).filter(t => !deletedTransactionIdsMarker.has(t.id));
-            const mergedTransactions = sortTransactionsDesc(mergeById(transactions, fallbackTransactions));
-            // Keep fallback-root entities while phased migration is incomplete.
-            if (mergedTransactions.length > 0 || transactions.length > 0) {
-              memoryState = { ...memoryState, transactions: mergedTransactions };
-              console.debug('[migration-trace] transactions snapshot applied', { snapshotCount: transactions.length, mergedCount: mergedTransactions.length });
-              emitLocalStorageUpdate();
-            }
+            const sortedTransactions = sortTransactionsDesc(transactions);
+            memoryState = { ...memoryState, transactions: sortedTransactions };
+            console.debug('[migration-trace] transactions snapshot applied', { snapshotCount: sortedTransactions.length });
+            emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to transaction subcollection:', error);
         });
@@ -666,19 +626,6 @@ const syncFromCloud = async () => {
             if (docSnap.exists()) {
                 storeDocumentExists = true;
                 const cloudData = docSnap.data() as AppState;
-                const deletedProductIds = Array.isArray((cloudData as any).migrationMarkers?.[DELETION_MARKER_KEYS.PRODUCTS])
-                  ? ((cloudData as any).migrationMarkers?.[DELETION_MARKER_KEYS.PRODUCTS] as string[])
-                  : [];
-                const deletedCustomerIds = Array.isArray((cloudData as any).migrationMarkers?.[DELETION_MARKER_KEYS.CUSTOMERS])
-                  ? ((cloudData as any).migrationMarkers?.[DELETION_MARKER_KEYS.CUSTOMERS] as string[])
-                  : [];
-                const deletedTransactionIds = Array.isArray((cloudData as any).migrationMarkers?.[DELETION_MARKER_KEYS.TRANSACTIONS])
-                  ? ((cloudData as any).migrationMarkers?.[DELETION_MARKER_KEYS.TRANSACTIONS] as string[])
-                  : [];
-                deletedProductIdsMarker = new Set(deletedProductIds);
-                deletedCustomerIdsMarker = new Set(deletedCustomerIds);
-                deletedTransactionIdsMarker = new Set(deletedTransactionIds);
-
                 const customerProductStatsBackfill = cloudData.migrationMarkers?.customerProductStatsBackfill;
                 const strictBackfill = customerProductStatsBackfill?.status === 'completed'
                   && customerProductStatsBackfill?.strictModeEnabled === true
@@ -688,26 +635,16 @@ const syncFromCloud = async () => {
                 const subcollectionProducts = await readProductsFromSubcollection(user.uid);
                 const subcollectionCustomers = await readCustomersFromSubcollection(user.uid);
                 const subcollectionTransactions = await readTransactionsFromSubcollection(user.uid);
-                const fallbackProducts = mergeById(cloudData.products || [], memoryState.products || []).filter(p => !deletedProductIdsMarker.has(p.id));
-                const fallbackCustomers = mergeById(cloudData.customers || [], memoryState.customers || []).filter(c => !deletedCustomerIdsMarker.has(c.id));
-                const fallbackTransactions = sortTransactionsDesc(mergeById(cloudData.transactions || [], memoryState.transactions || []).filter(t => !deletedTransactionIdsMarker.has(t.id)));
-
-                const hydratedProducts = mergeById(subcollectionProducts, fallbackProducts);
-                const hydratedCustomers = mergeById(subcollectionCustomers, fallbackCustomers);
-                const hydratedTransactions = sortTransactionsDesc(mergeById(subcollectionTransactions, fallbackTransactions));
+                const hydratedProducts = subcollectionProducts;
+                const hydratedCustomers = subcollectionCustomers;
+                const hydratedTransactions = subcollectionTransactions;
                 console.debug('[migration-trace] root hydration merge', {
-                  rootProducts: (cloudData.products || []).length,
-                  rootCustomers: (cloudData.customers || []).length,
-                  rootTransactions: (cloudData.transactions || []).length,
                   subProducts: subcollectionProducts.length,
                   subCustomers: subcollectionCustomers.length,
                   subTransactions: subcollectionTransactions.length,
                   finalProducts: hydratedProducts.length,
                   finalCustomers: hydratedCustomers.length,
                   finalTransactions: hydratedTransactions.length,
-                  deletedProductMarkerCount: deletedProductIdsMarker.size,
-                  deletedCustomerMarkerCount: deletedCustomerIdsMarker.size,
-                  deletedTransactionMarkerCount: deletedTransactionIdsMarker.size,
                 });
                 memoryState = {
                     ...initialData,
@@ -818,7 +755,7 @@ const toStockKey = (variant?: string, color?: string) => `${normalizeLabel(varia
 
 const sanitizeVariantColorStock = (product: Product): Product => {
   const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
-  const dedup = new Map<string, { variant: string; color: string; stock: number }>();
+  const dedup = new Map<string, { variant: string; color: string; stock: number; buyPrice?: number; sellPrice?: number }>();
 
   entries.forEach(entry => {
     const variant = normalizeLabel(entry.variant) || 'No Variant';
@@ -826,8 +763,15 @@ const sanitizeVariantColorStock = (product: Product): Product => {
     const stock = Number.isFinite(entry.stock) && entry.stock > 0 ? entry.stock : 0;
     const key = toStockKey(variant, color);
     const existing = dedup.get(key);
-    if (existing) existing.stock += stock;
-    else dedup.set(key, { variant, color, stock });
+    const buyPrice = Number.isFinite(entry.buyPrice) && Number(entry.buyPrice) >= 0 ? Number(entry.buyPrice) : undefined;
+    const sellPrice = Number.isFinite(entry.sellPrice) && Number(entry.sellPrice) >= 0 ? Number(entry.sellPrice) : undefined;
+    if (existing) {
+      existing.stock += stock;
+      if (existing.buyPrice === undefined && buyPrice !== undefined) existing.buyPrice = buyPrice;
+      if (existing.sellPrice === undefined && sellPrice !== undefined) existing.sellPrice = sellPrice;
+    } else {
+      dedup.set(key, { variant, color, stock, buyPrice, sellPrice });
+    }
   });
 
   const stockByVariantColor = Array.from(dedup.values()).filter(entry => entry.stock >= 0);
@@ -896,6 +840,7 @@ type CloudinarySignResponse = {
   signature: string;
   apiKey: string;
   cloudName: string;
+  uploadFolder: string;
 };
 
 type CloudinaryStage = 'signature' | 'upload';
@@ -1020,7 +965,7 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
         }
 
         const body = await response.json() as CloudinarySignResponse;
-        if (!body?.signature || !body?.apiKey || !body?.cloudName || !body?.timestamp) {
+        if (!body?.signature || !body?.apiKey || !body?.cloudName || !body?.timestamp || !body?.uploadFolder) {
           const error = new CloudinaryUploadError({
             message: 'Cloudinary signature response missing required fields',
             stage: 'signature',
@@ -1074,6 +1019,7 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
       formData.append('timestamp', String(signedParams.timestamp));
       formData.append('signature', signedParams.signature);
       formData.append('api_key', signedParams.apiKey);
+      formData.append('folder', signedParams.uploadFolder);
 
       const uploadResponse = await withTimeout(
         fetch(uploadEndpoint, {
@@ -1195,7 +1141,7 @@ const syncToCloud = async (data: AppState) => {
     }
 
     try {
-        // Phase 1 migration: keep migrated entities out of root store writes to avoid array-overwrite blast radius.
+        // Keep subcollection-owned entities out of root store writes to avoid array-overwrite blast radius.
         const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, ...rootStateWithoutMigratedEntities } = data;
         const normalizedState = { ...rootStateWithoutMigratedEntities };
         const cleanData = sanitizeData(normalizedState);
@@ -1408,13 +1354,7 @@ export const deleteProduct = async (id: string): Promise<Product[]> => {
   const newProducts = data.products.filter(p => p.id !== id);
 
   if (db) {
-    const user = await assertCloudWriteReady('deleteProduct_marker_cleanup');
     await deleteProductInSubcollection(id, 'deleteProduct');
-    await setDoc(doc(db, 'stores', user.uid), {
-      migrationMarkers: {
-        [DELETION_MARKER_KEYS.PRODUCTS]: arrayUnion(id),
-      },
-    }, { merge: true });
   } else {
     await saveData({ ...data, products: newProducts }, { throwOnError: true, reason: 'deleteProduct_local_fallback', auditOperation: 'DELETE' });
     return newProducts;
@@ -1486,7 +1426,7 @@ export const deleteCategory = (category: string): AppState => {
         migrationPhase: PRODUCTS_MIGRATION_PHASE,
         affectedProducts: changedProducts.map(p => p.id),
       }))
-      .catch(error => console.error('[phase1-products] failed to relabel category in product docs', error));
+      .catch(error => console.error('[storage-products] failed to relabel category in product docs', error));
   }
 
   const newState = { ...data, categories: newCategories };
@@ -1510,7 +1450,7 @@ export const renameCategory = (oldName: string, newName: string): AppState => {
           migrationPhase: PRODUCTS_MIGRATION_PHASE,
           affectedProducts: changedProducts.map(p => p.id),
         }))
-        .catch(error => console.error('[phase1-products] failed to rename category in product docs', error));
+        .catch(error => console.error('[storage-products] failed to rename category in product docs', error));
     }
     const newState = { ...data, categories: newCategories };
     void saveData(newState, { reason: 'renameCategory', auditOperation: 'UPDATE' });
@@ -1735,7 +1675,13 @@ export const addCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers);
 
-    const newCustomer = { ...customer, totalDue: 0 };
+    const newCustomer = {
+      ...customer,
+      totalSpend: Number.isFinite(customer.totalSpend) ? Math.max(0, customer.totalSpend) : 0,
+      totalDue: Number.isFinite(customer.totalDue) ? Math.max(0, customer.totalDue) : 0,
+      visitCount: Number.isFinite(customer.visitCount) ? Math.max(0, Math.floor(customer.visitCount)) : 0,
+      lastVisit: customer.lastVisit || new Date().toISOString(),
+    };
     const newCustomers = [...data.customers, newCustomer];
     if (!db) {
       void saveData({ ...data, customers: newCustomers }, { reason: 'addCustomer_local_fallback', auditOperation: 'CREATE' });
@@ -1754,7 +1700,7 @@ export const addCustomer = (customer: Customer): Customer[] => {
         customersCount: newCustomers.length,
       }))
       .catch(error => {
-        console.error('[phase1-customers] add customer failed', error);
+        console.error('[storage-customers] add customer failed', error);
         // Roll back only if the customer doc upsert likely failed.
         memoryState = { ...memoryState, customers: data.customers };
         emitLocalStorageUpdate();
@@ -1785,7 +1731,7 @@ export const updateCustomer = (customer: Customer): Customer[] => {
         memoryState = { ...memoryState, customers: newCustomers };
         emitLocalStorageUpdate();
       })
-      .catch(error => console.error('[phase1-customers] update customer failed', error));
+      .catch(error => console.error('[storage-customers] update customer failed', error));
 
     return newCustomers;
 }
@@ -1861,15 +1807,7 @@ export const deleteCustomer = (id: string): Customer[] => {
     memoryState = { ...memoryState, customers: newCustomers };
     emitLocalStorageUpdate();
 
-    void assertCloudWriteReady('deleteCustomer_marker_cleanup')
-      .then((user) => Promise.all([
-        deleteCustomerInSubcollection(id, 'deleteCustomer'),
-        setDoc(doc(db!, 'stores', user.uid), {
-          migrationMarkers: {
-            [DELETION_MARKER_KEYS.CUSTOMERS]: arrayUnion(id),
-          },
-        }, { merge: true }),
-      ]))
+    void deleteCustomerInSubcollection(id, 'deleteCustomer')
       .then(() => syncToCloud({ ...data }))
       .then(() => writeAuditEvent('DELETE', {
         reason: 'deleteCustomer_subcollection',
@@ -1878,7 +1816,7 @@ export const deleteCustomer = (id: string): Customer[] => {
         customersCount: newCustomers.length,
       }))
       .catch(error => {
-        console.error('[phase1-customers] delete customer failed', error);
+        console.error('[storage-customers] delete customer failed', error);
         memoryState = { ...memoryState, customers: data.customers };
         emitLocalStorageUpdate();
       });
@@ -2482,15 +2420,11 @@ export const processTransaction = (transaction: Transaction): AppState => {
 
   if (db) {
     emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…' });
-    const fallbackProductsById = Object.fromEntries(data.products.map(p => [p.id, p]));
-    const fallbackCustomersById = Object.fromEntries(data.customers.map(c => [c.id, c]));
 
     void commitProcessTransactionAtomically({
       transaction,
       legacyCustomerProductStatsSeed,
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
-      fallbackProductsById,
-      fallbackCustomersById,
     })
       .then(({ created, committedProducts, committedCustomer }) => {
         console.debug('[migration-trace] processTransaction commit result', {
@@ -2549,11 +2483,11 @@ export const processTransaction = (transaction: Transaction): AppState => {
           }),
 syncToCloud({ ...data }),
         ]).catch(error => {
-          console.error('[phase1-transactions] post-commit side effects failed', error);
+          console.error('[storage-transactions] post-commit side effects failed', error);
         });
       })
       .catch(error => {
-        console.error('[phase1-transactions] failed atomic processTransaction commit', {
+        console.error('[storage-transactions] failed atomic processTransaction commit', {
           transactionId: transaction.id,
           error,
         });
@@ -2590,15 +2524,7 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
   memoryState = { ...memoryState, transactions: next };
   emitLocalStorageUpdate();
 
-  void assertCloudWriteReady('deleteTransaction_marker_cleanup')
-    .then((user) => Promise.all([
-      deleteTransactionInSubcollection(transactionId, 'deleteTransaction'),
-      setDoc(doc(db!, 'stores', user.uid), {
-        migrationMarkers: {
-          [DELETION_MARKER_KEYS.TRANSACTIONS]: arrayUnion(transactionId),
-        },
-      }, { merge: true }),
-    ]))
+  void deleteTransactionInSubcollection(transactionId, 'deleteTransaction')
     .then(() => syncToCloud({ ...data }))
     .then(() => writeAuditEvent('DELETE', {
       reason: 'deleteTransaction_subcollection',
@@ -2607,7 +2533,7 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
       transactionsCount: next.length,
     }))
     .catch(error => {
-      console.error('[phase1-transactions] failed to delete transaction', error);
+      console.error('[storage-transactions] failed to delete transaction', error);
       memoryState = { ...memoryState, transactions: data.transactions };
       emitLocalStorageUpdate();
     });
