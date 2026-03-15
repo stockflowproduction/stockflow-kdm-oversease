@@ -41,11 +41,15 @@ export default function Admin() {
   const barcodeCanvasRef = useRef<HTMLCanvasElement>(null);
 
   // Form State
-  const [formData, setFormData] = useState<any>({
-    name: '', barcode: '', buyPrice: '', sellPrice: '', stock: '', description: '', category: '', hsn: '',
-    variants: [] as string[], colors: [] as string[], stockByVariantColor: [] as Array<{ variant: string; color: string; stock: number }>,
-    variantInput: '', colorInput: ''
-  });
+  const emptyProductForm = {
+    name: '', barcode: '', buyPrice: '', sellPrice: '', stock: '', totalPurchase: '', totalSold: '', description: '', category: '', hsn: '',
+    variants: [] as string[],
+    colors: [] as string[],
+    stockByVariantColor: [] as Array<{ variant: string; color: string; stock: number; buyPrice?: number | ''; sellPrice?: number | ''; totalPurchase?: number | ''; totalSold?: number | '' }>,
+    variantInput: '',
+    colorInput: ''
+  };
+  const [formData, setFormData] = useState<any>(emptyProductForm);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [editingCategory, setEditingCategory] = useState<string | null>(null);
   const [editCategoryValue, setEditCategoryValue] = useState('');
@@ -109,18 +113,40 @@ export default function Admin() {
     }
   }, [barcodePreview]);
 
+  const toNonNegativeNumber = (value: any) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  };
+
+  const parseOptionalNonNegative = (value: any): number | undefined => {
+    if (value === '' || value === null || value === undefined) return undefined;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return n;
+  };
+
+  const getSuggestedStock = (totalPurchase: any, totalSold: any) => {
+    const purchase = toNonNegativeNumber(totalPurchase);
+    const sold = toNonNegativeNumber(totalSold);
+    return Math.max(0, purchase - sold);
+  };
+
   const handleSave = async () => {
     if (isSaving) return;
+    const hasVariantAxes = !!(formData.variants?.length || formData.colors?.length);
+    const hasCombos = hasVariantAxes && Array.isArray(formData.stockByVariantColor) && formData.stockByVariantColor.length > 0;
+
     // Strict Validation
-    if (!formData.name || !formData.barcode || !formData.category || 
-        formData.buyPrice === '' || formData.sellPrice === '') {
+    if (!formData.name || !formData.barcode || !formData.category ||
+        (!hasCombos && (formData.buyPrice === '' || formData.sellPrice === ''))) {
         setError("Please fill in all required fields marked with *");
         return;
     }
     setError(null);
 
-    const hasCombos = Array.isArray(formData.stockByVariantColor) && formData.stockByVariantColor.length > 0;
-    const totalComboStock = hasCombos ? formData.stockByVariantColor.reduce((sum: number, row: any) => sum + (Number(row.stock) || 0), 0) : Number(formData.stock);
+    const totalComboStock = hasCombos
+      ? formData.stockByVariantColor.reduce((sum: number, row: any) => sum + toNonNegativeNumber(row.stock), 0)
+      : toNonNegativeNumber(formData.stock);
 
     const productPayload = {
       id: editingProduct ? editingProduct.id : Date.now().toString(),
@@ -130,18 +156,22 @@ export default function Admin() {
       description: formData.description || '',
       category: formData.category,
       hsn: formData.hsn || '',
-      buyPrice: Number(formData.buyPrice),
-      sellPrice: Number(formData.sellPrice),
-      stock: Number(totalComboStock) || 0,
+      buyPrice: hasCombos ? toNonNegativeNumber(editingProduct?.buyPrice) : toNonNegativeNumber(formData.buyPrice),
+      sellPrice: hasCombos ? toNonNegativeNumber(editingProduct?.sellPrice) : toNonNegativeNumber(formData.sellPrice),
+      totalPurchase: parseOptionalNonNegative(formData.totalPurchase),
+      totalSold: parseOptionalNonNegative(formData.totalSold),
+      stock: totalComboStock,
       variants: hasCombos ? (formData.variants || []) : [],
       colors: hasCombos ? (formData.colors || []) : [],
       stockByVariantColor: hasCombos
         ? (formData.stockByVariantColor || []).map((row: any) => ({
             variant: row.variant,
             color: row.color,
-            stock: Math.max(0, Number(row.stock) || 0),
-            buyPrice: row.buyPrice === '' || row.buyPrice === undefined ? undefined : Math.max(0, Number(row.buyPrice) || 0),
-            sellPrice: row.sellPrice === '' || row.sellPrice === undefined ? undefined : Math.max(0, Number(row.sellPrice) || 0),
+            stock: toNonNegativeNumber(row.stock),
+            buyPrice: parseOptionalNonNegative(row.buyPrice),
+            sellPrice: parseOptionalNonNegative(row.sellPrice),
+            totalPurchase: parseOptionalNonNegative(row.totalPurchase),
+            totalSold: parseOptionalNonNegative(row.totalSold),
           }))
         : []
     } as Product;
@@ -227,20 +257,28 @@ export default function Admin() {
 
 
 
-  const rebuildStockRows = (nextVariants: string[], nextColors: string[]) => {
+  const getRowKey = (variant: string, color: string) => `${variant}__${color}`;
+
+  const rebuildStockRows = (nextVariants: string[], nextColors: string[], existingRowsInput?: any[]) => {
     const variants = nextVariants.length ? nextVariants : [NO_VARIANT];
     const colors = nextColors.length ? nextColors : [NO_COLOR];
-    const existingRows = Array.isArray(formData.stockByVariantColor) ? formData.stockByVariantColor : [];
-    const nextRows: Array<{ variant: string; color: string; stock: number; buyPrice: number | ''; sellPrice: number | '' }> = [];
+    const existingRows = Array.isArray(existingRowsInput) ? existingRowsInput : (Array.isArray(formData.stockByVariantColor) ? formData.stockByVariantColor : []);
+    const existingByKey = new Map<string, any>(existingRows.map((row: any) => [getRowKey(row.variant || NO_VARIANT, row.color || NO_COLOR), row]));
+    const fallbackRow = existingByKey.get(getRowKey(NO_VARIANT, NO_COLOR));
+    const nextRows: Array<{ variant: string; color: string; stock: number; buyPrice?: number | ''; sellPrice?: number | ''; totalPurchase?: number | ''; totalSold?: number | '' }> = [];
+
     variants.forEach(v => {
       colors.forEach(c => {
-        const existing = existingRows.find((row: any) => row.variant === v && row.color === c);
+        const existing = existingByKey.get(getRowKey(v, c));
+        const seed = existing || fallbackRow;
         nextRows.push({
           variant: v,
           color: c,
-          stock: Number(existing?.stock || 0),
-          buyPrice: Number.isFinite(existing?.buyPrice) ? Number(existing.buyPrice) : '',
-          sellPrice: Number.isFinite(existing?.sellPrice) ? Number(existing.sellPrice) : '',
+          stock: toNonNegativeNumber(seed?.stock),
+          buyPrice: seed?.buyPrice === '' ? '' : parseOptionalNonNegative(seed?.buyPrice),
+          sellPrice: seed?.sellPrice === '' ? '' : parseOptionalNonNegative(seed?.sellPrice),
+          totalPurchase: seed?.totalPurchase === '' ? '' : parseOptionalNonNegative(seed?.totalPurchase),
+          totalSold: seed?.totalSold === '' ? '' : parseOptionalNonNegative(seed?.totalSold),
         });
       });
     });
@@ -252,8 +290,15 @@ export default function Admin() {
     if (!value) return;
     const nextMaster = addVariantMaster(value);
     setVariantsMaster(nextMaster);
-    const nextVariants = Array.from(new Set([...(formData.variants || []), value]));
-    setFormData({ ...formData, variants: nextVariants, variantInput: '', stockByVariantColor: rebuildStockRows(nextVariants, formData.colors || []) });
+    setFormData((prev: any) => {
+      const nextVariants = Array.from(new Set([...(prev.variants || []), value]));
+      return {
+        ...prev,
+        variants: nextVariants,
+        variantInput: '',
+        stockByVariantColor: rebuildStockRows(nextVariants, prev.colors || [], prev.stockByVariantColor || []),
+      };
+    });
   };
 
   const addColorToForm = () => {
@@ -261,32 +306,45 @@ export default function Admin() {
     if (!value) return;
     const nextMaster = addColorMaster(value);
     setColorsMaster(nextMaster);
-    const nextColors = Array.from(new Set([...(formData.colors || []), value]));
-    setFormData({ ...formData, colors: nextColors, colorInput: '', stockByVariantColor: rebuildStockRows(formData.variants || [], nextColors) });
+    setFormData((prev: any) => {
+      const nextColors = Array.from(new Set([...(prev.colors || []), value]));
+      return {
+        ...prev,
+        colors: nextColors,
+        colorInput: '',
+        stockByVariantColor: rebuildStockRows(prev.variants || [], nextColors, prev.stockByVariantColor || []),
+      };
+    });
   };
 
   const openModal = (product?: Product) => {
     setError(null);
     if (product) {
       setEditingProduct(product);
-      setFormData({ ...product, variants: product.variants || [], colors: product.colors || [], stockByVariantColor: product.stockByVariantColor || [], variantInput: '', colorInput: '' });
+      setFormData({
+        ...emptyProductForm,
+        ...product,
+        buyPrice: Number.isFinite(product.buyPrice) ? product.buyPrice : '',
+        sellPrice: Number.isFinite(product.sellPrice) ? product.sellPrice : '',
+        stock: Number.isFinite(product.stock) ? product.stock : '',
+        totalPurchase: Number.isFinite(product.totalPurchase) ? product.totalPurchase : '',
+        totalSold: Number.isFinite(product.totalSold) ? product.totalSold : '',
+        variants: product.variants || [],
+        colors: product.colors || [],
+        stockByVariantColor: (product.stockByVariantColor || []).map((row: any) => ({
+          ...row,
+          stock: Number.isFinite(row.stock) ? row.stock : 0,
+          buyPrice: Number.isFinite(row.buyPrice) ? Number(row.buyPrice) : '',
+          sellPrice: Number.isFinite(row.sellPrice) ? Number(row.sellPrice) : '',
+          totalPurchase: Number.isFinite(row.totalPurchase) ? Number(row.totalPurchase) : '',
+          totalSold: Number.isFinite(row.totalSold) ? Number(row.totalSold) : '',
+        })),
+        variantInput: '',
+        colorInput: ''
+      });
     } else {
       setEditingProduct(null);
-      setFormData({ 
-          name: '', 
-          barcode: '', 
-          buyPrice: '', 
-          sellPrice: '', 
-          stock: '', 
-          description: '', 
-          category: '',
-          hsn: '',
-          variants: [],
-          colors: [],
-          stockByVariantColor: [],
-          variantInput: '',
-          colorInput: ''
-      });
+      setFormData({ ...emptyProductForm, variants: [], colors: [], stockByVariantColor: [] });
     }
     setIsModalOpen(true);
   };
@@ -1000,28 +1058,49 @@ export default function Admin() {
 
                 <div className="p-4 bg-muted/30 rounded-lg border space-y-4">
                     <h4 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Pricing & Stock</h4>
-                    <div className="grid grid-cols-3 gap-4">
+                    {(formData.variants?.length || formData.colors?.length) ? (
+                      <p className="text-xs text-muted-foreground">Variant rows control pricing and stock when variants/colors are configured.</p>
+                    ) : null}
+                    <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                             <Label>Buy Price</Label>
                             <div className="relative">
                                 <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs">₹</span>
-                                <Input type="number" className="pl-6" value={formData.buyPrice ?? ''} onChange={e => setFormData({...formData, buyPrice: e.target.value})} placeholder="0.00" />
+                                <Input type="number" className="pl-6" value={formData.buyPrice ?? ''} onChange={e => setFormData({...formData, buyPrice: e.target.value})} placeholder="0.00" disabled={!!(formData.variants?.length || formData.colors?.length)} />
                             </div>
                         </div>
                         <div className="space-y-2">
                             <Label>Sell Price</Label>
                             <div className="relative">
                                 <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs">₹</span>
-                                <Input type="number" className="pl-6 font-bold text-primary" value={formData.sellPrice ?? ''} onChange={e => setFormData({...formData, sellPrice: e.target.value})} placeholder="0.00" />
+                                <Input type="number" className="pl-6 font-bold text-primary" value={formData.sellPrice ?? ''} onChange={e => setFormData({...formData, sellPrice: e.target.value})} placeholder="0.00" disabled={!!(formData.variants?.length || formData.colors?.length)} />
                             </div>
                         </div>
                         <div className="space-y-2">
-                            <Label>Stock Qty</Label>
+                            <Label>Total Purchase</Label>
+                            <Input type="number" min="0" value={formData.totalPurchase ?? ''} onChange={e => setFormData({...formData, totalPurchase: e.target.value})} placeholder="0" />
+                        </div>
+                        <div className="space-y-2">
+                            <Label>Total Sold</Label>
+                            <Input type="number" min="0" value={formData.totalSold ?? ''} onChange={e => setFormData({...formData, totalSold: e.target.value})} placeholder="0" />
+                        </div>
+                        <div className="space-y-2 col-span-2">
+                            <Label>Current Stock</Label>
                             {(!formData.variants?.length && !formData.colors?.length) ? (
-                              <Input type="number" value={formData.stock ?? ''} onChange={e => setFormData({...formData, stock: e.target.value})} placeholder="0" />
+                              <Input
+                                type="number"
+                                value={formData.stock ?? ''}
+                                onChange={e => setFormData({...formData, stock: e.target.value})}
+                                placeholder={String(getSuggestedStock(formData.totalPurchase, formData.totalSold))}
+                              />
                             ) : (
-                              <Input value={(formData.stockByVariantColor || []).reduce((sum: number, row: any) => sum + (Number(row.stock) || 0), 0)} readOnly />
+                              <Input
+                                value={(formData.stockByVariantColor || []).reduce((sum: number, row: any) => sum + toNonNegativeNumber(row.stock), 0)}
+                                readOnly
+                                disabled
+                              />
                             )}
+                          <p className="text-[11px] text-muted-foreground mt-1">Suggested: {getSuggestedStock(formData.totalPurchase, formData.totalSold)} (Total Purchase - Total Sold)</p>
                         </div>
                     </div>
                 </div>
@@ -1051,18 +1130,21 @@ export default function Admin() {
 
                     {(formData.variants?.length || formData.colors?.length) && (
                       <div className="border rounded-md overflow-hidden">
-                        <div className="grid grid-cols-5 gap-2 bg-muted px-2 py-1 text-xs font-semibold">
-                          <div>Variant</div><div>Color</div><div>Stock</div><div>Buy Price</div><div>Sell Price</div>
+                        <div className="grid grid-cols-7 gap-2 bg-muted px-2 py-1 text-xs font-semibold">
+                          <div>Variant</div><div>Color</div><div>Current Stock</div><div>Buy Price</div><div>Sell Price</div><div>Total Purchase</div><div>Total Sold</div>
                         </div>
                         {(formData.stockByVariantColor || []).map((row: any, idx: number) => (
-                          <div className="grid grid-cols-5 gap-2 px-2 py-1 border-t" key={`${row.variant}-${row.color}-${idx}`}>
+                          <div className="grid grid-cols-7 gap-2 px-2 py-1 border-t" key={getRowKey(row.variant || NO_VARIANT, row.color || NO_COLOR)}>
                             <div className="text-xs py-2">{row.variant || NO_VARIANT}</div>
                             <div className="text-xs py-2">{row.color || NO_COLOR}</div>
-                            <Input type="number" min="0" value={row.stock} onChange={e => {
-                              const next = [...(formData.stockByVariantColor || [])];
-                              next[idx] = { ...next[idx], stock: Math.max(0, Number(e.target.value) || 0) };
-                              setFormData({ ...formData, stockByVariantColor: next });
-                            }} />
+                            <div>
+                              <Input type="number" min="0" value={row.stock ?? 0} placeholder={String(getSuggestedStock(row.totalPurchase, row.totalSold))} onChange={e => {
+                                const next = [...(formData.stockByVariantColor || [])];
+                                next[idx] = { ...next[idx], stock: e.target.value === '' ? '' : Math.max(0, Number(e.target.value) || 0) };
+                                setFormData({ ...formData, stockByVariantColor: next });
+                              }} />
+                              <p className="text-[10px] text-muted-foreground mt-1">Suggested: {getSuggestedStock(row.totalPurchase, row.totalSold)}</p>
+                            </div>
                             <Input type="number" min="0" value={row.buyPrice ?? ''} placeholder="0.00" onChange={e => {
                               const next = [...(formData.stockByVariantColor || [])];
                               next[idx] = { ...next[idx], buyPrice: e.target.value === '' ? '' : Math.max(0, Number(e.target.value) || 0) };
@@ -1071,6 +1153,16 @@ export default function Admin() {
                             <Input type="number" min="0" value={row.sellPrice ?? ''} placeholder="0.00" onChange={e => {
                               const next = [...(formData.stockByVariantColor || [])];
                               next[idx] = { ...next[idx], sellPrice: e.target.value === '' ? '' : Math.max(0, Number(e.target.value) || 0) };
+                              setFormData({ ...formData, stockByVariantColor: next });
+                            }} />
+                            <Input type="number" min="0" value={row.totalPurchase ?? ''} placeholder="0" onChange={e => {
+                              const next = [...(formData.stockByVariantColor || [])];
+                              next[idx] = { ...next[idx], totalPurchase: e.target.value === '' ? '' : Math.max(0, Number(e.target.value) || 0) };
+                              setFormData({ ...formData, stockByVariantColor: next });
+                            }} />
+                            <Input type="number" min="0" value={row.totalSold ?? ''} placeholder="0" onChange={e => {
+                              const next = [...(formData.stockByVariantColor || [])];
+                              next[idx] = { ...next[idx], totalSold: e.target.value === '' ? '' : Math.max(0, Number(e.target.value) || 0) };
                               setFormData({ ...formData, stockByVariantColor: next });
                             }} />
                           </div>

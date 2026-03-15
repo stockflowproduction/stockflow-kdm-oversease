@@ -36,6 +36,7 @@ export function UploadImportModal({ title, open, onClose, onDownloadTemplate, on
   };
 
   const issues = result?.errors || [];
+  const warnings = result?.warnings || [];
   const progressPercent = progress && progress.total > 0 ? Math.min(100, Math.round((progress.processed / progress.total) * 100)) : 0;
   const moduleNotes: Record<string, string[]> = {
     'Import Inventory': [
@@ -53,6 +54,7 @@ export function UploadImportModal({ title, open, onClose, onDownloadTemplate, on
       'Sale/return rows must use Product ID for product matching; barcode is a consistency check only.',
       'Customer ID is preferred for customer matching; phone/name are fallback references.',
       'Subtotal/Discount/Tax/Total are consistency checks; final values are recomputed.',
+      'Historical transaction import stores history rows and may show baseline totalSold mismatch warnings without blocking import.',
     ],
     'Import Purchase Orders': [
       'Order ID and Party Name are used for matching/resolution.',
@@ -109,7 +111,18 @@ export function UploadImportModal({ title, open, onClose, onDownloadTemplate, on
             <div className="rounded-xl border border-slate-200 p-4">
               <div className="text-sm font-semibold text-slate-900">Result Summary</div>
               <div className="mt-2 text-sm text-slate-600">{result.summary}</div>
-              <div className="mt-2 text-xs text-slate-500">Total rows: {result.totalRows} · Imported: {result.importedRows} · Errors: {result.errors.length}</div>
+              <div className="mt-2 text-xs text-slate-500">Total rows: {result.totalRows} · Imported: {result.importedRows} · Errors: {result.errors.length} · Warnings: {warnings.length}</div>
+            </div>
+          )}
+
+          {!!warnings.length && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-amber-800"><AlertTriangle className="h-4 w-4" /> Import Warnings</div>
+              <div className="max-h-72 space-y-1 overflow-auto text-sm text-amber-900">
+                {warnings.map((issue: ImportIssue, idx: number) => (
+                  <div key={`${issue.row}-${issue.field}-${idx}`}>Sheet {issue.sheet} · Row {issue.row} · {issue.field}: {issue.message}</div>
+                ))}
+              </div>
             </div>
           )}
 

@@ -755,7 +755,7 @@ const toStockKey = (variant?: string, color?: string) => `${normalizeLabel(varia
 
 const sanitizeVariantColorStock = (product: Product): Product => {
   const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
-  const dedup = new Map<string, { variant: string; color: string; stock: number; buyPrice?: number; sellPrice?: number }>();
+  const dedup = new Map<string, { variant: string; color: string; stock: number; buyPrice?: number; sellPrice?: number; totalPurchase?: number; totalSold?: number }>();
 
   entries.forEach(entry => {
     const variant = normalizeLabel(entry.variant) || 'No Variant';
@@ -765,12 +765,16 @@ const sanitizeVariantColorStock = (product: Product): Product => {
     const existing = dedup.get(key);
     const buyPrice = Number.isFinite(entry.buyPrice) && Number(entry.buyPrice) >= 0 ? Number(entry.buyPrice) : undefined;
     const sellPrice = Number.isFinite(entry.sellPrice) && Number(entry.sellPrice) >= 0 ? Number(entry.sellPrice) : undefined;
+    const totalPurchase = Number.isFinite(entry.totalPurchase) && Number(entry.totalPurchase) >= 0 ? Number(entry.totalPurchase) : undefined;
+    const totalSold = Number.isFinite(entry.totalSold) && Number(entry.totalSold) >= 0 ? Number(entry.totalSold) : undefined;
     if (existing) {
       existing.stock += stock;
       if (existing.buyPrice === undefined && buyPrice !== undefined) existing.buyPrice = buyPrice;
       if (existing.sellPrice === undefined && sellPrice !== undefined) existing.sellPrice = sellPrice;
+      if (existing.totalPurchase === undefined && totalPurchase !== undefined) existing.totalPurchase = totalPurchase;
+      if (existing.totalSold === undefined && totalSold !== undefined) existing.totalSold = totalSold;
     } else {
-      dedup.set(key, { variant, color, stock, buyPrice, sellPrice });
+      dedup.set(key, { variant, color, stock, buyPrice, sellPrice, totalPurchase, totalSold });
     }
   });
 

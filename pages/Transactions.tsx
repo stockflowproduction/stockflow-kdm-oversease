@@ -11,7 +11,7 @@ import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, 
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
-import { downloadTransactionsData, downloadTransactionsTemplate, importTransactionsFromFile } from '../services/importExcel';
+import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile } from '../services/importExcel';
 
 export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -759,7 +759,7 @@ export default function Transactions() {
         title="Import Transactions"
         onDownloadTemplate={downloadTransactionsTemplate}
         onImportFile={async (file) => {
-          const result = await importTransactionsFromFile(file);
+          const result = await importHistoricalTransactionsFromFile(file);
           const data = loadData();
           setTransactions(data.transactions);
           setCustomers(data.customers);
