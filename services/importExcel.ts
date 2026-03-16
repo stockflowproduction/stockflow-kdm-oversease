@@ -1,10 +1,10 @@
 import * as XLSX from 'xlsx';
 import { CartItem, Customer, Product, PurchaseOrder, PurchaseOrderLine, Transaction } from '../types';
-import { addCategory, addCustomer, addProduct, createPurchaseOrder, loadData, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
+import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, loadData, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 
 export type ImportIssue = { sheet: string; row: number; field: string; message: string };
-export type ImportResult = { totalRows: number; importedRows: number; errors: ImportIssue[]; summary: string };
+export type ImportResult = { totalRows: number; importedRows: number; errors: ImportIssue[]; warnings?: ImportIssue[]; summary: string };
 export type ImportProgress = { phase: 'validating' | 'importing' | 'completed'; processed: number; total: number; message?: string };
 
 type Row = Record<string, any>;
@@ -558,10 +558,17 @@ export const importCustomersFromFile = async (file: File, onProgress?: (progress
   return { totalRows: rows.length, importedRows: valid.length, errors: [], summary: `Imported ${valid.length} customers successfully.` };
 };
 
-export const importTransactionsFromFile = async (file: File, onProgress?: (progress: ImportProgress) => void): Promise<ImportResult> => {
+export const importTransactionsFromFile = async (
+  file: File,
+  onProgress?: (progress: ImportProgress) => void,
+  options?: { mode?: 'live' | 'historical' }
+): Promise<ImportResult> => {
   const rows = await readRows(file, 'Transactions');
   const data = loadData();
+  const mode = options?.mode || 'live';
+  const isHistoricalMode = mode === 'historical';
   const errors: ImportIssue[] = [];
+  const warnings: ImportIssue[] = [];
   const productsById = new Map((data.products || []).map(p => [toStr(p.id), p]));
   const customersById = new Map((data.customers || []).map(c => [toStr(c.id), c]));
   const customersByPhone = new Map((data.customers || []).map(c => [normPhone(toStr(c.phone)), c]));
@@ -587,6 +594,7 @@ export const importTransactionsFromFile = async (file: File, onProgress?: (progr
   const importTx: Transaction[] = [];
   const stockByProduct = new Map((data.products || []).map(p => [p.id, p.stock || 0]));
   const soldByProduct = new Map((data.products || []).map(p => [p.id, p.totalSold || 0]));
+  const importedHistoricalSoldByProduct = new Map<string, number>();
 
   for (const [txId, txRows] of grouped.entries()) {
     const row0 = txRows[0];
@@ -690,11 +698,15 @@ export const importTransactionsFromFile = async (file: File, onProgress?: (progr
 
       const currentStock = stockByProduct.get(product.id) || 0;
       const currentSold = soldByProduct.get(product.id) || 0;
-      if (type === 'sale' && qty > currentStock) {
+      if (!isHistoricalMode && type === 'sale' && qty > currentStock) {
         errors.push({ sheet: 'Transactions', row: rowNo, field: 'Quantity', message: `Insufficient stock for barcode ${product.barcode}` });
       }
-      if (type === 'return' && qty > currentSold) {
+      if (!isHistoricalMode && type === 'return' && qty > currentSold) {
         errors.push({ sheet: 'Transactions', row: rowNo, field: 'Quantity', message: `Return quantity exceeds sold quantity for barcode ${product.barcode}` });
+      }
+
+      if (isHistoricalMode && type === 'sale') {
+        importedHistoricalSoldByProduct.set(product.id, (importedHistoricalSoldByProduct.get(product.id) || 0) + qty);
       }
 
       subtotal += unitSell * qty;
@@ -783,14 +795,44 @@ export const importTransactionsFromFile = async (file: File, onProgress?: (progr
     }
   }
 
-  if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, summary: 'Validation failed. No transactions imported.' };
+  if (isHistoricalMode) {
+    importedHistoricalSoldByProduct.forEach((importedSoldQty, productId) => {
+      const product = productsById.get(productId);
+      if (!product) return;
+      const baselineTotalSold = product.totalSold || 0;
+      if (Math.abs(importedSoldQty - baselineTotalSold) > 0.0001) {
+        warnings.push({
+          sheet: 'Transactions',
+          row: 1,
+          field: 'Quantity',
+          message: `Historical sold qty mismatch for ${product.barcode} / ${product.id}: imported=${importedSoldQty}, baseline totalSold=${baselineTotalSold}. Import will continue.`,
+        });
+      }
+    });
+  }
+
+  if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, warnings, summary: 'Validation failed. No transactions imported.' };
+
+  if (isHistoricalMode) {
+    await addHistoricalTransactions(importTx);
+
+    onProgress?.({ phase: 'completed', processed: importTx.length, total: importTx.length, message: 'Historical transaction import completed.' });
+    const summary = warnings.length
+      ? `Imported ${importTx.length} historical transactions with ${warnings.length} warning(s).`
+      : `Imported ${importTx.length} historical transactions successfully.`;
+    return { totalRows: rows.length, importedRows: importTx.length, errors: [], warnings, summary };
+  }
 
   await runThrottled(importTx, tx => {
     processTransaction(tx);
   }, onProgress, 'Importing transactions');
 
   onProgress?.({ phase: 'completed', processed: importTx.length, total: importTx.length, message: 'Transaction import completed.' });
-  return { totalRows: rows.length, importedRows: importTx.length, errors: [], summary: `Imported ${importTx.length} transactions successfully.` };
+  return { totalRows: rows.length, importedRows: importTx.length, errors: [], warnings, summary: `Imported ${importTx.length} transactions successfully.` };
+};
+
+export const importHistoricalTransactionsFromFile = async (file: File, onProgress?: (progress: ImportProgress) => void): Promise<ImportResult> => {
+  return importTransactionsFromFile(file, onProgress, { mode: 'historical' });
 };
 
 export const importPurchaseFromFile = async (file: File, onProgress?: (progress: ImportProgress) => void): Promise<ImportResult> => {

@@ -755,7 +755,7 @@ const toStockKey = (variant?: string, color?: string) => `${normalizeLabel(varia
 
 const sanitizeVariantColorStock = (product: Product): Product => {
   const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
-  const dedup = new Map<string, { variant: string; color: string; stock: number; buyPrice?: number; sellPrice?: number }>();
+  const dedup = new Map<string, { variant: string; color: string; stock: number; buyPrice?: number; sellPrice?: number; totalPurchase?: number; totalSold?: number }>();
 
   entries.forEach(entry => {
     const variant = normalizeLabel(entry.variant) || 'No Variant';
@@ -765,12 +765,16 @@ const sanitizeVariantColorStock = (product: Product): Product => {
     const existing = dedup.get(key);
     const buyPrice = Number.isFinite(entry.buyPrice) && Number(entry.buyPrice) >= 0 ? Number(entry.buyPrice) : undefined;
     const sellPrice = Number.isFinite(entry.sellPrice) && Number(entry.sellPrice) >= 0 ? Number(entry.sellPrice) : undefined;
+    const totalPurchase = Number.isFinite(entry.totalPurchase) && Number(entry.totalPurchase) >= 0 ? Number(entry.totalPurchase) : undefined;
+    const totalSold = Number.isFinite(entry.totalSold) && Number(entry.totalSold) >= 0 ? Number(entry.totalSold) : undefined;
     if (existing) {
       existing.stock += stock;
       if (existing.buyPrice === undefined && buyPrice !== undefined) existing.buyPrice = buyPrice;
       if (existing.sellPrice === undefined && sellPrice !== undefined) existing.sellPrice = sellPrice;
+      if (existing.totalPurchase === undefined && totalPurchase !== undefined) existing.totalPurchase = totalPurchase;
+      if (existing.totalSold === undefined && totalSold !== undefined) existing.totalSold = totalSold;
     } else {
-      dedup.set(key, { variant, color, stock, buyPrice, sellPrice });
+      dedup.set(key, { variant, color, stock, buyPrice, sellPrice, totalPurchase, totalSold });
     }
   });
 
@@ -2510,6 +2514,46 @@ syncToCloud({ ...data }),
   const fallbackState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
   void saveData(fallbackState, { reason: 'processTransaction_local_fallback', auditOperation: 'CREATE' });
   return fallbackState;
+};
+
+
+export const addHistoricalTransactions = async (transactions: Transaction[]): Promise<Transaction[]> => {
+  if (!Array.isArray(transactions) || transactions.length === 0) {
+    return loadData().transactions;
+  }
+
+  const data = loadData();
+  const existingIds = new Set(data.transactions.map(t => t.id));
+  const incoming = transactions.filter(tx => tx && tx.id && !existingIds.has(tx.id));
+  if (!incoming.length) {
+    return data.transactions;
+  }
+
+  const merged = sortTransactionsDesc([...incoming, ...data.transactions]);
+
+  if (!db) {
+    await saveData({ ...data, transactions: merged }, { throwOnError: true, reason: 'addHistoricalTransactions_local_fallback', auditOperation: 'CREATE' });
+    return merged;
+  }
+
+  await Promise.all(incoming.map(tx => upsertTransactionInSubcollection(tx, 'addHistoricalTransactions_subcollection')));
+
+  memoryState = { ...memoryState, transactions: sortTransactionsDesc([...incoming, ...memoryState.transactions]) };
+  emitLocalStorageUpdate();
+
+  void Promise.all([
+    writeAuditEvent('CREATE', {
+      reason: 'addHistoricalTransactions_subcollection',
+      migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
+      transactionIds: incoming.map(tx => tx.id),
+      transactionsCount: incoming.length,
+    }),
+    syncToCloud({ ...data }),
+  ]).catch(error => {
+    console.error('[storage-transactions] addHistoricalTransactions side effects failed', error);
+  });
+
+  return memoryState.transactions;
 };
 
 export const deleteTransaction = (transactionId: string): Transaction[] => {

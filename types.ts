@@ -20,6 +20,8 @@ export interface Product {
     stock: number;
     buyPrice?: number;
     sellPrice?: number;
+    totalPurchase?: number;
+    totalSold?: number;
   }>;
 }
 
