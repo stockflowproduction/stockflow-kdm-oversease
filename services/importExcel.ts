@@ -197,9 +197,10 @@ export const downloadPurchaseTemplate = () => writeTemplate(
   ]
 );
 
-export const downloadInventoryData = () => {
+export const downloadInventoryData = (products?: Product[] | unknown) => {
   const data = loadData();
-  const rows = (data.products || []).map(p => ({
+  const sourceProducts = Array.isArray(products) ? products : (data.products || []);
+  const rows = sourceProducts.map(p => ({
     'Product ID': p.id,
     'Barcode': p.barcode,
     'Product Name': p.name,
@@ -229,9 +230,10 @@ export const downloadInventoryData = () => {
   ], 'Inventory_Data');
 };
 
-export const downloadCustomersData = () => {
+export const downloadCustomersData = (customers?: Customer[] | unknown) => {
   const data = loadData();
-  const rows = (data.customers || []).map(c => ({
+  const sourceCustomers = Array.isArray(customers) ? customers : (data.customers || []);
+  const rows = sourceCustomers.map(c => ({
     'Customer ID': c.id,
     'Name': c.name,
     'Phone': c.phone,
@@ -254,11 +256,12 @@ export const downloadCustomersData = () => {
   ], 'Customers_Data');
 };
 
-export const downloadTransactionsData = () => {
+export const downloadTransactionsData = (transactions?: Transaction[] | unknown) => {
   const data = loadData();
+  const sourceTransactions = Array.isArray(transactions) ? transactions : (data.transactions || []);
   const customersById = new Map((data.customers || []).map(c => [c.id, c]));
   const rows: Record<string, any>[] = [];
-  (data.transactions || []).forEach(tx => {
+  sourceTransactions.forEach(tx => {
     const customerPhone = tx.customerId ? (customersById.get(tx.customerId)?.phone || '') : '';
     if (tx.type === 'payment' || !tx.items.length) {
       rows.push({

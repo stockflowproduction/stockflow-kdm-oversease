@@ -26,7 +26,14 @@ export default function Transactions() {
   const [exportType, setExportType] = useState<'summary' | 'invoice'>('summary');
   const [txToExport, setTxToExport] = useState<Transaction | null>(null);
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([]);
+  const [batchEditTransactionIds, setBatchEditTransactionIds] = useState<string[]>([]);
+  const [batchEditTransactionIndex, setBatchEditTransactionIndex] = useState(0);
   const [editingAmount, setEditingAmount] = useState('');
+  const [editingTxDate, setEditingTxDate] = useState('');
+  const [editingTxPaymentMethod, setEditingTxPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
+  const [editingTxNotes, setEditingTxNotes] = useState('');
+  const [editingError, setEditingError] = useState<string | null>(null);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -106,6 +113,107 @@ export default function Transactions() {
           }
       }).sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [transactions, filterType, customStart, customEnd]);
+  const selectedTransactions = useMemo(
+    () => transactions.filter(tx => selectedTransactionIds.includes(tx.id)),
+    [transactions, selectedTransactionIds]
+  );
+  const allFilteredTransactionsSelected = filteredTransactions.length > 0 && filteredTransactions.every(tx => selectedTransactionIds.includes(tx.id));
+  const isBatchEditing = batchEditTransactionIds.length > 0;
+  const remainingBatchTransactions = isBatchEditing ? Math.max(0, batchEditTransactionIds.length - batchEditTransactionIndex - 1) : 0;
+
+  const openTransactionEditor = (tx: Transaction) => {
+    setEditingTx(tx);
+    setEditingAmount(String(Math.abs(tx.total || 0)));
+    setEditingTxDate(tx.date ? new Date(tx.date).toISOString().slice(0, 16) : '');
+    setEditingTxPaymentMethod((tx.paymentMethod || 'Cash') as 'Cash' | 'Credit' | 'Online');
+    setEditingTxNotes(tx.notes || '');
+    setEditingError(null);
+  };
+
+  const closeTransactionEditor = () => {
+    setEditingTx(null);
+    setBatchEditTransactionIds([]);
+    setBatchEditTransactionIndex(0);
+    setEditingError(null);
+  };
+
+  const handleToggleTransactionSelection = (transactionId: string) => {
+    setSelectedTransactionIds(prev => prev.includes(transactionId) ? prev.filter(id => id !== transactionId) : [...prev, transactionId]);
+  };
+
+  const handleToggleSelectAllTransactions = () => {
+    const filteredIds = filteredTransactions.map(tx => tx.id);
+    setSelectedTransactionIds(prev => allFilteredTransactionsSelected
+      ? prev.filter(id => !filteredIds.includes(id))
+      : Array.from(new Set([...prev, ...filteredIds]))
+    );
+  };
+
+  const handleBatchEditTransactions = () => {
+    const queue = filteredTransactions.filter(tx => selectedTransactionIds.includes(tx.id)).map(tx => tx.id);
+    if (!queue.length) return;
+    setBatchEditTransactionIds(queue);
+    setBatchEditTransactionIndex(0);
+    const firstTx = transactions.find(tx => tx.id === queue[0]);
+    if (firstTx) openTransactionEditor(firstTx);
+  };
+
+  const handleBatchDeleteTransactions = () => {
+    if (!selectedTransactions.length) return;
+    const confirmed = window.confirm(`Delete ${selectedTransactions.length} selected transaction${selectedTransactions.length > 1 ? 's' : ''}?`);
+    if (!confirmed) return;
+    let nextTransactions = transactions;
+    selectedTransactionIds.forEach(transactionId => {
+      nextTransactions = deleteTransaction(transactionId);
+    });
+    setTransactions(nextTransactions);
+    setSelectedTransactionIds([]);
+  };
+
+  const handleSaveTransaction = async (goToNext = false) => {
+    if (!editingTx) return;
+
+    try {
+      const nextDate = editingTxDate ? new Date(editingTxDate).toISOString() : editingTx.date;
+      const nextNotes = editingTxNotes.trim();
+      let nextTransaction: Transaction = {
+        ...editingTx,
+        date: nextDate,
+        paymentMethod: editingTxPaymentMethod,
+        notes: nextNotes,
+      };
+
+      if (editingTx.type === 'payment') {
+        const amt = Number(editingAmount || 0);
+        if (!Number.isFinite(amt) || amt <= 0) {
+          setEditingError('Please enter a valid payment amount.');
+          return;
+        }
+        nextTransaction = { ...nextTransaction, total: Math.abs(amt) };
+      }
+
+      const nextTransactions = await updateTransaction(nextTransaction);
+      setTransactions(nextTransactions);
+
+      if (goToNext && batchEditTransactionIds.length > 0) {
+        const nextIndex = batchEditTransactionIndex + 1;
+        const nextTransactionId = batchEditTransactionIds[nextIndex];
+        if (nextTransactionId) {
+          const nextTx = nextTransactions.find(tx => tx.id === nextTransactionId);
+          if (nextTx) {
+            setBatchEditTransactionIndex(nextIndex);
+            openTransactionEditor(nextTx);
+            return;
+          }
+        }
+      }
+
+      closeTransactionEditor();
+    } catch (error) {
+      console.error('[transactions] update failed', error);
+      setEditingError(error instanceof Error ? error.message : 'Transaction update failed. Please try again.');
+    }
+  };
 
   const stats = useMemo(() => {
       let totalRevenue = 0;
@@ -303,7 +411,14 @@ export default function Transactions() {
                 <Download className="w-4 h-4" />
             </Button>
 
-            <Button variant="outline" onClick={downloadTransactionsData} className="h-9 text-sm">Download Data</Button>
+            <Button variant="outline" onClick={() => downloadTransactionsData()} className="h-9 text-sm">Download Data</Button>
+            {selectedTransactionIds.length > 0 && (
+              <>
+                <Button variant="outline" onClick={() => downloadTransactionsData(selectedTransactions)} className="h-9 text-sm">Download Selected</Button>
+                <Button variant="outline" onClick={handleBatchEditTransactions} className="h-9 text-sm">Batch Edit ({selectedTransactionIds.length})</Button>
+                <Button variant="destructive" onClick={handleBatchDeleteTransactions} className="h-9 text-sm">Batch Delete</Button>
+              </>
+            )}
             <Button variant="outline" onClick={() => setIsImportModalOpen(true)} className="h-9 text-sm">Upload Existing File</Button>
 
             <div className="w-px h-6 bg-border mx-1 hidden md:block"></div>
@@ -421,6 +536,15 @@ export default function Transactions() {
                     <table className="w-full text-sm text-left">
                         <thead className="text-xs text-muted-foreground uppercase bg-muted/50 font-bold">
                             <tr>
+                                <th className="px-4 py-3 w-12">
+                                    <input
+                                      type="checkbox"
+                                      checked={allFilteredTransactionsSelected}
+                                      onChange={handleToggleSelectAllTransactions}
+                                      aria-label="Select all transactions"
+                                      className="h-4 w-4 rounded border-slate-300"
+                                    />
+                                </th>
                                 <th className="px-4 py-3">Date & ID</th>
                                 <th className="px-4 py-3">Customer</th>
                                 <th className="px-4 py-3">Type</th>
@@ -436,6 +560,15 @@ export default function Transactions() {
                                 const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
                                 return (
                                     <tr key={tx.id} className="hover:bg-muted/30 transition-colors group">
+                                        <td className="px-4 py-3">
+                                            <input
+                                              type="checkbox"
+                                              checked={selectedTransactionIds.includes(tx.id)}
+                                              onChange={() => handleToggleTransactionSelection(tx.id)}
+                                              aria-label={`Select transaction ${tx.id.slice(-6)}`}
+                                              className="h-4 w-4 rounded border-slate-300"
+                                            />
+                                        </td>
                                         <td className="px-4 py-3">
                                             <div className="font-medium text-foreground">{new Date(tx.date).toLocaleDateString()}</div>
                                             <div className="text-[10px] font-mono text-muted-foreground">#{tx.id.slice(-6)}</div>
@@ -481,8 +614,8 @@ export default function Transactions() {
                                         <td className="px-4 py-3 text-center">
                                             <div className="flex items-center justify-center gap-1">
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedTx(tx)}><Eye className="w-3.5 h-3.5" /></Button>
-                                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditingTx(tx); setEditingAmount(String(Math.abs(tx.total))); }}><Edit className="w-3.5 h-3.5" /></Button>
-                                                <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => { if (window.confirm('Delete this transaction?')) { const next = deleteTransaction(tx.id); setTransactions(next); } }}><X className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => { if (window.confirm('Delete this transaction?')) { const next = deleteTransaction(tx.id); setTransactions(next); setSelectedTransactionIds(prev => prev.filter(id => id !== tx.id)); } }}><X className="w-3.5 h-3.5" /></Button>
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
                                             </div>
                                         </td>
@@ -774,19 +907,45 @@ export default function Transactions() {
       {editingTx && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
           <Card className="w-full max-w-md">
-            <CardHeader><CardTitle>Edit Transaction #{editingTx.id.slice(-6)}</CardTitle></CardHeader>
+            <CardHeader>
+              <CardTitle>
+                {isBatchEditing
+                  ? `Batch Edit Transaction ${batchEditTransactionIndex + 1} of ${batchEditTransactionIds.length}`
+                  : `Edit Transaction #${editingTx.id.slice(-6)}`}
+              </CardTitle>
+            </CardHeader>
             <CardContent className="space-y-3">
-              <Input type="number" value={editingAmount} onChange={e => setEditingAmount(e.target.value)} placeholder="Amount" />
+              {editingError && (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{editingError}</div>
+              )}
+              <div className="space-y-2">
+                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Date</label>
+                <Input type="datetime-local" value={editingTxDate} onChange={e => setEditingTxDate(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment Method</label>
+                <Select value={editingTxPaymentMethod} onChange={e => setEditingTxPaymentMethod(e.target.value as 'Cash' | 'Credit' | 'Online')}>
+                  <option value="Cash">Cash</option>
+                  <option value="Credit">Credit</option>
+                  <option value="Online">Online</option>
+                </Select>
+              </div>
+              {editingTx.type === 'payment' && (
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Amount</label>
+                  <Input type="number" value={editingAmount} onChange={e => setEditingAmount(e.target.value)} placeholder="Amount" />
+                </div>
+              )}
+              <div className="space-y-2">
+                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Notes</label>
+                <Input value={editingTxNotes} onChange={e => setEditingTxNotes(e.target.value)} placeholder="Notes" />
+              </div>
               <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setEditingTx(null)}>Cancel</Button>
-                <Button onClick={async () => {
-                  const amt = Number(editingAmount || 0);
-                  if (!Number.isFinite(amt) || amt <= 0) return;
-                  const nextTx = { ...editingTx, total: editingTx.type === 'return' ? -Math.abs(amt) : Math.abs(amt) };
-                  const next = await updateTransaction(nextTx);
-                  setTransactions(next);
-                  setEditingTx(null);
-                }}>Save</Button>
+                <Button variant="outline" onClick={closeTransactionEditor}>Cancel</Button>
+                <Button variant="outline" onClick={() => void handleSaveTransaction(true)}>
+                  {remainingBatchTransactions > 0 ? `Update & Next (${remainingBatchTransactions} left)` : 'Update & Next'}
+                </Button>
+                <Button onClick={() => void handleSaveTransaction(false)}>Save</Button>
               </div>
             </CardContent>
           </Card>

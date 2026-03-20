@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment } from '../services/storage';
+import { loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -30,6 +30,10 @@ export default function Customers() {
   const [isAdminPasswordModalOpen, setIsAdminPasswordModalOpen] = useState(false);
   const [editingUpfrontOrder, setEditingUpfrontOrder] = useState<UpfrontOrder | null>(null);
   const [selectedUpfrontOrder, setSelectedUpfrontOrder] = useState<UpfrontOrder | null>(null);
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+  const [selectedCustomerIds, setSelectedCustomerIds] = useState<string[]>([]);
+  const [batchEditCustomerIds, setBatchEditCustomerIds] = useState<string[]>([]);
+  const [batchEditCustomerIndex, setBatchEditCustomerIndex] = useState(0);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [exportType, setExportType] = useState<'statement' | 'dues_report' | 'invoice'>('statement');
@@ -44,8 +48,10 @@ export default function Customers() {
   const [addCustomerError, setAddCustomerError] = useState<string | null>(null);
   const [upfrontOrderError, setUpfrontOrderError] = useState<string | null>(null);
   const [collectPaymentError, setCollectPaymentError] = useState<string | null>(null);
+  const [customerEditError, setCustomerEditError] = useState<string | null>(null);
   
   const [newCustomer, setNewCustomer] = useState({ name: '', phone: '' });
+  const [customerEditForm, setCustomerEditForm] = useState({ name: '', phone: '' });
   
   // Upfront Order Form State
   const [upfrontOrderForm, setUpfrontOrderForm] = useState({
@@ -136,6 +142,105 @@ export default function Customers() {
     const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
   }, [customers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold]);
+  const selectedCustomers = useMemo(
+    () => customers.filter(customer => selectedCustomerIds.includes(customer.id)),
+    [customers, selectedCustomerIds]
+  );
+  const allFilteredCustomersSelected = filteredData.displayCustomers.length > 0 && filteredData.displayCustomers.every(customer => selectedCustomerIds.includes(customer.id));
+  const isBatchEditingCustomers = batchEditCustomerIds.length > 0;
+  const remainingBatchCustomers = isBatchEditingCustomers ? Math.max(0, batchEditCustomerIds.length - batchEditCustomerIndex - 1) : 0;
+
+  const openCustomerEditor = (customer: Customer) => {
+    setEditingCustomer(customer);
+    setCustomerEditForm({ name: customer.name, phone: customer.phone });
+    setCustomerEditError(null);
+  };
+
+  const closeCustomerEditor = () => {
+    setEditingCustomer(null);
+    setCustomerEditError(null);
+    setBatchEditCustomerIds([]);
+    setBatchEditCustomerIndex(0);
+  };
+
+  const handleToggleCustomerSelection = (customerId: string) => {
+    setSelectedCustomerIds(prev => prev.includes(customerId) ? prev.filter(id => id !== customerId) : [...prev, customerId]);
+  };
+
+  const handleToggleSelectAllCustomers = () => {
+    const filteredIds = filteredData.displayCustomers.map(customer => customer.id);
+    setSelectedCustomerIds(prev => allFilteredCustomersSelected
+      ? prev.filter(id => !filteredIds.includes(id))
+      : Array.from(new Set([...prev, ...filteredIds]))
+    );
+  };
+
+  const handleBatchEditCustomers = () => {
+    const queue = filteredData.displayCustomers.filter(customer => selectedCustomerIds.includes(customer.id)).map(customer => customer.id);
+    if (!queue.length) return;
+    setBatchEditCustomerIds(queue);
+    setBatchEditCustomerIndex(0);
+    const firstCustomer = customers.find(customer => customer.id === queue[0]);
+    if (firstCustomer) openCustomerEditor(firstCustomer);
+  };
+
+  const handleBatchDeleteCustomers = () => {
+    if (!selectedCustomers.length) return;
+    const confirmed = window.confirm(`Delete ${selectedCustomers.length} selected customer${selectedCustomers.length > 1 ? 's' : ''}?`);
+    if (!confirmed) return;
+    let nextCustomers = customers;
+    selectedCustomerIds.forEach(customerId => {
+      nextCustomers = deleteCustomer(customerId);
+    });
+    setCustomers(nextCustomers);
+    setSelectedCustomerIds([]);
+    if (viewingCustomer && selectedCustomerIds.includes(viewingCustomer.id)) {
+      setViewingCustomer(null);
+    }
+  };
+
+  const handleSaveCustomerEdit = (goToNext = false) => {
+    if (!editingCustomer) return;
+
+    const name = customerEditForm.name.trim();
+    const phone = customerEditForm.phone.trim();
+
+    if (!name || !phone) {
+      setCustomerEditError('Name and phone number are required.');
+      return;
+    }
+
+    try {
+      const updatedCustomer: Customer = {
+        ...editingCustomer,
+        name,
+        phone,
+      };
+      const nextCustomers = updateCustomer(updatedCustomer);
+      setCustomers(nextCustomers);
+      if (viewingCustomer?.id === updatedCustomer.id) {
+        setViewingCustomer(updatedCustomer);
+      }
+
+      if (goToNext && batchEditCustomerIds.length > 0) {
+        const nextIndex = batchEditCustomerIndex + 1;
+        const nextCustomerId = batchEditCustomerIds[nextIndex];
+        if (nextCustomerId) {
+          const nextCustomer = nextCustomers.find(customer => customer.id === nextCustomerId);
+          if (nextCustomer) {
+            setBatchEditCustomerIndex(nextIndex);
+            openCustomerEditor(nextCustomer);
+            return;
+          }
+        }
+      }
+
+      closeCustomerEditor();
+    } catch (error) {
+      console.error('[customers] update customer failed', error);
+      setCustomerEditError(error instanceof Error ? error.message : 'Customer update failed. Please try again.');
+    }
+  };
 
   const customerHistory = useMemo(() => {
       if (!viewingCustomer) return [];
@@ -332,7 +437,9 @@ export default function Customers() {
   const handleDeleteCustomer = () => {
       if (!viewingCustomer) return;
       if (deleteConfirmName.trim() === viewingCustomer.name) {
-          deleteCustomer(viewingCustomer.id);
+          const nextCustomers = deleteCustomer(viewingCustomer.id);
+          setCustomers(nextCustomers);
+          setSelectedCustomerIds(prev => prev.filter(id => id !== viewingCustomer.id));
           refreshData();
           setIsDeleteModalOpen(false);
           setDeleteConfirmName('');
@@ -560,7 +667,14 @@ export default function Customers() {
                 <p className="text-xs md:text-sm text-muted-foreground hidden sm:block font-medium">Credit tracking and customer database.</p>
               </div>
               <div className="flex gap-2">
-                  <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={downloadCustomersData}>Download Data</Button>
+                  <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={() => downloadCustomersData()}>Download Data</Button>
+                  {selectedCustomerIds.length > 0 && (
+                    <>
+                      <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={() => downloadCustomersData(selectedCustomers)}>Download Selected</Button>
+                      <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={handleBatchEditCustomers}>Batch Edit ({selectedCustomerIds.length})</Button>
+                      <Button variant="destructive" size="sm" className="h-8 md:h-9" onClick={handleBatchDeleteCustomers}>Batch Delete</Button>
+                    </>
+                  )}
                   <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={() => setIsImportModalOpen(true)}>Upload Existing File</Button>
                   <Button onClick={() => setIsAddModalOpen(true)} size="sm" className="h-8 md:h-9 bg-primary shadow-sm">
                       <Plus className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Add Customer</span>
@@ -608,6 +722,15 @@ export default function Customers() {
         <table className="w-full text-sm">
           <thead className="bg-muted/40">
             <tr>
+              <th className="p-3 text-left w-12">
+                <input
+                  type="checkbox"
+                  checked={allFilteredCustomersSelected}
+                  onChange={handleToggleSelectAllCustomers}
+                  aria-label="Select all customers"
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+              </th>
               <th className="p-3 text-left">Customer</th>
               <th className="p-3 text-left">Phone</th>
               <th className="p-3 text-left">Visits</th>
@@ -620,6 +743,15 @@ export default function Customers() {
           <tbody>
             {filteredData.displayCustomers.map((customer) => (
               <tr key={customer.id} className="border-t hover:bg-muted/20">
+                <td className="p-3">
+                  <input
+                    type="checkbox"
+                    checked={selectedCustomerIds.includes(customer.id)}
+                    onChange={() => handleToggleCustomerSelection(customer.id)}
+                    aria-label={`Select ${customer.name}`}
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                </td>
                 <td className="p-3 font-medium">{customer.name}</td>
                 <td className="p-3">{customer.phone}</td>
                 <td className="p-3">{customer.visitCount}</td>
@@ -627,7 +759,18 @@ export default function Customers() {
                 <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{customer.totalDue.toFixed(2)}</td>
                 <td className="p-3">{new Date(customer.lastVisit).toLocaleDateString()}</td>
                 <td className="p-3">
-                  <Button size="sm" variant="outline" onClick={() => setViewingCustomer(customer)}>View Details</Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setViewingCustomer(customer)}>View Details</Button>
+                    <Button size="sm" variant="outline" onClick={() => openCustomerEditor(customer)}>Edit</Button>
+                    <Button size="sm" variant="destructive" onClick={() => {
+                      if (window.confirm(`Delete ${customer.name}?`)) {
+                        const nextCustomers = deleteCustomer(customer.id);
+                        setCustomers(nextCustomers);
+                        setSelectedCustomerIds(prev => prev.filter(id => id !== customer.id));
+                        if (viewingCustomer?.id === customer.id) setViewingCustomer(null);
+                      }
+                    }}>Delete</Button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -659,6 +802,43 @@ export default function Customers() {
                       <Button className="w-full h-11 shadow-lg bg-primary hover:bg-primary/90 font-bold" onClick={handleAddCustomerSubmit}>
                           Create Profile
                       </Button>
+                  </CardContent>
+              </Card>
+          </div>
+      )}
+
+      {editingCustomer && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+              <Card className="w-full max-w-sm shadow-2xl animate-in zoom-in duration-300">
+                  <CardHeader className="flex flex-row justify-between items-center border-b pb-4">
+                      <CardTitle className="text-lg">
+                        {isBatchEditingCustomers
+                          ? `Batch Edit Customer ${batchEditCustomerIndex + 1} of ${batchEditCustomerIds.length}`
+                          : `Edit ${editingCustomer.name}`}
+                      </CardTitle>
+                      <Button variant="ghost" size="icon" onClick={closeCustomerEditor}><X className="w-4 h-4" /></Button>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-6">
+                      {customerEditError && (
+                          <div className="bg-destructive/10 text-destructive text-xs p-3 rounded-md flex items-center gap-2 font-bold border border-destructive/20 shadow-sm">
+                              <AlertCircle className="w-4 h-4 shrink-0" /> {customerEditError}
+                          </div>
+                      )}
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Full Name</Label>
+                        <Input value={customerEditForm.name} onChange={e => setCustomerEditForm(prev => ({ ...prev, name: e.target.value }))} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Phone Number</Label>
+                        <Input value={customerEditForm.phone} onChange={e => setCustomerEditForm(prev => ({ ...prev, phone: e.target.value }))} />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button variant="outline" className="flex-1" onClick={closeCustomerEditor}>Cancel</Button>
+                        <Button variant="outline" className="flex-1" onClick={() => handleSaveCustomerEdit(true)}>
+                          {remainingBatchCustomers > 0 ? `Update & Next (${remainingBatchCustomers} left)` : 'Update & Next'}
+                        </Button>
+                        <Button className="flex-1" onClick={() => handleSaveCustomerEdit(false)}>Save</Button>
+                      </div>
                   </CardContent>
               </Card>
           </div>
