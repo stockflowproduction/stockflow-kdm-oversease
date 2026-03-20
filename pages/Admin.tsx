@@ -26,6 +26,9 @@ export default function Admin() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [exportType, setExportType] = useState<'inventory' | 'low-stock'>('inventory');
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [batchEditProductIds, setBatchEditProductIds] = useState<string[]>([]);
+  const [batchEditIndex, setBatchEditIndex] = useState(0);
   
   // Filters & Sort
   const [searchTerm, setSearchTerm] = useState('');
@@ -194,9 +197,23 @@ export default function Admin() {
         setProducts(updated);
       }
       if (keepOpenForNext) {
-        setEditingProduct(null);
-        setFormData({ ...emptyProductForm, variants: [], colors: [], stockByVariantColor: [] });
-        setError(null);
+        if (editingProduct && batchEditProductIds.length > 0) {
+          const nextIndex = batchEditIndex + 1;
+          const nextProductId = batchEditProductIds[nextIndex];
+          if (nextProductId) {
+            const nextProduct = updated.find(product => product.id === nextProductId);
+            if (nextProduct) {
+              setBatchEditIndex(nextIndex);
+              openModal(nextProduct);
+            }
+          } else {
+            closeModal();
+          }
+        } else {
+          setEditingProduct(null);
+          setFormData({ ...emptyProductForm, variants: [], colors: [], stockByVariantColor: [] });
+          setError(null);
+        }
       } else {
         closeModal();
       }
@@ -276,12 +293,18 @@ export default function Admin() {
         const updated = await deleteProduct(id);
         console.debug('[product] delete success', { productId: id });
         setProducts(updated);
+        setSelectedProductIds(prev => prev.filter(productId => productId !== id));
       } catch (deleteError) {
         console.error('Product delete error:', deleteError);
         alert('Product deletion failed. Please try again.');
       }
     }
   };
+
+  const selectedProducts = useMemo(
+    () => products.filter(product => selectedProductIds.includes(product.id)),
+    [products, selectedProductIds]
+  );
 
   const handleAddCategory = () => {
       if(!newCategoryName.trim()) return;
@@ -421,7 +444,52 @@ export default function Admin() {
   const closeModal = () => {
     setIsModalOpen(false);
     setEditingProduct(null);
+    setBatchEditProductIds([]);
+    setBatchEditIndex(0);
     setError(null);
+  };
+
+  const isBatchEditing = batchEditProductIds.length > 0;
+  const remainingBatchProducts = isBatchEditing ? Math.max(0, batchEditProductIds.length - batchEditIndex - 1) : 0;
+
+  const handleToggleProductSelection = (productId: string) => {
+    setSelectedProductIds(prev => prev.includes(productId) ? prev.filter(id => id !== productId) : [...prev, productId]);
+  };
+
+  const handleToggleSelectAllProducts = () => {
+    const filteredIds = filteredProducts.map(product => product.id);
+    const allFilteredSelected = filteredIds.length > 0 && filteredIds.every(id => selectedProductIds.includes(id));
+    setSelectedProductIds(prev => allFilteredSelected
+      ? prev.filter(id => !filteredIds.includes(id))
+      : Array.from(new Set([...prev, ...filteredIds]))
+    );
+  };
+
+  const handleBatchEditProducts = () => {
+    const queue = filteredProducts.filter(product => selectedProductIds.includes(product.id)).map(product => product.id);
+    if (!queue.length) return;
+    setBatchEditProductIds(queue);
+    setBatchEditIndex(0);
+    const firstProduct = products.find(product => product.id === queue[0]);
+    if (firstProduct) openModal(firstProduct);
+  };
+
+  const handleBatchDeleteProducts = async () => {
+    if (!selectedProducts.length) return;
+    const confirmed = window.confirm(`Delete ${selectedProducts.length} selected product${selectedProducts.length > 1 ? 's' : ''}?`);
+    if (!confirmed) return;
+
+    try {
+      let nextProducts = products;
+      for (const productId of selectedProductIds) {
+        nextProducts = await deleteProduct(productId);
+      }
+      setProducts(nextProducts);
+      setSelectedProductIds([]);
+    } catch (deleteError) {
+      console.error('Batch product delete error:', deleteError);
+      alert('Batch product deletion failed. Please try again.');
+    }
   };
 
   // --- IMAGE COMPRESSION LOGIC ---
@@ -560,6 +628,7 @@ export default function Admin() {
 
     return result;
   }, [products, searchTerm, sortOption, categoryFilter]);
+  const allFilteredProductsSelected = filteredProducts.length > 0 && filteredProducts.every(product => selectedProductIds.includes(product.id));
 
   // Calculate Dashboard Stats
   const stats = useMemo(() => {
@@ -976,7 +1045,14 @@ export default function Admin() {
                    <Button variant="outline" size="icon" onClick={() => { setExportType('inventory'); setIsExportModalOpen(true); }} title="Download Catalog" className="shrink-0">
                        <FileDown className="w-4 h-4" />
                    </Button>
-                   <Button variant="outline" onClick={downloadInventoryData} className="h-9">Download Data</Button>
+                   <Button variant="outline" onClick={() => downloadInventoryData()} className="h-9">Download Data</Button>
+                   {selectedProductIds.length > 0 && (
+                     <>
+                       <Button variant="outline" onClick={() => downloadInventoryData(selectedProducts)} className="h-9">Download Selected</Button>
+                       <Button variant="outline" onClick={handleBatchEditProducts} className="h-9">Batch Edit ({selectedProductIds.length})</Button>
+                       <Button variant="destructive" onClick={() => void handleBatchDeleteProducts()} className="h-9">Batch Delete</Button>
+                     </>
+                   )}
                    <Button variant="outline" onClick={() => setIsImportModalOpen(true)} className="h-9">Upload Existing File</Button>
                    
                    <Button onClick={() => openModal()} className="bg-primary hover:bg-primary/90 text-white shadow-md hover:shadow-lg transition-all flex-1 md:flex-none">
@@ -990,12 +1066,30 @@ export default function Admin() {
         <table className="w-full text-sm">
           <thead className="bg-muted/40">
             <tr>
+              <th className="text-left p-3 w-12">
+                <input
+                  type="checkbox"
+                  checked={allFilteredProductsSelected}
+                  onChange={handleToggleSelectAllProducts}
+                  aria-label="Select all products"
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+              </th>
               <th className="text-left p-3">Image</th><th className="text-left p-3">Product</th><th className="text-left p-3">Category</th><th className="text-left p-3">Purchase/Sold</th><th className="text-left p-3">Stock</th><th className="text-left p-3">Buy/Sell</th><th className="text-left p-3">Actions</th>
             </tr>
           </thead>
           <tbody>
             {filteredProducts.map(product => (
               <tr key={product.id} className="border-t align-top">
+                <td className="p-3">
+                  <input
+                    type="checkbox"
+                    checked={selectedProductIds.includes(product.id)}
+                    onChange={() => handleToggleProductSelection(product.id)}
+                    aria-label={`Select ${product.name}`}
+                    className="mt-1 h-4 w-4 rounded border-slate-300"
+                  />
+                </td>
                 <td className="p-3">
                   <div className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">
                     {product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}
@@ -1065,9 +1159,13 @@ export default function Admin() {
       {/* Edit/Add Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <Card className="w-full max-w-5xl max-h-[95vh] overflow-y-auto animate-in fade-in zoom-in duration-200 shadow-2xl">
+            <Card className="w-full max-w-5xl max-h-[95vh] overflow-y-auto animate-in fade-in zoom-in duration-200 shadow-2xl">
             <CardHeader className="flex flex-row items-center justify-between border-b pb-4 bg-muted/20">
-                <CardTitle className="text-xl">{editingProduct ? 'Edit Product' : 'Add New Product'}</CardTitle>
+                <CardTitle className="text-xl">
+                  {editingProduct
+                    ? (isBatchEditing ? `Batch Edit Product ${batchEditIndex + 1} of ${batchEditProductIds.length}` : 'Edit Product')
+                    : 'Add New Product'}
+                </CardTitle>
                 <Button variant="ghost" size="sm" onClick={closeModal}><X className="w-4 h-4" /></Button>
             </CardHeader>
             <CardContent className="space-y-5 pt-6">
@@ -1255,7 +1353,7 @@ export default function Admin() {
                           <Save className="w-4 h-4 mr-2" /> {isSaving ? 'Saving...' : editingProduct ? 'Update Product' : 'Save Product'}
                       </Button>
                       <Button variant="outline" className="h-11 text-base" onClick={handleSaveAndNext} disabled={isSaving}>
-                          {isSaving ? 'Saving...' : editingProduct ? 'Update & Next' : 'Save & Next'}
+                          {isSaving ? 'Saving...' : editingProduct ? (remainingBatchProducts > 0 ? `Update & Next (${remainingBatchProducts} left)` : 'Update & Next') : 'Save & Next'}
                       </Button>
                     </div>
                 </div>
