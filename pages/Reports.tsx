@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import jsPDF from 'jspdf';
-import { loadData } from '../services/storage';
+import { getOperationalTransactions, loadData } from '../services/storage';
 import { Button, Card, CardContent, CardHeader, CardTitle, Badge } from '../components/ui';
 import { FileText, Download, User, Users } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -239,7 +239,7 @@ export default function Reports() {
           void generatePDF(reportType);
       } else {
           if (reportType === 'detailed_sales') {
-              exportDetailedSalesToExcel(transactions);
+              exportDetailedSalesToExcel(getOperationalTransactions(transactions));
           } else {
               exportProductsToExcel(products);
           }

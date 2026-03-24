@@ -1532,8 +1532,8 @@ export default function Admin() {
         onClose={() => setIsImportModalOpen(false)}
         title="Import Inventory"
         onDownloadTemplate={downloadInventoryTemplate}
-        onImportFile={async (file) => {
-          const result = await importInventoryFromFile(file);
+        onImportFile={async (file, _onProgress) => {
+          const result = await importInventoryFromFile(file, _onProgress);
           refreshData();
           return result;
         }}

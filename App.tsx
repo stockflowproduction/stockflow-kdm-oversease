@@ -12,7 +12,8 @@ import FreightBooking from './pages/FreightBooking';
 import PurchasePanel from './pages/PurchasePanel';
 import Auth from './pages/Auth';
 import VerificationRequired from './pages/VerificationRequired';
-import { getCurrentUser, logout } from './services/auth';
+import StoreRecoveryRequired from './pages/StoreRecoveryRequired';
+import { getCurrentUser, getCurrentUserProvisioningState, logout } from './services/auth';
 import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
@@ -69,7 +70,7 @@ const ProtectedRoute = ({ isVerified, children }: { isVerified: boolean; childre
 
 export default function App() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unverified' | 'unauthenticated'>('loading');
+  const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'unverified' | 'recovery_required' | 'unauthenticated'>('loading');
   const [currentEmail, setCurrentEmail] = useState<string | null>(getCurrentUser());
   const [storeName, setStoreName] = useState('StockFlow');
   const [cloudStatus, setCloudStatus] = useState<{ status: string; message?: string }>({ status: navigator.onLine ? 'loading' : 'offline' });
@@ -84,14 +85,22 @@ export default function App() {
     }
 
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      if (!user) {
-        setCurrentEmail(null);
-        setAuthStatus('unauthenticated');
-        return;
-      }
+      void (async () => {
+        if (!user) {
+          setCurrentEmail(null);
+          setAuthStatus('unauthenticated');
+          return;
+        }
 
-      setCurrentEmail(user.email || null);
-      setAuthStatus(user.emailVerified ? 'authenticated' : 'unverified');
+        setCurrentEmail(user.email || null);
+        if (!user.emailVerified) {
+          setAuthStatus('unverified');
+          return;
+        }
+
+        const provisioningState = await getCurrentUserProvisioningState();
+        setAuthStatus(provisioningState === 'missing_store' ? 'recovery_required' : 'authenticated');
+      })();
     });
 
     return () => unsubscribe();
@@ -134,6 +143,12 @@ export default function App() {
     return () => clearTimeout(t);
   }, [opStatus]);
 
+  useEffect(() => {
+    if (authStatus === 'authenticated' && cloudStatus.status === 'missing_store') {
+      setAuthStatus('recovery_required');
+    }
+  }, [authStatus, cloudStatus.status]);
+
   const handleLoginSuccess = () => {
       setAuthStatus('authenticated');
   };
@@ -148,6 +163,10 @@ export default function App() {
 
   if (authStatus === 'unverified') {
       return <VerificationRequired email={currentEmail || undefined} />;
+  }
+
+  if (authStatus === 'recovery_required') {
+      return <StoreRecoveryRequired email={currentEmail || undefined} onRecovered={() => window.location.reload()} />;
   }
 
   return (

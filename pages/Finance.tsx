@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { loadData, saveData, processTransaction } from '../services/storage';
+import { getOperationalTransactions, loadData, saveData, processTransaction } from '../services/storage';
 import { AppState, CashSession, Customer, ExpenseActivity, Transaction } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
@@ -41,10 +41,11 @@ const formatINR = (value: number) => `₹${value.toFixed(2)}`;
 
 
 const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], sessionStartIso: string, sessionEndIso?: string) => {
+  const operationalTransactions = getOperationalTransactions(transactions);
   const start = new Date(sessionStartIso).getTime();
   const end = sessionEndIso ? new Date(sessionEndIso).getTime() : Number.POSITIVE_INFINITY;
 
-  const cashTransactions = transactions.filter(t => {
+  const cashTransactions = operationalTransactions.filter(t => {
     if (t.paymentMethod !== 'Cash') return false;
     const txTime = new Date(t.date).getTime();
     return txTime >= start && txTime <= end;
@@ -289,8 +290,9 @@ export default function Finance() {
   const closingVariance = openSession ? (closingCountTotal - expectedClosingForOpenSession) : 0;
 
   const todayFinanceBreakdown = useMemo(() => {
-    const sales = data.transactions.filter(t => t.type === 'sale' && isSameDay(t.date, todayISO()));
-    const returns = data.transactions.filter(t => t.type === 'return' && isSameDay(t.date, todayISO()));
+    const operationalTransactions = getOperationalTransactions(data.transactions);
+    const sales = operationalTransactions.filter(t => t.type === 'sale' && isSameDay(t.date, todayISO()));
+    const returns = operationalTransactions.filter(t => t.type === 'return' && isSameDay(t.date, todayISO()));
     const cashSales = sales.filter(t => t.paymentMethod === 'Cash').reduce((s, t) => s + Math.abs(t.total), 0);
     const creditSales = sales.filter(t => t.paymentMethod === 'Credit').reduce((s, t) => s + Math.abs(t.total), 0);
     const onlineSales = sales.filter(t => t.paymentMethod === 'Online').reduce((s, t) => s + Math.abs(t.total), 0);
@@ -341,8 +343,9 @@ export default function Finance() {
   const creditCustomers = useMemo(() => data.customers.filter(c => c.totalDue > 0).sort((a, b) => b.totalDue - a.totalDue), [data.customers]);
 
   const dailyProfit = useMemo(() => {
-    const sales = data.transactions.filter(t => t.type === 'sale' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
-    const cogs = data.transactions
+    const operationalTransactions = getOperationalTransactions(data.transactions);
+    const sales = operationalTransactions.filter(t => t.type === 'sale' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
+    const cogs = operationalTransactions
       .filter(t => t.type === 'sale' && isSameDay(t.date, profitDate))
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
     const expenseSum = expenses.filter(e => isSameDay(e.createdAt, profitDate)).reduce((sum, e) => sum + e.amount, 0);
@@ -351,8 +354,9 @@ export default function Finance() {
   }, [data.transactions, expenses, profitDate]);
 
   const monthlyProfit = useMemo(() => {
-    const sales = data.transactions.filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
-    const cogs = data.transactions
+    const operationalTransactions = getOperationalTransactions(data.transactions);
+    const sales = operationalTransactions.filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
+    const cogs = operationalTransactions
       .filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth)
       .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
     const expenseSum = expenses.filter(e => monthKeyOf(e.createdAt) === profitMonth).reduce((sum, e) => sum + e.amount, 0);
@@ -581,7 +585,7 @@ export default function Finance() {
       setErrors(null);
     } catch (error) {
       console.error('[finance] Collect payment failed', error);
-      setErrors('Unable to collect payment. Please try again.');
+      setErrors(error instanceof Error ? error.message : 'Unable to collect payment. Please try again.');
     }
   };
 
@@ -942,7 +946,7 @@ export default function Finance() {
 
               const sessionStartTs = new Date(activeHistorySession.startTime).getTime();
               const sessionEndTs = activeHistorySession.endTime ? new Date(activeHistorySession.endTime).getTime() : Number.POSITIVE_INFINITY;
-              const sessionSalesTx = data.transactions.filter(t => {
+              const sessionSalesTx = getOperationalTransactions(data.transactions).filter(t => {
                 if (t.type !== 'sale' || t.paymentMethod !== 'Cash') return false;
                 const txTime = new Date(t.date).getTime();
                 return txTime >= sessionStartTs && txTime <= sessionEndTs;

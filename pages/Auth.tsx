@@ -113,6 +113,7 @@ export default function Auth({ onLogin }: { onLogin: () => void }) {
         }
         const result = await login(email, password);
         if (result.success) {
+          if (result.message) setSuccessMessage(result.message);
           onLogin();
         } else {
           setError(result.message || "Invalid credentials");

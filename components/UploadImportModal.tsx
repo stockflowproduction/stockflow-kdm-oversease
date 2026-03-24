@@ -8,14 +8,16 @@ type Props = {
   open: boolean;
   onClose: () => void;
   onDownloadTemplate: () => void;
-  onImportFile: (file: File, onProgress?: (progress: ImportProgress) => void) => Promise<ImportResult>;
+  onImportFile: (file: File, onProgress?: (progress: ImportProgress) => void, mode?: string) => Promise<ImportResult>;
+  importModes?: Array<{ value: string; label: string; description: string }>;
 };
 
-export function UploadImportModal({ title, open, onClose, onDownloadTemplate, onImportFile }: Props) {
+export function UploadImportModal({ title, open, onClose, onDownloadTemplate, onImportFile, importModes = [] }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
+  const [selectedMode, setSelectedMode] = useState(importModes[0]?.value || '');
 
   if (!open) return null;
 
@@ -26,7 +28,7 @@ export function UploadImportModal({ title, open, onClose, onDownloadTemplate, on
     setResult(null);
     setProgress({ phase: 'validating', processed: 0, total: 0, message: 'Preparing import...' });
     try {
-      const res = await onImportFile(file, setProgress);
+      const res = await onImportFile(file, setProgress, selectedMode || undefined);
       setResult(res);
       setProgress(prev => prev || { phase: 'completed', processed: res.importedRows, total: res.totalRows, message: 'Import completed.' });
     } finally {
@@ -40,21 +42,21 @@ export function UploadImportModal({ title, open, onClose, onDownloadTemplate, on
   const progressPercent = progress && progress.total > 0 ? Math.min(100, Math.round((progress.processed / progress.total) * 100)) : 0;
   const moduleNotes: Record<string, string[]> = {
     'Import Inventory': [
-      'Most exported product fields are editable and import-supported.',
-      'This file can set opening baseline values: Total Purchase, Total Sold, and Current Stock.',
-      'Current Stock must equal Total Purchase - Total Sold for every row.',
-      'Product ID / Barcode are used to match existing records during updates.',
+      'Choose Master Data to update names, barcode, category, pricing, description, and image.',
+      'Choose Opening Balance to seed or correct Total Purchase, Total Sold, and Current Stock only.',
+      'Imported Product ID values are treated as source metadata for new rows; the system keeps its own immutable internal ID.',
+      'Barcode remains the safe business-key fallback for matching.',
     ],
     'Import Customers': [
-      'Customer ID / Phone are identity matching fields.',
-      'Totals/visit values act as opening seed values and may later change from transactions.',
+      'Choose Master Data to update customer identity fields like name and phone.',
+      'Choose Opening Balance to seed Total Spend, Total Due, Visit Count, and Last Visit.',
+      'Imported Customer ID values are stored as source metadata for new rows; the system keeps its own immutable internal ID.',
     ],
     'Import Transactions': [
-      'Existing Transaction IDs are immutable: mismatched edited rows are rejected.',
-      'Sale/return rows must use Product ID for product matching; barcode is a consistency check only.',
-      'Customer ID is preferred for customer matching; phone/name are fallback references.',
-      'Subtotal/Discount/Tax/Total are consistency checks; final values are recomputed.',
-      'Historical transaction import stores history rows and may show baseline totalSold mismatch warnings without blocking import.',
+      'Live mode runs full transaction logic and changes stock/totals.',
+      'Historical Reference mode stores transactions for reference only and does not change stock or customer/product balances.',
+      'Imported Transaction ID values group rows inside the file and are stored as source metadata for new rows unless they already match an internal system transaction.',
+      'Subtotal/Discount/Tax/Total are consistency checks; live totals are still recomputed by the system.',
     ],
     'Import Purchase Orders': [
       'Order ID and Party Name are used for matching/resolution.',
@@ -94,6 +96,25 @@ export function UploadImportModal({ title, open, onClose, onDownloadTemplate, on
               </>
             )}
           </div>
+
+          {!!importModes.length && (
+            <div className="rounded-xl border border-slate-200 p-4">
+              <div className="text-sm font-semibold text-slate-900">Import mode</div>
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {importModes.map((mode) => (
+                  <button
+                    key={mode.value}
+                    type="button"
+                    onClick={() => setSelectedMode(mode.value)}
+                    className={`rounded-xl border p-3 text-left transition ${selectedMode === mode.value ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+                  >
+                    <div className="text-sm font-semibold">{mode.label}</div>
+                    <div className={`mt-1 text-xs ${selectedMode === mode.value ? 'text-slate-200' : 'text-slate-500'}`}>{mode.description}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {progress && (
             <div className="rounded-xl border border-slate-200 p-4">

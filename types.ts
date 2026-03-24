@@ -1,6 +1,21 @@
 
+export type EntitySourceType = 'system' | 'excel_import' | 'historical_import' | 'migration';
+
+export interface EntitySourceMetadata {
+  type: EntitySourceType;
+  uploadId?: string;
+  externalId?: string;
+  fileName?: string;
+  rowNumber?: number;
+}
+
 export interface Product {
   id: string;
+  schemaVersion?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  source?: EntitySourceMetadata;
+  legacyIds?: string[];
   barcode: string;
   name: string;
   description: string;
@@ -23,7 +38,6 @@ export interface Product {
     totalPurchase?: number;
     totalSold?: number;
   }>;
-  createdAt?: string;
   purchaseHistory?: Array<{
     id: string;
     date: string;
@@ -47,6 +61,11 @@ export interface CartItem extends Product {
 
 export interface Customer {
   id: string;
+  schemaVersion?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  source?: EntitySourceMetadata;
+  legacyIds?: string[];
   name: string;
   phone: string;
   totalSpend: number;
@@ -55,12 +74,23 @@ export interface Customer {
   visitCount: number;
 }
 
+export type LiveTransactionType = 'sale' | 'payment' | 'return' | 'purchase' | 'adjustment';
+export type TransactionType = LiveTransactionType | 'historical_reference';
+
 export interface Transaction {
   id: string;
+  schemaVersion?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  source?: EntitySourceMetadata;
+  legacyIds?: string[];
+  mode?: 'live' | 'historical';
+  warehouseId?: string;
   items: CartItem[];
   total: number;
   date: string;
-  type: 'sale' | 'return' | 'payment';
+  type: TransactionType;
+  referenceTransactionType?: LiveTransactionType;
   customerId?: string;
   customerName?: string;
   subtotal?: number;
@@ -69,6 +99,7 @@ export interface Transaction {
   taxRate?: number;
   taxLabel?: string;
   paymentMethod?: 'Cash' | 'Credit' | 'Online';
+  amountPaid?: number;
   notes?: string;
 }
 

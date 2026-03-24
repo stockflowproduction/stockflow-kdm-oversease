@@ -18,6 +18,10 @@ import {
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
+import { buildSystemId, DEFAULT_WAREHOUSE_ID, prepareCustomerRecord, prepareProductRecord, prepareTransactionRecord } from './entityMetadata';
+import { preserveExistingSoldAggregates } from './inventoryAggregates';
+import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
+import { normalizeTransactionForProcessing, TransactionValidationIssue, validateAndComputeTransactionEffects } from './transactionEffects';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -86,6 +90,7 @@ const emitDataOpStatus = (detail: {
   entity?: string;
   message?: string;
   error?: string;
+  transactionId?: string;
 }) => {
   window.dispatchEvent(new CustomEvent(APP_EVENTS.DATA_OP_STATUS, { detail }));
 };
@@ -112,6 +117,13 @@ export const STORAGE_FLOW_REGISTRY = Object.freeze({
 
 const sortTransactionsDesc = (transactions: Transaction[]) =>
   [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+export const isHistoricalTransaction = (transaction: Transaction) => {
+  const normalized = normalizeTransactionForProcessing(transaction);
+  return normalized.type === 'historical_reference';
+};
+export const isOperationalTransaction = (transaction: Transaction) => !isHistoricalTransaction(transaction);
+export const getOperationalTransactions = (transactions: Transaction[]) => transactions.filter(isOperationalTransaction);
 
 const getEntityCounts = (state: AppState) => ({
   products: state.products.length,
@@ -165,6 +177,7 @@ const getProductsCollectionRef = (uid: string) => collection(db!, 'stores', uid,
 const getCustomersCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'customers');
 const getTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'transactions');
 const getOperationCommitsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'operationCommits');
+const resolveTenantId = (user: { uid: string }) => user.uid;
 
 const assertCloudWriteReady = async (reason: string) => {
   if (!db || !auth) throw new Error('Firestore not configured.');
@@ -194,7 +207,7 @@ const readProductsFromSubcollection = async (uid: string): Promise<Product[]> =>
   if (!db) return [];
   const snap = await getDocs(getProductsCollectionRef(uid));
   return snap.docs
-    .map(d => ({ ...(d.data() as Product), id: d.id }))
+    .map(d => sanitizeVariantColorStock({ ...(d.data() as Product), id: d.id }))
     .filter(p => !((p as any).isDeleted));
 };
 
@@ -217,32 +230,32 @@ const readTransactionsFromSubcollection = async (uid: string): Promise<Transacti
 
 const upsertProductInSubcollection = async (product: Product, reason: string) => {
   const user = await assertCloudWriteReady(reason);
-  await setDoc(doc(db!, 'stores', user.uid, 'products', product.id), sanitizeData(product), { merge: true });
+  await setDoc(doc(db!, 'stores', resolveTenantId(user), 'products', product.id), sanitizeData(product), { merge: true });
 };
 
 const deleteProductInSubcollection = async (productId: string, reason: string) => {
   const user = await assertCloudWriteReady(reason);
-  await deleteDoc(doc(db!, 'stores', user.uid, 'products', productId));
+  await deleteDoc(doc(db!, 'stores', resolveTenantId(user), 'products', productId));
 };
 
 const upsertCustomerInSubcollection = async (customer: Customer, reason: string) => {
   const user = await assertCloudWriteReady(reason);
-  await setDoc(doc(db!, 'stores', user.uid, 'customers', customer.id), sanitizeData(customer), { merge: true });
+  await setDoc(doc(db!, 'stores', resolveTenantId(user), 'customers', customer.id), sanitizeData(customer), { merge: true });
 };
 
 const deleteCustomerInSubcollection = async (customerId: string, reason: string) => {
   const user = await assertCloudWriteReady(reason);
-  await deleteDoc(doc(db!, 'stores', user.uid, 'customers', customerId));
+  await deleteDoc(doc(db!, 'stores', resolveTenantId(user), 'customers', customerId));
 };
 
 const upsertTransactionInSubcollection = async (transaction: Transaction, reason: string) => {
   const user = await assertCloudWriteReady(reason);
-  await setDoc(doc(db!, 'stores', user.uid, 'transactions', transaction.id), sanitizeData(transaction), { merge: true });
+  await setDoc(doc(db!, 'stores', resolveTenantId(user), 'transactions', transaction.id), sanitizeData(transaction), { merge: true });
 };
 
 const deleteTransactionInSubcollection = async (transactionId: string, reason: string) => {
   const user = await assertCloudWriteReady(reason);
-  await deleteDoc(doc(db!, 'stores', user.uid, 'transactions', transactionId));
+  await deleteDoc(doc(db!, 'stores', resolveTenantId(user), 'transactions', transactionId));
 };
 
 
@@ -259,192 +272,110 @@ const commitProcessTransactionAtomically = async ({
   allowLegacySeed: boolean;
 }): Promise<{ created: boolean; committedProducts: Product[]; committedCustomer: Customer | null }> => {
   const user = await assertCloudWriteReady('processTransaction_atomic');
+  const tenantId = resolveTenantId(user);
 
   return runFirestoreTransaction(db!, async (firestoreTx) => {
-    const transactionRef = doc(db!, 'stores', user.uid, 'transactions', transaction.id);
+    const transactionRef = doc(db!, 'stores', tenantId, 'transactions', transaction.id);
     const existingTransactionSnap = await firestoreTx.get(transactionRef);
+    const normalizedTransaction = normalizeTransactionForProcessing(transaction);
+    const bucketedItems = normalizedTransaction.type === 'payment' || normalizedTransaction.type === 'historical_reference'
+      ? []
+      : aggregateCartItemsByStockBucket(normalizedTransaction.items);
 
     // Idempotency guard: repeated retries with same transaction id should not re-apply stock/customer deltas.
     if (existingTransactionSnap.exists()) {
       return { created: false, committedProducts: [], committedCustomer: null };
     }
 
-    const productDeltas = new Map<string, { quantityDelta: number; totalSoldDelta: number; variant?: string; color?: string }>();
-    if (transaction.type !== 'payment') {
-      transaction.items.forEach(item => {
-        const existing = productDeltas.get(item.id);
-        const quantityDelta = transaction.type === 'sale' ? -item.quantity : item.quantity;
-        const totalSoldDelta = transaction.type === 'sale' ? item.quantity : -item.quantity;
-        productDeltas.set(item.id, {
-          quantityDelta: (existing?.quantityDelta || 0) + quantityDelta,
-          totalSoldDelta: (existing?.totalSoldDelta || 0) + totalSoldDelta,
-          variant: item.selectedVariant,
-          color: item.selectedColor,
-        });
-      });
-    }
+    const productIds = Array.from(new Set(bucketedItems.map(item => item.productId)));
 
     // Firestore transactions require all reads before writes.
     // Collect every document we will reference up front.
     const productSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
-    for (const productId of productDeltas.keys()) {
-      const productRef = doc(db!, 'stores', user.uid, 'products', productId);
+    for (const productId of productIds) {
+      const productRef = doc(db!, 'stores', tenantId, 'products', productId);
       const productSnap = await firestoreTx.get(productRef);
       productSnapshots.set(productId, productSnap);
     }
 
     let customerSnap: Awaited<ReturnType<typeof firestoreTx.get>> | null = null;
     if (transaction.customerId) {
-      const customerRef = doc(db!, 'stores', user.uid, 'customers', transaction.customerId);
+      const customerRef = doc(db!, 'stores', tenantId, 'customers', transaction.customerId);
       customerSnap = await firestoreTx.get(customerRef);
     }
 
     const statsSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
-    if (transaction.customerId && transaction.type !== 'payment') {
-      for (const item of transaction.items) {
-        const statsDocId = getCustomerProductStatsDocId(transaction.customerId, item.id);
-        const statsRef = doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId);
+    if (normalizedTransaction.customerId && normalizedTransaction.type !== 'payment' && normalizedTransaction.type !== 'historical_reference') {
+      for (const productId of productIds) {
+        const statsDocId = getCustomerProductStatsDocId(normalizedTransaction.customerId, productId);
+        const statsRef = doc(db!, 'stores', tenantId, 'customerProductStats', statsDocId);
         const statsSnap = await firestoreTx.get(statsRef);
         statsSnapshots.set(statsDocId, statsSnap);
       }
     }
 
-    const committedProducts: Product[] = [];
-    for (const [productId, delta] of productDeltas.entries()) {
-      const productRef = doc(db!, 'stores', user.uid, 'products', productId);
-      const productSnap = productSnapshots.get(productId)!;
-      if (!productSnap.exists()) {
-        failValidation('PRODUCT_NOT_FOUND', 'Transaction item product not found in cloud state.', { itemId: productId });
-      }
-
-      const currentProduct = { ...(productSnap.data() as Product), id: productSnap.id };
-      const availableStock = getAvailableStockForItem(currentProduct, delta.variant, delta.color);
-      if (transaction.type === 'sale' && Math.abs(delta.quantityDelta) > availableStock) {
-        failValidation('OVERSALE_STOCK', 'Insufficient stock for product in cloud state.', {
-          itemId: productId,
-          requestedQuantity: Math.abs(delta.quantityDelta),
-          availableStock,
-        });
-      }
-
-      if (transaction.type === 'return') {
-        const soldCount = currentProduct.totalSold || 0;
-        if (Math.abs(delta.totalSoldDelta) > soldCount) {
-          failValidation('RETURN_EXCEEDS_TOTAL_SOLD', 'Return quantity exceeds sold quantity in cloud state.', {
-            itemId: productId,
-            returnQuantity: Math.abs(delta.totalSoldDelta),
-            soldCount,
-          });
-        }
-      }
-
-      const withStock = applyStockDeltaToProduct(currentProduct, delta.quantityDelta, delta.variant, delta.color);
-      const updatedProduct: Product = {
-        ...withStock,
-        totalSold: Math.max(0, (currentProduct.totalSold || 0) + delta.totalSoldDelta),
-      };
-      firestoreTx.set(productRef, sanitizeData(updatedProduct), { merge: true });
-      committedProducts.push(updatedProduct);
+    const cloudStateForValidation: AppState = {
+      ...memoryState,
+      products: Array.from(productSnapshots.values()).flatMap(snapshot => (
+        snapshot.exists() ? [sanitizeVariantColorStock({ ...(snapshot.data() as Product), id: snapshot.id })] : []
+      )),
+      customers: customerSnap?.exists()
+        ? [{ ...(customerSnap.data() as Customer), id: customerSnap.id }]
+        : (normalizedTransaction.customerId ? [] : memoryState.customers),
+      transactions: memoryState.transactions,
+    };
+    const computed = validateAndComputeTransactionEffects(cloudStateForValidation, normalizedTransaction);
+    if (!computed.ok) {
+      failFromTransactionIssues(computed.errors);
     }
 
-    let committedCustomer: Customer | null = null;
-    if (transaction.customerId) {
-      const customerRef = doc(db!, 'stores', user.uid, 'customers', transaction.customerId);
-      const currentCustomerSnap = customerSnap;
-      if (!currentCustomerSnap?.exists()) {
-        failValidation('CUSTOMER_NOT_FOUND', 'Transaction customer not found in cloud state.', { customerId: transaction.customerId });
-      }
+    const committedProducts = computed.productEffects.map(effect => effect.nextProduct);
+    committedProducts.forEach(product => {
+      const productRef = doc(db!, 'stores', tenantId, 'products', product.id);
+      firestoreTx.set(productRef, sanitizeData(product), { merge: true });
+    });
 
-      const currentCustomer = { ...(currentCustomerSnap.data() as Customer), id: currentCustomerSnap.id };
-      const amount = Math.abs(transaction.total);
-      let newTotalSpend = currentCustomer.totalSpend;
-      let newTotalDue = currentCustomer.totalDue;
-      let newVisitCount = currentCustomer.visitCount;
-      let newLastVisit = currentCustomer.lastVisit;
-
-      if (transaction.type === 'sale') {
-        newTotalSpend += amount;
-        newVisitCount += 1;
-        newLastVisit = new Date().toISOString();
-        if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
-      } else if (transaction.type === 'return') {
-        newTotalSpend -= amount;
-        if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
-      } else if (transaction.type === 'payment') {
-        newTotalDue -= amount;
-        newLastVisit = new Date().toISOString();
-      }
-
-      if (newTotalDue < -MONEY_EPSILON) {
-        failValidation('INVALID_CUSTOMER_BALANCE', 'Transaction results in invalid customer due balance.', {
-          customerId: currentCustomer.id,
-          resultingTotalDue: newTotalDue,
-        });
-      }
-
-      committedCustomer = {
-        ...currentCustomer,
-        totalSpend: newTotalSpend,
-        totalDue: Math.max(0, newTotalDue),
-        visitCount: newVisitCount,
-        lastVisit: newLastVisit,
-      };
+    const committedCustomer = computed.customerEffect?.nextCustomer || null;
+    if (committedCustomer) {
+      const customerRef = doc(db!, 'stores', tenantId, 'customers', committedCustomer.id);
       firestoreTx.set(customerRef, sanitizeData(committedCustomer), { merge: true });
+    }
 
-      if (transaction.type !== 'payment') {
-        for (const item of transaction.items) {
-          const statsDocId = getCustomerProductStatsDocId(transaction.customerId, item.id);
-          const statsRef = doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId);
-          const statsSnap = statsSnapshots.get(statsDocId)!;
-          if (transaction.type === 'return' && !statsSnap.exists() && !allowLegacySeed) {
-            failValidation('CUSTOMER_PRODUCT_STATS_MISSING', 'Customer product stats missing after backfill enforcement.', {
-              customerId: transaction.customerId,
-              productId: item.id,
-              markerVersion: CUSTOMER_PRODUCT_STATS_BACKFILL_MARKER_VERSION,
-            });
-          }
+    if (normalizedTransaction.customerId && normalizedTransaction.type !== 'payment' && normalizedTransaction.type !== 'historical_reference') {
+      for (const productId of productIds) {
+        const qty = bucketedItems
+          .filter(item => item.productId === productId)
+          .reduce((sum, item) => sum + item.quantity, 0);
+        const statsDocId = getCustomerProductStatsDocId(normalizedTransaction.customerId, productId);
+        const statsRef = doc(db!, 'stores', tenantId, 'customerProductStats', statsDocId);
+        const statsSnap = statsSnapshots.get(statsDocId)!;
+        const fallbackSeed = allowLegacySeed
+          ? (legacyCustomerProductStatsSeed[productId] || { soldQty: 0, returnedQty: 0 })
+          : { soldQty: 0, returnedQty: 0 };
+        const stats = statsSnap.exists()
+          ? (statsSnap.data() as { soldQty?: number; returnedQty?: number })
+          : fallbackSeed;
 
-          const fallbackSeed = legacyCustomerProductStatsSeed[item.id] || { soldQty: 0, returnedQty: 0 };
-          const stats = statsSnap.exists()
-            ? (statsSnap.data() as { soldQty?: number; returnedQty?: number })
-            : fallbackSeed;
+        const soldQty = Math.max(0, Number.isFinite(stats.soldQty) ? Number(stats.soldQty) : 0);
+        const returnedQty = Math.max(0, Number.isFinite(stats.returnedQty) ? Number(stats.returnedQty) : 0);
+        const nextStats = normalizedTransaction.type === 'sale'
+          ? { soldQty: soldQty + qty, returnedQty }
+          : { soldQty, returnedQty: returnedQty + qty };
 
-          const soldQty = Math.max(0, Number.isFinite(stats.soldQty) ? Number(stats.soldQty) : 0);
-          const returnedQty = Math.max(0, Number.isFinite(stats.returnedQty) ? Number(stats.returnedQty) : 0);
-          const qty = Math.max(0, item.quantity || 0);
-
-          if (transaction.type === 'return') {
-            const netPurchased = soldQty - returnedQty;
-            if (qty > netPurchased) {
-              failValidation('RETURN_EXCEEDS_CUSTOMER_PURCHASE', 'Return quantity exceeds customer purchase history in cloud state.', {
-                itemId: item.id,
-                returnQuantity: qty,
-                customerRemaining: netPurchased,
-                soldQty,
-                returnedQty,
-              });
-            }
-          }
-
-          const nextStats = transaction.type === 'sale'
-            ? { soldQty: soldQty + qty, returnedQty }
-            : { soldQty, returnedQty: returnedQty + qty };
-
-          firestoreTx.set(statsRef, sanitizeData({
-            customerId: transaction.customerId,
-            productId: item.id,
-            soldQty: nextStats.soldQty,
-            returnedQty: nextStats.returnedQty,
-            updatedAt: new Date().toISOString(),
-            migrationSource: statsSnap.exists() ? 'transactional_update' : 'seed_or_bootstrap',
-          }), { merge: true });
-        }
+        firestoreTx.set(statsRef, sanitizeData({
+          customerId: normalizedTransaction.customerId,
+          productId,
+          soldQty: nextStats.soldQty,
+          returnedQty: nextStats.returnedQty,
+          updatedAt: new Date().toISOString(),
+          migrationSource: statsSnap.exists() ? 'transactional_update' : 'seed_or_bootstrap',
+        }), { merge: true });
       }
     }
 
-    firestoreTx.set(transactionRef, sanitizeData(transaction), { merge: true });
+    firestoreTx.set(transactionRef, sanitizeData(computed.normalizedTransaction), { merge: true });
 
-    const operationCommitRef = doc(getOperationCommitsCollectionRef(user.uid), `processTransaction_${transaction.id}`);
+    const operationCommitRef = doc(getOperationCommitsCollectionRef(tenantId), `processTransaction_${transaction.id}`);
     firestoreTx.set(operationCommitRef, {
       operationType: OPERATION_TYPES.PROCESS_TRANSACTION,
       operationId: transaction.id,
@@ -452,10 +383,10 @@ const commitProcessTransactionAtomically = async ({
       status: OPERATION_COMMIT_STATUS.COMMITTED,
       committedAt: serverTimestamp(),
       transactionId: transaction.id,
-      transactionType: transaction.type,
-      customerId: transaction.customerId || null,
-      touchedProductIds: Array.from(productDeltas.keys()),
-      touchedCustomerIds: transaction.customerId ? [transaction.customerId] : [],
+      transactionType: computed.normalizedTransaction.type,
+      customerId: computed.normalizedTransaction.customerId || null,
+      touchedProductIds: productIds,
+      touchedCustomerIds: computed.normalizedTransaction.customerId ? [computed.normalizedTransaction.customerId] : [],
       payloadVersion: 1,
     }, { merge: true });
 
@@ -570,7 +501,8 @@ const syncFromCloud = async () => {
     
     try {
         // Use UID for strict isolation
-        const docRef = doc(db, "stores", user.uid);
+        const tenantId = resolveTenantId(user);
+        const docRef = doc(db, "stores", tenantId);
         
         if (unsubscribeSnapshot) {
             unsubscribeSnapshot();
@@ -585,9 +517,9 @@ const syncFromCloud = async () => {
             unsubscribeTransactionsSnapshot();
         }
 
-        unsubscribeProductsSnapshot = onSnapshot(getProductsCollectionRef(user.uid), (productsSnap) => {
+        unsubscribeProductsSnapshot = onSnapshot(getProductsCollectionRef(tenantId), (productsSnap) => {
             const products = productsSnap.docs
-              .map(docItem => ({ ...(docItem.data() as Product), id: docItem.id }))
+              .map(docItem => sanitizeVariantColorStock({ ...(docItem.data() as Product), id: docItem.id }))
               .filter(p => !((p as any).isDeleted));
 
             memoryState = { ...memoryState, products };
@@ -597,7 +529,7 @@ const syncFromCloud = async () => {
             console.error('Error listening to product subcollection:', error);
         });
 
-        unsubscribeCustomersSnapshot = onSnapshot(getCustomersCollectionRef(user.uid), (customersSnap) => {
+        unsubscribeCustomersSnapshot = onSnapshot(getCustomersCollectionRef(tenantId), (customersSnap) => {
             const customers = customersSnap.docs
               .map(docItem => ({ ...(docItem.data() as Customer), id: docItem.id }))
               .filter(c => !((c as any).isDeleted));
@@ -609,7 +541,7 @@ const syncFromCloud = async () => {
             console.error('Error listening to customer subcollection:', error);
         });
 
-        unsubscribeTransactionsSnapshot = onSnapshot(getTransactionsCollectionRef(user.uid), (transactionsSnap) => {
+        unsubscribeTransactionsSnapshot = onSnapshot(getTransactionsCollectionRef(tenantId), (transactionsSnap) => {
             const transactions = transactionsSnap.docs
               .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
               .filter(t => !((t as any).isDeleted));
@@ -632,9 +564,9 @@ const syncFromCloud = async () => {
                   && customerProductStatsBackfill?.version === CUSTOMER_PRODUCT_STATS_BACKFILL_MARKER_VERSION;
                 isCustomerProductStatsBackfillComplete = strictBackfill || ENFORCE_CUSTOMER_PRODUCT_STATS_BACKFILL;
 
-                const subcollectionProducts = await readProductsFromSubcollection(user.uid);
-                const subcollectionCustomers = await readCustomersFromSubcollection(user.uid);
-                const subcollectionTransactions = await readTransactionsFromSubcollection(user.uid);
+                const subcollectionProducts = await readProductsFromSubcollection(tenantId);
+                const subcollectionCustomers = await readCustomersFromSubcollection(tenantId);
+                const subcollectionTransactions = await readTransactionsFromSubcollection(tenantId);
                 const hydratedProducts = subcollectionProducts;
                 const hydratedCustomers = subcollectionCustomers;
                 const hydratedTransactions = subcollectionTransactions;
@@ -751,7 +683,22 @@ const isDataUrlImage = (value: string | undefined): boolean => {
 
 
 const normalizeLabel = (value?: string) => (value || '').trim();
-const toStockKey = (variant?: string, color?: string) => `${normalizeLabel(variant) || 'No Variant'}__${normalizeLabel(color) || 'No Color'}`;
+const toStockKey = (variant?: string, color?: string) => `${normalizeStockBucketVariant(variant)}__${normalizeStockBucketColor(color)}`;
+
+const resolveAggregateNumber = (productLevelValue: unknown, rowValues: Array<number | undefined>) => {
+  const sanitizedProductLevelValue = Number.isFinite(productLevelValue) && Number(productLevelValue) >= 0 ? Number(productLevelValue) : undefined;
+  const definedRowValues = rowValues.filter((value): value is number => Number.isFinite(value) && value >= 0);
+  if (!definedRowValues.length) return sanitizedProductLevelValue ?? 0;
+  if (sanitizedProductLevelValue !== undefined && sanitizedProductLevelValue > 0) return sanitizedProductLevelValue;
+  return definedRowValues[0];
+};
+
+const sumAggregateNumber = (productLevelValue: unknown, rowValues: Array<number | undefined>) => {
+  const definedRowValues = rowValues.filter((value): value is number => Number.isFinite(value) && value >= 0);
+  if (definedRowValues.length) return definedRowValues.reduce((sum, value) => sum + value, 0);
+  if (Number.isFinite(productLevelValue) && Number(productLevelValue) >= 0) return Number(productLevelValue);
+  return 0;
+};
 
 const sanitizeVariantColorStock = (product: Product): Product => {
   const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
@@ -801,38 +748,14 @@ const sanitizeVariantColorStock = (product: Product): Product => {
     colors,
     stockByVariantColor,
     stock: totalStock,
+    buyPrice: resolveAggregateNumber(product.buyPrice, stockByVariantColor.map(entry => entry.buyPrice)),
+    sellPrice: resolveAggregateNumber(product.sellPrice, stockByVariantColor.map(entry => entry.sellPrice)),
+    totalPurchase: sumAggregateNumber(product.totalPurchase, stockByVariantColor.map(entry => entry.totalPurchase)),
+    totalSold: sumAggregateNumber(product.totalSold, stockByVariantColor.map(entry => entry.totalSold)),
   };
 };
 
-const getAvailableStockForItem = (product: Product, variant?: string, color?: string) => {
-  const entries = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
-  if (!entries.length) return Math.max(0, product.stock || 0);
 
-  const targetVariant = normalizeLabel(variant) || 'No Variant';
-  const targetColor = normalizeLabel(color) || 'No Color';
-  const found = entries.find(entry => (normalizeLabel(entry.variant) || 'No Variant') === targetVariant && (normalizeLabel(entry.color) || 'No Color') === targetColor);
-  return found ? Math.max(0, found.stock) : 0;
-};
-
-const applyStockDeltaToProduct = (product: Product, delta: number, variant?: string, color?: string): Product => {
-  const entries = Array.isArray(product.stockByVariantColor) ? [...product.stockByVariantColor] : [];
-  if (!entries.length) {
-    return { ...product, stock: Math.max(0, (product.stock || 0) + delta) };
-  }
-
-  const targetVariant = normalizeLabel(variant) || 'No Variant';
-  const targetColor = normalizeLabel(color) || 'No Color';
-  const index = entries.findIndex(entry => (normalizeLabel(entry.variant) || 'No Variant') === targetVariant && (normalizeLabel(entry.color) || 'No Color') === targetColor);
-
-  if (index >= 0) {
-    entries[index] = { ...entries[index], stock: Math.max(0, (entries[index].stock || 0) + delta) };
-  } else if (delta > 0) {
-    entries.push({ variant: targetVariant, color: targetColor, stock: delta });
-  }
-
-  const totalStock = entries.reduce((sum, entry) => sum + Math.max(0, entry.stock || 0), 0);
-  return { ...product, stockByVariantColor: entries, stock: totalStock };
-};
 
 const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
 const CLOUDINARY_UPLOAD_TIMEOUT_MS = 45000;
@@ -1297,7 +1220,13 @@ export const resetData = () => {
 
 export const addProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: Math.max(0, Number(product.totalSold) || 0), totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0) });
+  const preparedInput = prepareProductRecord({
+    ...product,
+    id: product.id || buildSystemId('prd'),
+    totalSold: Math.max(0, Number(product.totalSold) || 0),
+    totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0),
+  });
+  const sanitized = sanitizeVariantColorStock(preparedInput);
   const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = [...data.products.filter(p => p.id !== preparedProduct.id), preparedProduct];
 
@@ -1325,7 +1254,16 @@ export const addProduct = async (product: Product): Promise<Product[]> => {
 
 export const updateProduct = async (product: Product): Promise<Product[]> => {
   const data = loadData();
-  const sanitized = sanitizeVariantColorStock({ ...product, totalSold: Math.max(0, Number(product.totalSold) || 0), totalPurchase: product.totalPurchase === undefined ? undefined : Math.max(0, Number(product.totalPurchase) || 0) });
+  const existing = data.products.find(p => p.id === product.id);
+  // Product edits/import upserts are allowed to change catalog fields, pricing, and stock snapshots,
+  // but sold aggregates must continue to come from the centralized transaction-effects pipeline only.
+  const soldAggregateSafeProduct = preserveExistingSoldAggregates(product, existing);
+  const preparedInput = prepareProductRecord({
+    ...soldAggregateSafeProduct,
+    totalSold: Math.max(0, Number(soldAggregateSafeProduct.totalSold) || 0),
+    totalPurchase: soldAggregateSafeProduct.totalPurchase === undefined ? undefined : Math.max(0, Number(soldAggregateSafeProduct.totalPurchase) || 0),
+  }, existing);
+  const sanitized = sanitizeVariantColorStock(preparedInput);
   const preparedProduct = await uploadProductImageIfNeeded(sanitized);
   const newProducts = data.products.map(p => p.id === product.id ? preparedProduct : p);
 
@@ -1479,6 +1417,18 @@ const failValidation = (code: string, message: string, details?: Record<string, 
   throw new StorageValidationError(code, message, details);
 };
 
+const failFromTransactionIssues = (issues: TransactionValidationIssue[]): never => {
+  const primary = issues[0];
+  return failValidation(primary.code, primary.message, {
+    ...(primary.details || {}),
+    field: primary.field,
+    itemId: primary.itemId,
+    variant: primary.variant,
+    color: primary.color,
+    issueCount: issues.length,
+  });
+};
+
 const MONEY_EPSILON = 0.01;
 
 const isValidMoney = (value: unknown): value is number => {
@@ -1558,134 +1508,20 @@ const assertUpfrontOrderPayload = (order: UpfrontOrder, existingCustomerIds: Set
   }
 };
 
-const assertPaymentMethodByType = (type: Transaction['type'], paymentMethod: Transaction['paymentMethod']) => {
-  const validMethods: Transaction['paymentMethod'][] = ['Cash', 'Credit', 'Online'];
 
-  if (paymentMethod && !validMethods.includes(paymentMethod)) {
-    failValidation('INVALID_PAYMENT_METHOD', 'Payment method is invalid.', { paymentMethod });
-  }
-
-  if (type === 'payment' && paymentMethod === 'Credit') {
-    failValidation('INVALID_PAYMENT_METHOD_FOR_TYPE', 'Credit is not valid for payment collection transactions.', { paymentMethod, type });
-  }
-};
-
-const assertTransactionFinancials = (transaction: Transaction) => {
-  if (transaction.type === 'payment') {
-    if (!Number.isFinite(transaction.total) || transaction.total <= 0) {
-      failValidation('INVALID_PAYMENT_TOTAL', 'Payment total must be greater than zero.', { total: transaction.total });
-    }
-    return;
-  }
-
-  if (!Array.isArray(transaction.items) || transaction.items.length === 0) {
-    failValidation('INVALID_TRANSACTION_ITEMS', 'Transaction items are required for sale/return.');
-  }
-
-  const computedSubtotal = transaction.items.reduce((sum, item) => {
-    if (!(Number.isFinite(item.quantity) && item.quantity > 0)) {
-      failValidation('INVALID_ITEM_QUANTITY', 'Transaction item quantity must be greater than zero.', { itemId: item.id, quantity: item.quantity });
-    }
-    if (!Number.isFinite(item.sellPrice) || item.sellPrice < 0) {
-      failValidation('INVALID_ITEM_SELL_PRICE', 'Transaction item sell price is invalid.', { itemId: item.id, sellPrice: item.sellPrice });
-    }
-
-    return sum + (item.sellPrice * item.quantity);
-  }, 0);
-
-  const computedDiscount = transaction.items.reduce((sum, item) => {
-    const discount = item.discountAmount || 0;
-    if (!Number.isFinite(discount) || discount < 0) {
-      failValidation('INVALID_ITEM_DISCOUNT', 'Transaction item discount is invalid.', { itemId: item.id, discountAmount: item.discountAmount });
-    }
-    return sum + discount;
-  }, 0);
-
-  if (computedDiscount > computedSubtotal + MONEY_EPSILON) {
-    failValidation('INVALID_TRANSACTION_DISCOUNT', 'Discount cannot exceed subtotal.', { computedSubtotal, computedDiscount });
-  }
-
-  const taxableAmount = computedSubtotal - computedDiscount;
-  const taxRate = Number.isFinite(transaction.taxRate) ? Number(transaction.taxRate) : 0;
-  if (taxRate < 0) {
-    failValidation('INVALID_TAX_RATE', 'Tax rate cannot be negative.', { taxRate });
-  }
-
-  const expectedTax = taxableAmount * (taxRate / 100);
-  const expectedSignedTotal = transaction.type === 'return'
-    ? -(taxableAmount + expectedTax)
-    : (taxableAmount + expectedTax);
-
-  if (Math.abs(Math.abs(transaction.total) - Math.abs(expectedSignedTotal)) > MONEY_EPSILON) {
-    failValidation('INVALID_TRANSACTION_TOTAL', 'Transaction total does not match computed total.', {
-      providedTotal: transaction.total,
-      expectedTotal: expectedSignedTotal
-    });
-  }
-};
-
-const assertTransactionInventoryRules = (transaction: Transaction, products: Product[], historicalTransactions: Transaction[]) => {
-  if (transaction.type === 'payment') return;
-
-  const productMap = new Map(products.map(p => [p.id, p]));
-
-  for (const item of transaction.items) {
-    const product = productMap.get(item.id);
-    if (!product) {
-      failValidation('PRODUCT_NOT_FOUND', 'Transaction item product not found.', { itemId: item.id });
-    }
-
-    const availableStock = getAvailableStockForItem(product, item.selectedVariant, item.selectedColor);
-    if (transaction.type === 'sale' && item.quantity > availableStock) {
-      failValidation('OVERSALE_STOCK', 'Insufficient stock for product.', {
-        itemId: item.id,
-        requestedQuantity: item.quantity,
-        availableStock
-      });
-    }
-
-    if (transaction.type === 'return') {
-      const soldCount = product.totalSold || 0;
-      if (item.quantity > soldCount) {
-        failValidation('RETURN_EXCEEDS_TOTAL_SOLD', 'Return quantity exceeds sold quantity.', {
-          itemId: item.id,
-          returnQuantity: item.quantity,
-          soldCount
-        });
-      }
-
-      if (transaction.customerId) {
-        const bought = historicalTransactions
-          .filter(t => t.customerId === transaction.customerId && t.type === 'sale')
-          .reduce((acc, t) => acc + (t.items.find(i => i.id === item.id)?.quantity || 0), 0);
-
-        const returned = historicalTransactions
-          .filter(t => t.customerId === transaction.customerId && t.type === 'return')
-          .reduce((acc, t) => acc + (t.items.find(i => i.id === item.id)?.quantity || 0), 0);
-
-        if (item.quantity > (bought - returned)) {
-          failValidation('RETURN_EXCEEDS_CUSTOMER_PURCHASE', 'Return quantity exceeds customer purchase history.', {
-            itemId: item.id,
-            returnQuantity: item.quantity,
-            customerRemaining: bought - returned
-          });
-        }
-      }
-    }
-  }
-};
 
 export const addCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers);
 
-    const newCustomer = {
+    const newCustomer = prepareCustomerRecord({
       ...customer,
+      id: customer.id || buildSystemId('cus'),
       totalSpend: Number.isFinite(customer.totalSpend) ? Math.max(0, customer.totalSpend) : 0,
       totalDue: Number.isFinite(customer.totalDue) ? Math.max(0, customer.totalDue) : 0,
       visitCount: Number.isFinite(customer.visitCount) ? Math.max(0, Math.floor(customer.visitCount)) : 0,
       lastVisit: customer.lastVisit || new Date().toISOString(),
-    };
+    });
     const newCustomers = [...data.customers, newCustomer];
     if (!db) {
       void saveData({ ...data, customers: newCustomers }, { reason: 'addCustomer_local_fallback', auditOperation: 'CREATE' });
@@ -1716,19 +1552,21 @@ export const addCustomer = (customer: Customer): Customer[] => {
 export const updateCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers.filter(c => c.id !== customer.id));
-    const newCustomers = data.customers.map(c => c.id === customer.id ? customer : c);
+    const existing = data.customers.find(c => c.id === customer.id);
+    const preparedCustomer = prepareCustomerRecord(customer, existing);
+    const newCustomers = data.customers.map(c => c.id === customer.id ? preparedCustomer : c);
 
     if (!db) {
       void saveData({ ...data, customers: newCustomers }, { reason: 'updateCustomer_local_fallback', auditOperation: 'UPDATE' });
       return newCustomers;
     }
 
-    void upsertCustomerInSubcollection(customer, 'updateCustomer')
+    void upsertCustomerInSubcollection(preparedCustomer, 'updateCustomer')
       .then(() => syncToCloud({ ...data }))
       .then(() => writeAuditEvent('UPDATE', {
         reason: 'updateCustomer_subcollection',
         migrationPhase: CUSTOMERS_MIGRATION_PHASE,
-        customerId: customer.id,
+        customerId: preparedCustomer.id,
         customersCount: newCustomers.length,
       }))
       .then(() => {
@@ -2324,125 +2162,75 @@ export const receivePurchaseOrder = async (orderId: string, method: PurchasePric
 
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
+  const preparedTransaction = prepareTransactionRecord({
+    ...transaction,
+    id: transaction.id || buildSystemId('tx'),
+    mode: transaction.mode || 'live',
+    warehouseId: transaction.warehouseId || DEFAULT_WAREHOUSE_ID,
+  });
+  const normalizedTransaction = normalizeTransactionForProcessing(preparedTransaction);
 
-  if (!transaction || typeof transaction !== 'object') {
-    failValidation('INVALID_TRANSACTION_PAYLOAD', 'Transaction payload is invalid.');
-  }
-
-  if (!transaction.id || !transaction.date) {
-    failValidation('INVALID_TRANSACTION_META', 'Transaction id and date are required.');
-  }
-
-  if (data.transactions.some(t => t.id === transaction.id)) {
-    console.warn('[processTransaction] duplicate transaction id ignored', { transactionId: transaction.id });
+  if (data.transactions.some(t => t.id === normalizedTransaction.id)) {
+    console.warn('[processTransaction] duplicate transaction id ignored', { transactionId: normalizedTransaction.id });
     void writeAuditEvent('BLOCKED_WRITE', {
       reason: 'processTransaction_duplicate_transaction_id',
-      transactionId: transaction.id,
+      transactionId: normalizedTransaction.id,
       migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
     });
     return data;
   }
 
-  assertPaymentMethodByType(transaction.type, transaction.paymentMethod);
-  assertTransactionFinancials(transaction);
-  assertTransactionInventoryRules(transaction, data.products, data.transactions);
-
-  const newTransactions = [transaction, ...data.transactions];
-  let newProducts = [...data.products];
-  if (transaction.type !== 'payment') {
-      newProducts = data.products.map(p => {
-        const itemInCart = transaction.items.find(i => i.id === p.id);
-        if (itemInCart) {
-          const qty = itemInCart.quantity;
-          const delta = transaction.type === 'sale' ? -qty : qty;
-          const withStock = applyStockDeltaToProduct(p, delta, itemInCart.selectedVariant, itemInCart.selectedColor);
-          if (transaction.type === 'sale') {
-            return { ...withStock, totalSold: (p.totalSold || 0) + qty };
-          }
-          return { ...withStock, totalSold: Math.max(0, (p.totalSold || 0) - qty) };
-        }
-        return p;
-      });
+  // Centralized validation/effects computation happens before any write so
+  // imports, POS, and cloud commit all share one business-rules engine.
+  const computed = validateAndComputeTransactionEffects(data, normalizedTransaction);
+  if (!computed.ok) {
+    failFromTransactionIssues(computed.errors);
   }
-  let newCustomers = [...data.customers];
-  if (transaction.customerId) {
-      const customerIndex = newCustomers.findIndex(c => c.id === transaction.customerId);
-      if (customerIndex === -1) {
-        failValidation('CUSTOMER_NOT_FOUND', 'Transaction customer not found.', { customerId: transaction.customerId });
-      }
 
-      const c = newCustomers[customerIndex];
-      let newTotalSpend = c.totalSpend;
-      let newTotalDue = c.totalDue;
-      let newVisitCount = c.visitCount;
-      let newLastVisit = c.lastVisit;
-      const amount = Math.abs(transaction.total);
-      if (transaction.type === 'sale') {
-          newTotalSpend += amount;
-          newVisitCount += 1;
-          newLastVisit = new Date().toISOString();
-          if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
-      } else if (transaction.type === 'return') {
-          newTotalSpend -= amount;
-          if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
-      } else if (transaction.type === 'payment') {
-          newTotalDue -= amount;
-          newLastVisit = new Date().toISOString();
-      }
-
-      if (newTotalDue < -MONEY_EPSILON) {
-        failValidation('INVALID_CUSTOMER_BALANCE', 'Transaction results in invalid customer due balance.', {
-          customerId: c.id,
-          resultingTotalDue: newTotalDue
-        });
-      }
-
-      newCustomers[customerIndex] = {
-        ...c,
-        totalSpend: newTotalSpend,
-        totalDue: Math.max(0, newTotalDue),
-        visitCount: newVisitCount,
-        lastVisit: newLastVisit
-      };
-  }
-  const touchedProductIds = transaction.type !== 'payment'
-    ? Array.from(new Set(transaction.items.map(item => item.id)))
+  const liveStatePreview = computed.nextState;
+  const touchedProductIds = normalizedTransaction.type !== 'payment' && normalizedTransaction.type !== 'historical_reference'
+    ? Array.from(new Set(normalizedTransaction.items.map(item => item.id)))
     : [];
 
   const legacyCustomerProductStatsSeed: Record<string, { soldQty: number; returnedQty: number }> = {};
-  if (transaction.customerId && transaction.type !== 'payment') {
+  if (normalizedTransaction.customerId && normalizedTransaction.type !== 'payment' && normalizedTransaction.type !== 'historical_reference') {
     touchedProductIds.forEach((productId) => {
       const soldQty = data.transactions
-        .filter(t => t.customerId === transaction.customerId && t.type === 'sale')
-        .reduce((acc, t) => acc + (t.items.find(i => i.id === productId)?.quantity || 0), 0);
+        .filter(t => t.customerId === normalizedTransaction.customerId && normalizeTransactionForProcessing(t).type === 'sale')
+        .reduce((acc, t) => acc + t.items.filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       const returnedQty = data.transactions
-        .filter(t => t.customerId === transaction.customerId && t.type === 'return')
-        .reduce((acc, t) => acc + (t.items.find(i => i.id === productId)?.quantity || 0), 0);
+        .filter(t => t.customerId === normalizedTransaction.customerId && normalizeTransactionForProcessing(t).type === 'return')
+        .reduce((acc, t) => acc + t.items.filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       legacyCustomerProductStatsSeed[productId] = { soldQty, returnedQty };
     });
   }
 
+  if (normalizedTransaction.type === 'historical_reference') {
+    void addHistoricalTransactions([computed.normalizedTransaction]);
+    return liveStatePreview;
+  }
+
   if (db) {
-    emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…' });
+    emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…', transactionId: normalizedTransaction.id });
 
     void commitProcessTransactionAtomically({
-      transaction,
+      transaction: computed.normalizedTransaction,
       legacyCustomerProductStatsSeed,
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
     })
       .then(({ created, committedProducts, committedCustomer }) => {
         console.debug('[migration-trace] processTransaction commit result', {
-          transactionId: transaction.id,
+          transactionId: normalizedTransaction.id,
           created,
           committedProducts: committedProducts.length,
           committedCustomer: committedCustomer?.id || null,
         });
         if (!created) {
-          emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction already applied.' });
+          emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction already applied.', transactionId: normalizedTransaction.id });
           void writeAuditEvent('BLOCKED_WRITE', {
             reason: 'processTransaction_idempotent_duplicate_skip',
             migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
-            transactionId: transaction.id,
+            transactionId: normalizedTransaction.id,
           });
           return;
         }
@@ -2451,9 +2239,9 @@ export const processTransaction = (transaction: Transaction): AppState => {
         committedProducts.forEach(p => productMap.set(p.id, p));
         const customerMap = new Map(memoryState.customers.map(c => [c.id, c]));
         if (committedCustomer) customerMap.set(committedCustomer.id, committedCustomer);
-        const nextTransactions = memoryState.transactions.some(t => t.id === transaction.id)
+        const nextTransactions = memoryState.transactions.some(t => t.id === normalizedTransaction.id)
           ? memoryState.transactions
-          : [transaction, ...memoryState.transactions];
+          : [computed.normalizedTransaction, ...memoryState.transactions];
         memoryState = {
           ...memoryState,
           products: Array.from(productMap.values()),
@@ -2461,38 +2249,38 @@ export const processTransaction = (transaction: Transaction): AppState => {
           transactions: nextTransactions,
         };
         emitLocalStorageUpdate();
-        emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.' });
+        emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.', transactionId: normalizedTransaction.id });
 
         void Promise.all([
           touchedProductIds.length > 0
             ? writeAuditEvent('UPDATE', {
               reason: 'processTransaction_product_stock_update_subcollection_atomic',
               migrationPhase: PRODUCTS_MIGRATION_PHASE,
-              transactionId: transaction.id,
+              transactionId: normalizedTransaction.id,
               productIds: touchedProductIds,
             })
             : Promise.resolve(),
-          transaction.customerId
+          normalizedTransaction.customerId
             ? writeAuditEvent('UPDATE', {
               reason: 'processTransaction_customer_balance_update_subcollection_atomic',
               migrationPhase: CUSTOMERS_MIGRATION_PHASE,
-              transactionId: transaction.id,
-              customerIds: [transaction.customerId],
+              transactionId: normalizedTransaction.id,
+              customerIds: [normalizedTransaction.customerId],
             })
             : Promise.resolve(),
           writeAuditEvent('CREATE', {
             reason: 'processTransaction_transaction_write_subcollection_atomic',
             migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
-            transactionId: transaction.id,
+            transactionId: normalizedTransaction.id,
           }),
-syncToCloud({ ...data }),
+          syncToCloud({ ...data }),
         ]).catch(error => {
           console.error('[storage-transactions] post-commit side effects failed', error);
         });
       })
       .catch(error => {
         console.error('[storage-transactions] failed atomic processTransaction commit', {
-          transactionId: transaction.id,
+          transactionId: normalizedTransaction.id,
           error,
         });
         memoryState = { ...memoryState, products: data.products, transactions: data.transactions, customers: data.customers };
@@ -2502,19 +2290,26 @@ syncToCloud({ ...data }),
           op: OPERATION_TYPES.PROCESS_TRANSACTION,
           entity: 'transaction',
           error: error instanceof Error ? error.message : 'Transaction save failed.',
+          transactionId: normalizedTransaction.id,
         });
       });
 
-    const newState = { ...data };
-    memoryState = { ...memoryState, products: newProducts, transactions: newTransactions, customers: newCustomers };
+    memoryState = {
+      ...memoryState,
+      products: liveStatePreview.products,
+      transactions: liveStatePreview.transactions,
+      customers: liveStatePreview.customers,
+    };
     emitLocalStorageUpdate();
-    return { ...newState, products: newProducts, transactions: newTransactions, customers: newCustomers };
+    return liveStatePreview;
   }
 
-  const fallbackState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
+  const fallbackState = liveStatePreview;
   void saveData(fallbackState, { reason: 'processTransaction_local_fallback', auditOperation: 'CREATE' });
+  emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved locally.', transactionId: normalizedTransaction.id });
   return fallbackState;
 };
+
 
 
 export const addHistoricalTransactions = async (transactions: Transaction[]): Promise<Transaction[]> => {
@@ -2523,8 +2318,15 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
   }
 
   const data = loadData();
+  const normalizedIncoming = transactions.map(tx => normalizeTransactionForProcessing(prepareTransactionRecord({
+    ...tx,
+    mode: 'historical',
+    type: tx.type === 'historical_reference' ? tx.type : 'historical_reference',
+    referenceTransactionType: tx.type === 'historical_reference' ? tx.referenceTransactionType : (tx.type as any),
+    warehouseId: tx.warehouseId || DEFAULT_WAREHOUSE_ID,
+  })));
   const existingIds = new Set(data.transactions.map(t => t.id));
-  const incoming = transactions.filter(tx => tx && tx.id && !existingIds.has(tx.id));
+  const incoming = normalizedIncoming.filter(tx => tx && tx.id && !existingIds.has(tx.id));
   if (!incoming.length) {
     return data.transactions;
   }

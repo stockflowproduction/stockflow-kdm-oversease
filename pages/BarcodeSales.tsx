@@ -2,8 +2,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
-import { formatItemNameWithVariant, getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
-import { loadData, processTransaction, addCustomer } from '../services/storage';
+import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getProductVariantColorEntry, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
+import { getStockBucketKey } from '../services/stockBuckets';
+import { addCustomer, getOperationalTransactions, loadData, processTransaction } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
@@ -19,6 +20,7 @@ export default function BarcodeSales() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const cartRef = useRef<CartItem[]>([]);
+  const pendingCheckoutRef = useRef<{ transactionId: string; cart: CartItem[]; transaction: Transaction; cashDetails: { cashReceived: number; changeReturned: number } | null } | null>(null);
 
   const [isBulkMode, setIsBulkMode] = useState(false);
   const [isReturnMode, setIsReturnMode] = useState(false);
@@ -82,18 +84,28 @@ export default function BarcodeSales() {
   useEffect(() => { if (cartError) { const t = setTimeout(() => setCartError(null), 3000); return () => clearTimeout(t); } }, [cartError]);
   useEffect(() => {
     const handleDataOpStatus = (event: Event) => {
-      const detail = (event as CustomEvent<{ phase?: 'start' | 'success' | 'error'; op?: string; message?: string; error?: string }>).detail;
+      const detail = (event as CustomEvent<{ phase?: 'start' | 'success' | 'error'; op?: string; message?: string; error?: string; transactionId?: string }>).detail;
       if (!detail || detail.op !== 'processTransaction') return;
       if (detail.phase === 'start') {
         setTransactionSyncStatus({ phase: 'committing', message: detail.message || 'Committing transaction to cloud…' });
         return;
       }
       if (detail.phase === 'success') {
+        if (pendingCheckoutRef.current?.transactionId === detail.transactionId) {
+          setTransactionComplete(pendingCheckoutRef.current.transaction);
+          setTransactionCashDetails(pendingCheckoutRef.current.cashDetails);
+          pendingCheckoutRef.current = null;
+        }
         setTransactionSyncStatus({ phase: 'success', message: detail.message || 'Transaction synced.' });
         window.setTimeout(() => setTransactionSyncStatus(prev => prev.phase === 'success' ? { phase: 'idle', message: '' } : prev), 2500);
         return;
       }
       if (detail.phase === 'error') {
+        if (pendingCheckoutRef.current?.transactionId === detail.transactionId) {
+          setCart(pendingCheckoutRef.current.cart);
+          pendingCheckoutRef.current = null;
+          setIsCartExpanded(true);
+        }
         setTransactionSyncStatus({ phase: 'error', message: detail.error || detail.message || 'Transaction sync failed. Data was rolled back.' });
       }
     };
@@ -119,20 +131,28 @@ export default function BarcodeSales() {
       return () => { isMounted = false; cleanup(); scannerRef.current = null; };
   }, [isScanning]);
 
+  const getLineAvailableStock = (product: Product, variant?: string, color?: string) =>
+    productHasCombinationStock(product)
+      ? getAvailableStockForCombination(product, variant, color)
+      : Math.max(0, product.stock || 0);
+
   const handleProductSelect = (scanValue: string, isScan = false, explicitQty: number = 1) => {
     if (isScan && isScanLocked.current) return;
     let targetCode = scanValue;
     try { const p = JSON.parse(scanValue); if (p.sku) targetCode = p.sku; if(p.barcode) targetCode = p.barcode; } catch(e) {}
     const product = loadData().products.find(p => p.barcode.toLowerCase() === targetCode.toLowerCase() || p.id === targetCode);
     if (product) {
-        const currentCart = cartRef.current;
-        const inCart = currentCart.filter(c => c.id === product.id).reduce((sum, c) => sum + c.quantity, 0);
         let error = null;
         if (isReturnMode) {
+            const currentCart = cartRef.current;
+            const inCart = currentCart.filter(c => c.id === product.id).reduce((sum, c) => sum + c.quantity, 0);
             const sold = product.totalSold || 0;
             if (sold === 0) error = "Item hasn't been sold yet.";
             else if (sold < (inCart + explicitQty)) error = `Return Limit (${sold}) Exceeded!`;
-        } else {
+        } else if (!productHasCombinationStock(product)) {
+            const inCart = cartRef.current
+              .filter(c => getStockBucketKey(c.id, c.selectedVariant, c.selectedColor) === getStockBucketKey(product.id, NO_VARIANT, NO_COLOR))
+              .reduce((sum, c) => sum + c.quantity, 0);
             if (product.stock <= 0) error = "Out of Stock!";
             else if (product.stock < (inCart + explicitQty)) error = `Only ${product.stock} in stock.`;
         }
@@ -166,18 +186,27 @@ export default function BarcodeSales() {
     } else if (isScan) { isScanLocked.current = true; setScanMessage({ type: 'error', text: "Unknown Product" }); setTimeout(() => { setScanMessage(null); isScanLocked.current = false; }, 2000); }
   };
 
-  const lineKey = (id: string, variant?: string, color?: string) => `${id}__${variant || NO_VARIANT}__${color || NO_COLOR}`;
+  const lineKey = (id: string, variant?: string, color?: string) => getStockBucketKey(id, variant, color);
 
   const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
+    const pricingEntry = getProductVariantColorEntry(product, selectedVariant, selectedColor);
+    const productForCart = {
+      ...product,
+      buyPrice: Number.isFinite(pricingEntry?.buyPrice) ? Number(pricingEntry?.buyPrice) : product.buyPrice,
+      sellPrice: Number.isFinite(pricingEntry?.sellPrice) ? Number(pricingEntry?.sellPrice) : product.sellPrice,
+      totalPurchase: Number.isFinite(pricingEntry?.totalPurchase) ? Number(pricingEntry?.totalPurchase) : product.totalPurchase,
+      totalSold: Number.isFinite(pricingEntry?.totalSold) ? Number(pricingEntry?.totalSold) : product.totalSold,
+    };
+
     setCart(prev => {
         const existing = prev.find(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(product.id, selectedVariant, selectedColor));
         if (existing) {
             const newQty = existing.quantity + qty;
-            if (newQty <= 0) return prev.filter(item => item.id !== product.id);
+            if (newQty <= 0) return prev.filter(item => lineKey(item.id, item.selectedVariant, item.selectedColor) !== lineKey(product.id, selectedVariant, selectedColor));
             return prev.map(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(product.id, selectedVariant, selectedColor) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
+        return [...prev, { ...productForCart, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
     });
   };
 
@@ -190,7 +219,10 @@ export default function BarcodeSales() {
       if (newQty <= 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
       if (delta > 0) {
           if (isReturnMode) { const sold = product.totalSold || 0; if (sold < newQty) { setCartError(`Max return: ${sold}`); return; } }
-          else { if (product.stock < newQty) { setCartError(`Stock limit: ${product.stock}`); return; } }
+          else {
+            const availableStock = getLineAvailableStock(product, variant, color);
+            if (availableStock < newQty) { setCartError(`Stock limit: ${availableStock}`); return; }
+          }
       }
       setCart(prev => prev.map(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key ? { ...i, quantity: newQty } : i));
   };
@@ -207,7 +239,8 @@ export default function BarcodeSales() {
           const sold = product.totalSold || 0;
           if (sold < num) { setCartError(`Max return: ${sold}`); return; }
       } else {
-          if (product.stock < num) { setCartError(`Stock limit: ${product.stock}`); return; }
+          const availableStock = getLineAvailableStock(product, variant, color);
+          if (availableStock < num) { setCartError(`Stock limit: ${availableStock}`); return; }
       }
       setCart(prev => prev.map(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key ? { ...i, quantity: num } : i));
   };
@@ -291,9 +324,14 @@ export default function BarcodeSales() {
           }
       }
       if (isReturnMode && finalCustomer) {
+          const operationalTransactions = getOperationalTransactions(transactions);
           for (const item of cart) {
-              const bought = transactions.filter(t => t.customerId === finalCustomer?.id && t.type === 'sale').reduce((acc, t) => acc + (t.items.find(i => i.id === item.id)?.quantity || 0), 0);
-              const returned = transactions.filter(t => t.customerId === finalCustomer?.id && t.type === 'return').reduce((acc, t) => acc + (t.items.find(i => i.id === item.id)?.quantity || 0), 0);
+              const bought = operationalTransactions
+                .filter(t => t.customerId === finalCustomer?.id && t.type === 'sale')
+                .reduce((acc, t) => acc + t.items.filter(i => i.id === item.id).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
+              const returned = operationalTransactions
+                .filter(t => t.customerId === finalCustomer?.id && t.type === 'return')
+                .reduce((acc, t) => acc + t.items.filter(i => i.id === item.id).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
               if ((bought - returned) < item.quantity) { setCheckoutError(`${finalCustomer.name} has only bought ${bought - returned} available to return.`); return; }
           }
       }
@@ -313,10 +351,20 @@ export default function BarcodeSales() {
           }
       }
       const tx: Transaction = { id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount, taxRate: selectedTax.value, taxLabel: selectedTax.label, date: new Date().toISOString(), type: isReturnMode ? 'return' : 'sale', customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod };
+      pendingCheckoutRef.current = { transactionId: tx.id, cart: [...cart], transaction: tx, cashDetails: currentCashDetails };
       setTransactionSyncStatus({ phase: 'pending', message: 'Saving sale locally…' });
-      const newState = processTransaction(tx);
+      let newState;
+      try {
+          newState = processTransaction(tx);
+      } catch (error) {
+          console.error('[barcode-sales] process transaction failed', error);
+          pendingCheckoutRef.current = null;
+          setTransactionSyncStatus(null);
+          setCheckoutError(error instanceof Error ? error.message : 'Unable to save transaction.');
+          return;
+      }
       setProducts(newState.products); setCustomers(newState.customers); setTransactions(newState.transactions);
-      setIsCustomerModalOpen(false); setTransactionComplete(tx); setTransactionCashDetails(currentCashDetails); setCart([]); setIsCartExpanded(false); setSelectedCustomer(null); setNewCustomerName(''); setNewCustomerPhone(''); setCustomerSearch(''); setCashReceived('');
+      setIsCustomerModalOpen(false); setCart([]); setIsCartExpanded(false); setSelectedCustomer(null); setNewCustomerName(''); setNewCustomerPhone(''); setCustomerSearch(''); setCashReceived('');
   };
 
   const handlePrintReceipt = () => {

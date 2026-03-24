@@ -4,14 +4,15 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
+import { getTransactionPresentation } from '../services/transactionPresentation';
 import { loadData, deleteTransaction, updateTransaction } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
-import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit } from 'lucide-react';
+import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, History, Banknote, SlidersHorizontal } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
-import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile } from '../services/importExcel';
+import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile, importTransactionsFromFile } from '../services/importExcel';
 
 export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -53,6 +54,25 @@ export default function Transactions() {
         window.removeEventListener('local-storage-update', refreshData);
     };
   }, []);
+
+  const renderTransactionIcon = (iconKind: ReturnType<typeof getTransactionPresentation>['iconKind'], className = 'w-5 h-5 mr-1') => {
+    switch (iconKind) {
+      case 'sale':
+        return <ArrowUpRight className={className} />;
+      case 'return':
+        return <ArrowDownLeft className={className} />;
+      case 'payment':
+        return <Banknote className={className} />;
+      case 'purchase':
+        return <Package className={className} />;
+      case 'adjustment':
+        return <SlidersHorizontal className={className} />;
+      case 'historical':
+        return <History className={className} />;
+      default:
+        return <FileText className={className} />;
+    }
+  };
 
   const filteredTransactions = useMemo(() => {
       const now = new Date();
@@ -115,18 +135,17 @@ export default function Transactions() {
 
       filteredTransactions.forEach(tx => {
           const amount = Math.abs(tx.total);
-          
-          if (tx.type === 'sale') {
+          const presentation = getTransactionPresentation(tx);
+
+          if (presentation.effectiveType === 'sale') {
               totalRevenue += amount;
               totalDiscount += (tx.discount || 0);
-              // Calculate Profit: (Sell - Buy) * Qty
               tx.items.forEach(item => {
                   const profit = (item.sellPrice - item.buyPrice) * item.quantity;
                   grossProfit += profit;
               });
-          } else {
+          } else if (presentation.effectiveType === 'return') {
               totalReturns += amount;
-              // Reverse Profit for returns
               tx.items.forEach(item => {
                   const profit = (item.sellPrice - item.buyPrice) * item.quantity;
                   grossProfit -= profit;
@@ -199,14 +218,17 @@ export default function Transactions() {
     doc.text(`Rs. ${stats.grossProfit.toLocaleString()}`, 155, 62);
 
     // Table
-    const tableBody = filteredTransactions.map(tx => [
-        new Date(tx.date).toLocaleDateString(),
-        tx.id.slice(-6),
-        tx.type.toUpperCase(),
-        tx.customerName || 'Walk-in',
-        tx.paymentMethod || '-',
-        `Rs. ${Math.abs(tx.total).toFixed(2)}`
-    ]);
+    const tableBody = filteredTransactions.map(tx => {
+        const presentation = getTransactionPresentation(tx);
+        return [
+            new Date(tx.date).toLocaleDateString(),
+            tx.id.slice(-6),
+            presentation.label,
+            tx.customerName || 'Walk-in',
+            tx.paymentMethod || '-',
+            `Rs. ${Math.abs(tx.total).toFixed(2)}`
+        ];
+    });
 
     autoTable(doc, {
         startY: 75,
@@ -220,8 +242,9 @@ export default function Transactions() {
         },
         didParseCell: function(data) {
             if (data.section === 'body' && data.column.index === 2) {
-                if (data.cell.raw === 'SALE') data.cell.styles.textColor = [22, 163, 74];
-                else data.cell.styles.textColor = [220, 38, 38];
+                if (String(data.cell.raw).includes('SALE')) data.cell.styles.textColor = [22, 163, 74];
+                else if (String(data.cell.raw).includes('RETURN')) data.cell.styles.textColor = [220, 38, 38];
+                else if (String(data.cell.raw).includes('PAYMENT')) data.cell.styles.textColor = [5, 150, 105];
             }
         }
     });
@@ -432,7 +455,7 @@ export default function Transactions() {
                         </thead>
                         <tbody className="divide-y">
                             {filteredTransactions.map(tx => {
-                                const isSale = tx.type === 'sale';
+                                const presentation = getTransactionPresentation(tx);
                                 const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
                                 return (
                                     <tr key={tx.id} className="hover:bg-muted/30 transition-colors group">
@@ -449,34 +472,38 @@ export default function Transactions() {
                                             </div>
                                         </td>
                                         <td className="px-4 py-3">
-                                            <Badge variant={isSale ? 'success' : 'destructive'} className="text-[9px] font-bold px-1.5 h-4">
-                                                {isSale ? 'SALE' : 'RETURN'}
+                                            <Badge variant={presentation.badgeVariant} className="text-[9px] font-bold px-1.5 h-4">
+                                                {presentation.shortLabel}
                                             </Badge>
                                         </td>
                                         {viewMode === 'list-details' && (
                                             <td className="px-4 py-3">
-                                                <div className="flex flex-col gap-0.5">
-                                                    <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-tight">{itemCount} Items</span>
-                                                    <div className="flex -space-x-2 overflow-hidden">
-                                                        {tx.items.slice(0, 3).map((item, i) => (
-                                                            <div key={i} className="inline-block h-5 w-5 rounded-full ring-2 ring-background bg-muted overflow-hidden border">
-                                                                {item.image ? <img src={item.image} className="h-full w-full object-cover" /> : <Package className="h-full w-full p-1 opacity-50" />}
-                                                            </div>
-                                                        ))}
-                                                        {tx.items.length > 3 && (
-                                                            <div className="flex h-5 w-5 items-center justify-center rounded-full ring-2 ring-background bg-slate-100 text-[8px] font-bold">
-                                                                +{tx.items.length - 3}
-                                                            </div>
-                                                        )}
+                                                {presentation.showItemSummary ? (
+                                                    <div className="flex flex-col gap-0.5">
+                                                        <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-tight">{itemCount} Items</span>
+                                                        <div className="flex -space-x-2 overflow-hidden">
+                                                            {tx.items.slice(0, 3).map((item, i) => (
+                                                                <div key={i} className="inline-block h-5 w-5 rounded-full ring-2 ring-background bg-muted overflow-hidden border">
+                                                                    {item.image ? <img src={item.image} className="h-full w-full object-cover" /> : <Package className="h-full w-full p-1 opacity-50" />}
+                                                                </div>
+                                                            ))}
+                                                            {tx.items.length > 3 && (
+                                                                <div className="flex h-5 w-5 items-center justify-center rounded-full ring-2 ring-background bg-slate-100 text-[8px] font-bold">
+                                                                    +{tx.items.length - 3}
+                                                                </div>
+                                                            )}
+                                                        </div>
                                                     </div>
-                                                </div>
+                                                ) : (
+                                                    <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-tight">No Items</span>
+                                                )}
                                             </td>
                                         )}
                                         <td className="px-4 py-3">
                                             <span className="text-xs font-medium text-muted-foreground">{tx.paymentMethod || 'Cash'}</span>
                                         </td>
-                                        <td className={`px-4 py-3 text-right font-bold ${isSale ? 'text-green-600' : 'text-red-600'}`}>
-                                            ₹{Math.abs(tx.total).toLocaleString()}
+                                        <td className={`px-4 py-3 text-right font-bold ${presentation.amountColorClass}`}>
+                                            {presentation.amountPrefix}₹{Math.abs(tx.total).toLocaleString()}
                                         </td>
                                         <td className="px-4 py-3 text-center">
                                             <div className="flex items-center justify-center gap-1">
@@ -500,7 +527,7 @@ export default function Transactions() {
                 : 'sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'
             }`}>
                 {filteredTransactions.map(tx => {
-                    const isSale = tx.type === 'sale';
+                    const presentation = getTransactionPresentation(tx);
                     const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
                     
                     if (viewMode === 'medium') {
@@ -511,7 +538,7 @@ export default function Transactions() {
                                 onClick={() => setSelectedTx(tx)}
                             >
                                 <CardContent className="p-0">
-                                    <div className={`h-1.5 w-full ${isSale ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                                    <div className="h-1.5 w-full" style={{ backgroundColor: presentation.accentColor }}></div>
                                     <div className="p-4 space-y-3">
                                         <div className="flex justify-between items-center">
                                             <Badge variant="outline" className="font-mono text-[9px] bg-muted/30 border-none">#{tx.id.slice(-6)}</Badge>
@@ -521,21 +548,25 @@ export default function Transactions() {
                                         <div className="flex justify-between items-end">
                                             <div>
                                                 <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-0.5">{tx.customerName || 'Walk-in'}</p>
-                                                <p className={`text-xl font-black ${isSale ? 'text-green-600' : 'text-red-600'}`}>₹{Math.abs(tx.total).toLocaleString()}</p>
+                                                <p className={`text-xl font-black ${presentation.amountColorClass}`}>{presentation.amountPrefix}₹{Math.abs(tx.total).toLocaleString()}</p>
                                             </div>
                                             <div className="text-right">
-                                                <Badge variant={isSale ? 'success' : 'destructive'} className="text-[8px] font-black h-4 px-1 mb-1">
-                                                    {isSale ? 'SALE' : 'RETURN'}
+                                                <Badge variant={presentation.badgeVariant} className="text-[8px] font-black h-4 px-1 mb-1">
+                                                    {presentation.shortLabel}
                                                 </Badge>
                                                 <p className="text-[9px] text-muted-foreground font-bold">{tx.paymentMethod || 'Cash'}</p>
                                             </div>
                                         </div>
                                         
                                         <div className="pt-3 border-t border-dashed flex justify-between items-center">
-                                            <div className="flex items-center gap-1 text-[10px] font-bold text-slate-500">
-                                                <Package className="w-3 h-3" />
-                                                {itemCount} Items
-                                            </div>
+                                            {presentation.showItemSummary ? (
+                                                <div className="flex items-center gap-1 text-[10px] font-bold text-slate-500">
+                                                    <Package className="w-3 h-3" />
+                                                    {itemCount} Items
+                                                </div>
+                                            ) : (
+                                                <div className="text-[10px] font-bold text-slate-500">No Items</div>
+                                            )}
                                             <Button 
                                                 variant="ghost" 
                                                 size="icon" 
@@ -555,7 +586,7 @@ export default function Transactions() {
                         <Card 
                             key={tx.id} 
                             className="group cursor-pointer hover:border-primary/50 hover:shadow-md transition-all duration-200 border-l-4"
-                            style={{ borderLeftColor: isSale ? '#22c55e' : '#ef4444' }}
+                            style={{ borderLeftColor: presentation.accentColor }}
                             onClick={() => setSelectedTx(tx)}
                         >
                             <CardContent className="p-4 flex flex-col gap-4">
@@ -586,8 +617,8 @@ export default function Transactions() {
                                             >
                                                 <FileText className="w-3.5 h-3.5" />
                                             </Button>
-                                            <Badge variant={isSale ? 'success' : 'destructive'} className="text-[10px] font-bold uppercase tracking-wider px-2 h-5">
-                                                {isSale ? 'SALE' : 'RETURN'}
+                                            <Badge variant={presentation.badgeVariant} className="text-[10px] font-bold uppercase tracking-wider px-2 h-5">
+                                                {presentation.shortLabel}
                                             </Badge>
                                         </div>
                                         <div className="text-[10px] font-medium text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">
@@ -598,9 +629,9 @@ export default function Transactions() {
 
                                 {/* Main: Amount */}
                                 <div>
-                                    <div className={`text-2xl font-bold flex items-center ${isSale ? 'text-green-600' : 'text-red-600'}`}>
-                                        {isSale ? <ArrowUpRight className="w-5 h-5 mr-1" /> : <ArrowDownLeft className="w-5 h-5 mr-1" />}
-                                        ₹{Math.abs(tx.total).toLocaleString()}
+                                    <div className={`text-2xl font-bold flex items-center ${presentation.amountColorClass}`}>
+                                        {renderTransactionIcon(presentation.iconKind)}
+                                        {presentation.amountPrefix}₹{Math.abs(tx.total).toLocaleString()}
                                     </div>
                                 </div>
 
@@ -614,10 +645,16 @@ export default function Transactions() {
                                             {tx.customerName || 'Walk-in'}
                                         </span>
                                     </div>
-                                    <div className="flex items-center gap-1.5 text-xs font-medium bg-muted/30 px-2 py-1 rounded text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary transition-colors">
-                                        <Package className="w-3.5 h-3.5" />
-                                        <span>{itemCount} Items</span>
-                                    </div>
+                                    {presentation.showItemSummary ? (
+                                        <div className="flex items-center gap-1.5 text-xs font-medium bg-muted/30 px-2 py-1 rounded text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary transition-colors">
+                                            <Package className="w-3.5 h-3.5" />
+                                            <span>{itemCount} Items</span>
+                                        </div>
+                                    ) : (
+                                        <div className="text-xs font-medium bg-muted/30 px-2 py-1 rounded text-muted-foreground">
+                                            No Items
+                                        </div>
+                                    )}
                                 </div>
                             </CardContent>
                         </Card>
@@ -628,13 +665,15 @@ export default function Transactions() {
       </div>
 
       {/* Transaction Detail Modal */}
-      {selectedTx && (
+      {selectedTx && (() => {
+          const selectedPresentation = getTransactionPresentation(selectedTx);
+          return (
           <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
               <Card className="w-full max-w-md animate-in zoom-in duration-200 flex flex-col max-h-[90vh] shadow-2xl">
                   <CardHeader className="border-b pb-3 shrink-0 bg-muted/5">
                       <div className="flex justify-between items-center">
                           <CardTitle className="text-lg flex items-center gap-2">
-                              {selectedTx.type === 'sale' ? 'Sale Receipt' : 'Return Receipt'}
+                              {selectedPresentation.modalTitle}
                               <span className="text-xs font-normal text-muted-foreground font-mono">#{selectedTx.id}</span>
                           </CardTitle>
                           <div className="flex items-center gap-1">
@@ -678,43 +717,48 @@ export default function Transactions() {
                               </div>
                           </div>
 
-                          {/* Items */}
-                          <div className="space-y-3">
-                              <p className="text-sm font-semibold border-b pb-2 flex items-center gap-2">
-                                  <Package className="w-4 h-4 text-primary" />
-                                  Items Purchased
-                              </p>
-                              {selectedTx.items.map((item, idx) => (
-                                  <div key={idx} className="flex gap-3 items-start p-2 rounded-lg hover:bg-muted/50 transition-colors">
-                                      <div className="h-10 w-10 bg-white rounded border flex items-center justify-center shrink-0 overflow-hidden shadow-sm">
-                                          {item.image ? (
-                                              <img src={item.image} alt={item.name} className="w-full h-full object-contain" />
-                                          ) : (
-                                              <span className="text-[8px] text-muted-foreground">IMG</span>
-                                          )}
-                                      </div>
-                                      <div className="flex-1">
-                                          <div className="flex justify-between items-start">
-                                              <p className="font-medium text-sm leading-tight">{item.name}</p>
-                                              <p className="font-medium text-sm">₹{((item.sellPrice * item.quantity) - (item.discountAmount || 0)).toFixed(2)}</p>
+                          {selectedPresentation.showItemDetails ? (
+                              <div className="space-y-3">
+                                  <p className="text-sm font-semibold border-b pb-2 flex items-center gap-2">
+                                      <Package className="w-4 h-4 text-primary" />
+                                      {selectedPresentation.itemsTitle}
+                                  </p>
+                                  {selectedTx.items.map((item, idx) => (
+                                      <div key={idx} className="flex gap-3 items-start p-2 rounded-lg hover:bg-muted/50 transition-colors">
+                                          <div className="h-10 w-10 bg-white rounded border flex items-center justify-center shrink-0 overflow-hidden shadow-sm">
+                                              {item.image ? (
+                                                  <img src={item.image} alt={item.name} className="w-full h-full object-contain" />
+                                              ) : (
+                                                  <span className="text-[8px] text-muted-foreground">IMG</span>
+                                              )}
                                           </div>
-                                          <div className="flex justify-between items-center mt-1">
-                                              <p className="text-xs text-muted-foreground">SKU: {item.barcode} • {item.selectedVariant || NO_VARIANT} / {item.selectedColor || NO_COLOR}</p>
-                                              <div className="flex flex-col items-end">
-                                                  <Badge variant="secondary" className="text-[10px] h-4 px-1.5 font-normal">
-                                                      {item.quantity} x ₹{item.sellPrice}
-                                                  </Badge>
-                                                  {item.discountAmount !== undefined && item.discountAmount > 0 ? (
-                                                      <span className="text-[9px] font-bold text-emerald-600 mt-0.5">
-                                                          -₹{item.discountAmount.toFixed(2)} ({item.discountPercent}%)
-                                                      </span>
-                                                  ) : null}
+                                          <div className="flex-1">
+                                              <div className="flex justify-between items-start">
+                                                  <p className="font-medium text-sm leading-tight">{item.name}</p>
+                                                  <p className="font-medium text-sm">₹{((item.sellPrice * item.quantity) - (item.discountAmount || 0)).toFixed(2)}</p>
+                                              </div>
+                                              <div className="flex justify-between items-center mt-1">
+                                                  <p className="text-xs text-muted-foreground">SKU: {item.barcode} • {item.selectedVariant || NO_VARIANT} / {item.selectedColor || NO_COLOR}</p>
+                                                  <div className="flex flex-col items-end">
+                                                      <Badge variant="secondary" className="text-[10px] h-4 px-1.5 font-normal">
+                                                          {item.quantity} x ₹{item.sellPrice}
+                                                      </Badge>
+                                                      {item.discountAmount !== undefined && item.discountAmount > 0 ? (
+                                                          <span className="text-[9px] font-bold text-emerald-600 mt-0.5">
+                                                              -₹{item.discountAmount.toFixed(2)} ({item.discountPercent}%)
+                                                          </span>
+                                                      ) : null}
+                                                  </div>
                                               </div>
                                           </div>
                                       </div>
-                                  </div>
-                              ))}
-                          </div>
+                                  ))}
+                              </div>
+                          ) : (
+                              <div className="rounded-xl border bg-muted/10 p-4 text-sm text-muted-foreground">
+                                  This transaction does not include item lines.
+                              </div>
+                          )}
 
                           {/* Footer Breakdown */}
                           <div className="bg-muted/10 p-4 rounded-xl border-2 border-dashed border-muted space-y-2">
@@ -746,8 +790,8 @@ export default function Transactions() {
 
                               <div className="border-t pt-2 mt-2 flex justify-between items-center font-bold text-xl">
                                   <span>Total</span>
-                                  <span className={selectedTx.type === 'sale' ? 'text-green-700' : 'text-red-700'}>
-                                      {selectedTx.type === 'sale' ? '' : '-'}₹{Math.abs(selectedTx.total).toFixed(2)}
+                                  <span className={selectedPresentation.amountColorClass.replace('600', '700')}>
+                                      {selectedPresentation.amountPrefix}₹{Math.abs(selectedTx.total).toFixed(2)}
                                   </span>
                               </div>
                           </div>
@@ -755,15 +799,22 @@ export default function Transactions() {
                   </CardContent>
               </Card>
           </div>
-      )}
+          );
+      })()}
 
       <UploadImportModal 
         open={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
         title="Import Transactions"
         onDownloadTemplate={downloadTransactionsTemplate}
-        onImportFile={async (file) => {
-          const result = await importHistoricalTransactionsFromFile(file);
+        importModes={[
+          { value: 'historical_reference', label: 'Historical Reference', description: 'Store past transactions for reference only without changing stock or balances.' },
+          { value: 'live', label: 'Live', description: 'Replay transactions through normal business logic and affect live stock/totals.' },
+        ]}
+        onImportFile={async (file, _onProgress, mode) => {
+          const result = mode === 'live'
+            ? await importTransactionsFromFile(file, _onProgress, { mode: 'live' })
+            : await importHistoricalTransactionsFromFile(file, _onProgress);
           const data = loadData();
           setTransactions(data.transactions);
           setCustomers(data.customers);
@@ -782,7 +833,8 @@ export default function Transactions() {
                 <Button onClick={async () => {
                   const amt = Number(editingAmount || 0);
                   if (!Number.isFinite(amt) || amt <= 0) return;
-                  const nextTx = { ...editingTx, total: editingTx.type === 'return' ? -Math.abs(amt) : Math.abs(amt) };
+                  const editingPresentation = getTransactionPresentation(editingTx);
+                  const nextTx = { ...editingTx, total: editingPresentation.effectiveType === 'return' ? -Math.abs(amt) : Math.abs(amt) };
                   const next = await updateTransaction(nextTx);
                   setTransactions(next);
                   setEditingTx(null);

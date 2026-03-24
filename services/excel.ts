@@ -2,6 +2,7 @@
 import * as XLSX from 'xlsx';
 import { Product, Transaction, Customer } from '../types';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
+import { buildInventoryDataSheets } from './importExcel';
 import { loadData } from './storage';
 
 /**
@@ -11,41 +12,53 @@ const downloadExcel = (workbook: XLSX.WorkBook, fileName: string) => {
     XLSX.writeFile(workbook, `${fileName}.xlsx`);
 };
 
+export const buildProductCatalogSheets = (products: Product[]) => {
+    const { inventoryRows, variantInventoryRows } = buildInventoryDataSheets(products);
+    const catalogRows = inventoryRows.map(row => {
+        const currentStock = Number(row['Current Stock'] || 0);
+        const buyPrice = Number(row['Buy Price'] || 0);
+        const sellPrice = Number(row['Sell Price'] || 0);
+        return {
+            ...row,
+            'HSN/SAC': row['HSN/SAC'] || '-',
+            'Stock Value (Buy)': currentStock * buyPrice,
+            'Stock Value (Sell)': currentStock * sellPrice,
+            'Status': currentStock <= 0 ? 'Out of Stock' : currentStock < 5 ? 'Low Stock' : 'Available',
+        };
+    });
+
+    return { catalogRows, variantInventoryRows };
+};
+
 /**
  * Export Products/Inventory to Excel
  */
 export const exportProductsToExcel = (products: Product[]) => {
-    const data = products.map(p => ({
-        'Barcode': p.barcode,
-        'Product Name': p.name,
-        'Category': p.category || '-',
-        'Variants': (p.variants || []).join(', ') || NO_VARIANT,
-        'Colors': (p.colors || []).join(', ') || NO_COLOR,
-        'HSN/SAC': p.hsn || '-',
-        'Buy Price (₹)': p.buyPrice,
-        'Sell Price (₹)': p.sellPrice,
-        'Total Purchase': p.totalPurchase ?? ((p.stock || 0) + (p.totalSold || 0)),
-        'Total Sold': p.totalSold || 0,
-        'Current Stock': p.stock,
-        'Stock Value (Buy)': p.stock * p.buyPrice,
-        'Stock Value (Sell)': p.stock * p.sellPrice,
-        'Status': p.stock <= 0 ? 'Out of Stock' : p.stock < 5 ? 'Low Stock' : 'Available'
-    }));
+    const { catalogRows, variantInventoryRows } = buildProductCatalogSheets(products);
 
-    const worksheet = XLSX.utils.json_to_sheet(data);
+    const worksheet = XLSX.utils.json_to_sheet(catalogRows);
+    const variantWorksheet = XLSX.utils.json_to_sheet(variantInventoryRows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Inventory');
+    XLSX.utils.book_append_sheet(workbook, variantWorksheet, 'Variant Inventory');
     
     // Set column widths
     const wscols = [
+        { wch: 15 }, // Product ID
         { wch: 15 }, // Barcode
         { wch: 30 }, // Name
         { wch: 15 }, // Category
-        { wch: 12 }, // HSN
+        { wch: 20 }, // Variants
+        { wch: 20 }, // Colors
+        { wch: 16 }, // Variant row count
         { wch: 12 }, // Buy Price
         { wch: 12 }, // Sell Price
-        { wch: 12 }, // Stock
+        { wch: 12 }, // Total Purchase
         { wch: 12 }, // Total Sold
+        { wch: 12 }, // Current Stock
+        { wch: 12 }, // HSN
+        { wch: 30 }, // Image source
+        { wch: 30 }, // Description
         { wch: 15 }, // Stock Value Buy
         { wch: 15 }, // Stock Value Sell
         { wch: 15 }, // Status

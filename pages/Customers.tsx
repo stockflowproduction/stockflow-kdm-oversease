@@ -177,7 +177,12 @@ export default function Customers() {
           paymentMethod: paymentMethod,
           notes: paymentNote
       };
-      processTransaction(tx);
+      try {
+          processTransaction(tx);
+      } catch (error) {
+          setPaymentError(error instanceof Error ? error.message : 'Unable to record payment.');
+          return;
+      }
       refreshData();
       setIsPaymentModalOpen(false);
       setPaymentAmount('');
@@ -1117,8 +1122,8 @@ export default function Customers() {
         onClose={() => setIsImportModalOpen(false)}
         title="Import Customers"
         onDownloadTemplate={downloadCustomersTemplate}
-        onImportFile={async (file) => {
-          const result = await importCustomersFromFile(file);
+        onImportFile={async (file, _onProgress) => {
+          const result = await importCustomersFromFile(file, _onProgress);
           refreshData();
           return result;
         }}

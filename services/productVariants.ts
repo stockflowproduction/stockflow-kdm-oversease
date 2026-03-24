@@ -19,6 +19,26 @@ export const getProductStockRows = (product: Product) => {
   return rows.map(r => ({ variant: normalizeVariant(r.variant), color: normalizeColor(r.color), stock: Math.max(0, r.stock || 0) }));
 };
 
+export const getProductVariantColorEntry = (product: Product, variant?: string, color?: string) => {
+  const rows = product.stockByVariantColor || [];
+  const v = normalizeVariant(variant);
+  const c = normalizeColor(color);
+
+  if (!rows.length) {
+    return {
+      variant: NO_VARIANT,
+      color: NO_COLOR,
+      stock: Math.max(0, product.stock || 0),
+      buyPrice: product.buyPrice,
+      sellPrice: product.sellPrice,
+      totalPurchase: product.totalPurchase,
+      totalSold: product.totalSold,
+    };
+  }
+
+  return rows.find(r => normalizeVariant(r.variant) === v && normalizeColor(r.color) === c);
+};
+
 export const getAvailableStockForCombination = (product: Product, variant?: string, color?: string) => {
   const rows = getProductStockRows(product);
   const v = normalizeVariant(variant);
