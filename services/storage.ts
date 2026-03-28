@@ -102,6 +102,11 @@ const emitLocalStorageUpdate = () => {
   window.dispatchEvent(new Event(APP_EVENTS.LOCAL_STORAGE_UPDATE));
 };
 
+
+const emitBehaviorStateChange = (detail: { type: string; from?: string; to?: string; entityId?: string; metadata?: Record<string, unknown> }) => {
+  window.dispatchEvent(new CustomEvent('app-state-change', { detail }));
+};
+
 export const STORAGE_FLOW_REGISTRY = Object.freeze({
   events: APP_EVENTS,
   cloudSyncStatuses: CLOUD_SYNC_STATUSES,
@@ -1765,6 +1770,7 @@ export const addUpfrontOrder = (order: UpfrontOrder): AppState => {
     const newOrders = [...data.upfrontOrders, order];
     const newState = { ...data, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'addUpfrontOrder', auditOperation: 'CREATE' });
+    emitBehaviorStateChange({ type: 'order_created', entityId: order.id, to: order.status, metadata: { customerId: order.customerId, totalCost: order.totalCost } });
     return newState;
 };
 
@@ -1780,6 +1786,8 @@ export const updateUpfrontOrder = (order: UpfrontOrder): AppState => {
     const newOrders = data.upfrontOrders.map(o => o.id === order.id ? order : o);
     const newState = { ...data, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'updateUpfrontOrder', auditOperation: 'UPDATE' });
+    const previous = data.upfrontOrders.find(o => o.id === order.id);
+    emitBehaviorStateChange({ type: 'order_status_updated', entityId: order.id, from: previous?.status, to: order.status, metadata: { customerId: order.customerId } });
     return newState;
 };
 
@@ -1815,6 +1823,7 @@ export const collectUpfrontPayment = (orderId: string, amount: number): AppState
     const newOrders = data.upfrontOrders.map(o => o.id === orderId ? updatedOrder : o);
     const newState = { ...data, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'collectUpfrontPayment', auditOperation: 'UPDATE' });
+    emitBehaviorStateChange({ type: 'payment_collected', entityId: orderId, from: order.status, to: newStatus, metadata: { amount, remainingAmount: Math.max(0, newRemaining) } });
     return newState;
 };
 
@@ -2337,6 +2346,7 @@ export const receivePurchaseOrder = async (orderId: string, method: PurchasePric
   };
 
   await updatePurchaseOrder(updatedOrder);
+  emitBehaviorStateChange({ type: 'delivery_assignment_updated', entityId: orderId, from: order.status, to: updatedOrder.status, metadata: { method } });
   return updatedOrder;
 };
 
@@ -2429,6 +2439,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
   }
 
   if (db) {
+    emitBehaviorStateChange({ type: 'payment_to_order_chain_started', entityId: transaction.id, metadata: { transactionType: transaction.type, paymentMethod: transaction.paymentMethod } });
     emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…', transactionId: transaction.id });
 
     void commitProcessTransactionAtomically({
@@ -2468,6 +2479,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
         };
         emitLocalStorageUpdate();
         emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.', transactionId: transaction.id });
+        emitBehaviorStateChange({ type: transaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: transaction.id, to: 'committed', metadata: { transactionType: transaction.type, paymentMethod: transaction.paymentMethod, total: transaction.total } });
 
         void Promise.all([
           touchedProductIds.length > 0
@@ -2521,6 +2533,7 @@ syncToCloud({ ...data }),
   const fallbackState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
   void saveData(fallbackState, { reason: 'processTransaction_local_fallback', auditOperation: 'CREATE' });
   emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved locally.', transactionId: transaction.id });
+  emitBehaviorStateChange({ type: transaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: transaction.id, to: 'local_saved', metadata: { transactionType: transaction.type, paymentMethod: transaction.paymentMethod, total: transaction.total } });
   return fallbackState;
 };
 
