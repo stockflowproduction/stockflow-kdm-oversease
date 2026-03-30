@@ -45,9 +45,101 @@ type CartItem = {
   maxStock: number;
 };
 
-const initialCustomers: Customer[] = [];
+const initialCustomers: Customer[] = [
+  {
+    id: 1,
+    name: "Aarav Traders",
+    phone: "9876500011",
+    gstNumber: "24ABCDE1234F1Z5",
+    gstName: "Aarav Traders LLP",
+    totalDue: 1250,
+    totalPurchase: 18250,
+  },
+  {
+    id: 2,
+    name: "Mehta Stationers",
+    phone: "9876500022",
+    gstNumber: "24PQRSX5678K1Z3",
+    gstName: "Mehta Stationers",
+    totalDue: 0,
+    totalPurchase: 8450,
+  },
+  {
+    id: 3,
+    name: "Krishna Dairy",
+    phone: "9876500033",
+    gstNumber: "",
+    gstName: "",
+    totalDue: 460,
+    totalPurchase: 12400,
+  },
+];
 
-const products: Product[] = [];
+const sharedImage =
+  "https://res.cloudinary.com/demo/image/upload/docs/letterpress/flowers.jpg";
+
+const products: Product[] = [
+  {
+    id: 1,
+    name: "Whole Milk",
+    code: "MILK001",
+    stock: 12,
+    category: "Dairy",
+    image: sharedImage,
+    variants: [
+      { id: "500ml", name: "500ml", price: 55, buyPrice: 40, stock: 8 },
+      { id: "1l", name: "1L", price: 99, buyPrice: 78, stock: 4 },
+    ],
+  },
+  {
+    id: 2,
+    name: "Packaged Chocolate",
+    code: "CHOC123",
+    stock: 0,
+    category: "Snacks",
+    image: sharedImage,
+    variants: [{ id: "bar", name: "Bar", price: 95, buyPrice: 70, stock: 0 }],
+  },
+  {
+    id: 3,
+    name: "Rice (5kg)",
+    code: "RICE5000",
+    stock: 6,
+    category: "Groceries",
+    image: sharedImage,
+    variants: [{ id: "5kg", name: "5kg", price: 400, buyPrice: 320, stock: 6 }],
+  },
+  {
+    id: 4,
+    name: "Notebook A5",
+    code: "NOTE05",
+    stock: 20,
+    category: "Stationery",
+    image: sharedImage,
+    variants: [{ id: "std", name: "Standard", price: 40, buyPrice: 22, stock: 20 }],
+  },
+  {
+    id: 5,
+    name: "Cooking Oil",
+    code: "OIL002",
+    stock: 10,
+    category: "Kitchen",
+    image: sharedImage,
+    variants: [
+      { id: "1l", name: "1L", price: 145, buyPrice: 120, stock: 6 },
+      { id: "5l", name: "5L", price: 690, buyPrice: 590, stock: 4 },
+    ],
+  },
+  {
+    id: 6,
+    name: "Pen Box",
+    code: "PEN090",
+    stock: 14,
+    category: "Stationery",
+    image: sharedImage,
+    variants: [{ id: "box", name: "Box", price: 120, buyPrice: 90, stock: 14 }],
+  },
+];
 
 const baseTheme = {
   bg: "#f5f5f7",
