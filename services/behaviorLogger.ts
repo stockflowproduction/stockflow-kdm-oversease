@@ -142,7 +142,6 @@ export const logUserAction = (actionName: string, element: string, metadata?: Re
   };
 
   boundedPush(getLogsStore().userActions, entry);
-  console.info(`[USER_ACTION] ${actionName} | element: ${element} | tab: ${entry.tab}`);
 };
 
 export const logStateChange = (type: string, payload: Omit<StateChangeLog, 'id' | 'time' | 'tab' | 'type'> = {}) => {
@@ -154,7 +153,6 @@ export const logStateChange = (type: string, payload: Omit<StateChangeLog, 'id' 
     ...payload,
   };
   boundedPush(getLogsStore().stateChanges, entry);
-  console.info(`[STATE_CHANGE] ${type} | tab: ${entry.tab}`);
 };
 
 export const logError = (type: ErrorLog['type'], message: string, stack?: string, metadata?: Record<string, unknown>) => {
@@ -228,7 +226,6 @@ const installFetchInterceptor = () => {
         },
         responseSummary: summary,
       });
-      console.info(`[DATA_FETCH] ${method} ${url} | status: ${response.status}`);
       return response;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown fetch failure';

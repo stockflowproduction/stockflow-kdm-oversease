@@ -51,6 +51,7 @@ export interface Customer {
   phone: string;
   totalSpend: number;
   totalDue: number;
+  storeCredit?: number;
   lastVisit: string;
   visitCount: number;
 }
@@ -59,6 +60,7 @@ export interface Transaction {
   id: string;
   items: CartItem[];
   total: number;
+  storeCreditUsed?: number;
   date: string;
   type: 'sale' | 'return' | 'payment';
   customerId?: string;
@@ -411,9 +413,34 @@ export interface MigrationMarkers {
   customerProductStatsBackfill?: CustomerProductStatsBackfillMarker;
 }
 
+export interface DeletedTransactionImpactSnapshot {
+  customerDue: number;
+  customerStoreCredit: number;
+  activeTransactionsCount: number;
+  estimatedCashFromActiveTransactions: number;
+}
+
+export interface DeletedTransactionRecord {
+  id: string;
+  originalTransactionId: string;
+  originalTransaction: Transaction;
+  deletedAt: string;
+  deletedBy?: string;
+  deletedByRole?: string;
+  type: Transaction['type'];
+  customerId?: string;
+  customerName?: string;
+  amount: number;
+  paymentMethod?: Transaction['paymentMethod'];
+  itemSnapshot?: CartItem[];
+  beforeImpact: DeletedTransactionImpactSnapshot;
+  afterImpact: DeletedTransactionImpactSnapshot;
+}
+
 export interface AppState {
   products: Product[];
   transactions: Transaction[];
+  deletedTransactions?: DeletedTransactionRecord[];
   categories: string[];
   customers: Customer[];
   profile: StoreProfile;

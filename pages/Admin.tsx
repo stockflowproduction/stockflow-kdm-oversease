@@ -45,6 +45,7 @@ export default function Admin() {
   const [purchaseQty, setPurchaseQty] = useState('');
   const [purchasePrice, setPurchasePrice] = useState('');
   const [purchaseNextBuyPrice, setPurchaseNextBuyPrice] = useState('');
+  const [selectedPurchaseVariantKey, setSelectedPurchaseVariantKey] = useState('');
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const barcodeCanvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -139,6 +140,28 @@ export default function Admin() {
     return Math.max(0, purchase - sold);
   };
 
+  const viewingVariantDetails = useMemo(() => {
+    if (!viewingProduct) {
+      return { hasVariantRows: false, rows: [], totalPurchase: 0, totalSold: 0, avgBuyPrice: 0, avgSellPrice: 0 };
+    }
+
+    const hasVariantRows = productHasCombinationStock(viewingProduct);
+    if (!hasVariantRows) {
+      return { hasVariantRows: false, rows: [], totalPurchase: 0, totalSold: 0, avgBuyPrice: 0, avgSellPrice: 0 };
+    }
+
+    const rows = getProductStockRows(viewingProduct);
+    const sourceRows = Array.isArray(viewingProduct.stockByVariantColor) ? viewingProduct.stockByVariantColor : [];
+    const totalPurchase = sourceRows.reduce((sum, row) => sum + toNonNegativeNumber(row.totalPurchase), 0);
+    const totalSold = sourceRows.reduce((sum, row) => sum + toNonNegativeNumber(row.totalSold), 0);
+    const pricedBuyRows = rows.filter(row => Number.isFinite(row.buyPrice));
+    const pricedSellRows = rows.filter(row => Number.isFinite(row.sellPrice));
+    const avgBuyPrice = pricedBuyRows.length ? pricedBuyRows.reduce((sum, row) => sum + toNonNegativeNumber(row.buyPrice), 0) / pricedBuyRows.length : 0;
+    const avgSellPrice = pricedSellRows.length ? pricedSellRows.reduce((sum, row) => sum + toNonNegativeNumber(row.sellPrice), 0) / pricedSellRows.length : 0;
+
+    return { hasVariantRows: true, rows, totalPurchase, totalSold, avgBuyPrice, avgSellPrice };
+  }, [viewingProduct]);
+
   const saveProduct = async (keepOpenForNext = false) => {
     if (isSaving) return;
     const hasVariantAxes = !!(formData.variants?.length || formData.colors?.length);
@@ -190,11 +213,9 @@ export default function Admin() {
       let updated: Product[];
       if (editingProduct) {
         updated = await updateProduct(productPayload);
-        console.debug('[product] update success', { productId: productPayload.id });
         setProducts(updated);
       } else {
         updated = await addProduct(productPayload);
-        console.debug('[product] create success', { productId: productPayload.id });
         setProducts(updated);
       }
       if (keepOpenForNext) {
@@ -234,6 +255,31 @@ export default function Admin() {
   const handleSave = async () => saveProduct(false);
   const handleSaveAndNext = async () => saveProduct(true);
 
+  const purchaseVariantRows = useMemo(() => {
+    if (!purchaseTarget || !productHasCombinationStock(purchaseTarget)) return [];
+    return getProductStockRows(purchaseTarget).map((row, idx) => ({
+      ...row,
+      key: `${row.variant || NO_VARIANT}__${row.color || NO_COLOR}__${idx}`,
+    }));
+  }, [purchaseTarget]);
+
+  const selectedPurchaseVariantRow = useMemo(
+    () => purchaseVariantRows.find(row => row.key === selectedPurchaseVariantKey) || null,
+    [purchaseVariantRows, selectedPurchaseVariantKey]
+  );
+
+  useEffect(() => {
+    if (!purchaseTarget || !productHasCombinationStock(purchaseTarget)) {
+      setSelectedPurchaseVariantKey('');
+      return;
+    }
+    if (!purchaseVariantRows.length) {
+      setSelectedPurchaseVariantKey('');
+      return;
+    }
+    setSelectedPurchaseVariantKey(prev => (prev && purchaseVariantRows.some(row => row.key === prev)) ? prev : purchaseVariantRows[0].key);
+  }, [purchaseTarget, purchaseVariantRows]);
+
   const handleAddPurchase = async () => {
     if (!purchaseTarget) return;
     const qty = toNonNegativeNumber(purchaseQty);
@@ -243,23 +289,54 @@ export default function Admin() {
       return;
     }
 
-    const currentStock = toNonNegativeNumber(purchaseTarget.stock);
-    const currentBuyPrice = toNonNegativeNumber(purchaseTarget.buyPrice);
+    const isVariantPurchase = productHasCombinationStock(purchaseTarget) && !!selectedPurchaseVariantRow;
+    const currentStock = isVariantPurchase ? toNonNegativeNumber(selectedPurchaseVariantRow?.stock) : toNonNegativeNumber(purchaseTarget.stock);
+    const currentBuyPrice = isVariantPurchase ? toNonNegativeNumber(selectedPurchaseVariantRow?.buyPrice) : toNonNegativeNumber(purchaseTarget.buyPrice);
     const weightedAvg = currentStock + qty > 0 ? ((currentStock * currentBuyPrice) + (qty * unitPrice)) / (currentStock + qty) : unitPrice;
     const manualBuyPrice = parseOptionalNonNegative(purchaseNextBuyPrice);
     const nextBuyPrice = manualBuyPrice ?? weightedAvg;
 
+    const updatedVariantRows = isVariantPurchase
+      ? (purchaseTarget.stockByVariantColor || []).map((row) => {
+          const variant = row.variant || NO_VARIANT;
+          const color = row.color || NO_COLOR;
+          if (variant !== (selectedPurchaseVariantRow?.variant || NO_VARIANT) || color !== (selectedPurchaseVariantRow?.color || NO_COLOR)) {
+            return row;
+          }
+          return {
+            ...row,
+            stock: toNonNegativeNumber(row.stock) + qty,
+            buyPrice: nextBuyPrice,
+            totalPurchase: toNonNegativeNumber(row.totalPurchase) + qty,
+          };
+        })
+      : (purchaseTarget.stockByVariantColor || []);
+
+    const rolledUpBuyPrice = isVariantPurchase
+      ? (() => {
+          const rows = updatedVariantRows.map((row) => ({
+            stock: toNonNegativeNumber(row.stock),
+            buyPrice: toNonNegativeNumber(row.buyPrice),
+          }));
+          const totalStock = rows.reduce((sum, row) => sum + row.stock, 0);
+          if (totalStock <= 0) return nextBuyPrice;
+          const weightedCost = rows.reduce((sum, row) => sum + (row.stock * row.buyPrice), 0);
+          return weightedCost / totalStock;
+        })()
+      : nextBuyPrice;
+
     const updatedProduct: Product = {
       ...purchaseTarget,
-      stock: currentStock + qty,
+      stock: toNonNegativeNumber(purchaseTarget.stock) + qty,
       totalPurchase: toNonNegativeNumber(purchaseTarget.totalPurchase) + qty,
-      buyPrice: nextBuyPrice,
+      buyPrice: rolledUpBuyPrice,
+      stockByVariantColor: updatedVariantRows,
       purchaseHistory: [
         {
           id: `ph-${Date.now()}`,
           date: new Date().toISOString(),
-          variant: NO_VARIANT,
-          color: NO_COLOR,
+          variant: isVariantPurchase ? (selectedPurchaseVariantRow?.variant || NO_VARIANT) : NO_VARIANT,
+          color: isVariantPurchase ? (selectedPurchaseVariantRow?.color || NO_COLOR) : NO_COLOR,
           quantity: qty,
           unitPrice,
           previousStock: currentStock,
@@ -276,23 +353,23 @@ export default function Admin() {
     setPurchaseQty('');
     setPurchasePrice('');
     setPurchaseNextBuyPrice('');
+    setSelectedPurchaseVariantKey('');
   };
 
   const purchaseAveragePrice = useMemo(() => {
     if (!purchaseTarget) return 0;
     const qty = toNonNegativeNumber(purchaseQty);
     const unitPrice = toNonNegativeNumber(purchasePrice);
-    const currentStock = toNonNegativeNumber(purchaseTarget.stock);
-    const currentBuyPrice = toNonNegativeNumber(purchaseTarget.buyPrice);
+    const currentStock = selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.stock) : toNonNegativeNumber(purchaseTarget.stock);
+    const currentBuyPrice = selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.buyPrice) : toNonNegativeNumber(purchaseTarget.buyPrice);
     if (qty <= 0 || unitPrice <= 0) return currentBuyPrice;
     return currentStock + qty > 0 ? ((currentStock * currentBuyPrice) + (qty * unitPrice)) / (currentStock + qty) : unitPrice;
-  }, [purchaseTarget, purchaseQty, purchasePrice]);
+  }, [purchaseTarget, purchaseQty, purchasePrice, selectedPurchaseVariantRow]);
 
   const handleDelete = async (id: string) => {
     if (window.confirm('Are you sure you want to permanently delete this product?')) {
       try {
         const updated = await deleteProduct(id);
-        console.debug('[product] delete success', { productId: id });
         setProducts(updated);
         setSelectedProductIds(prev => prev.filter(productId => productId !== id));
       } catch (deleteError) {
@@ -599,7 +676,6 @@ export default function Admin() {
                   files: [file]
               });
           } catch (e) {
-              console.log("Share failed or cancelled", e);
           }
       } else {
           alert("Sharing not supported on this device/browser.");
@@ -1379,12 +1455,29 @@ export default function Admin() {
                   </div>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                  <div className="rounded border bg-white p-2 font-medium">Current Stock: <span className="text-primary">{purchaseTarget.stock}</span></div>
-                  <div className="rounded border bg-white p-2 font-medium">Current Buy Price: <span className="text-primary">₹{purchaseTarget.buyPrice}</span></div>
+                  <div className="rounded border bg-white p-2 font-medium">Current Stock: <span className="text-primary">{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.stock) : purchaseTarget.stock}</span></div>
+                  <div className="rounded border bg-white p-2 font-medium">Current Buy Price: <span className="text-primary">₹{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.buyPrice) : purchaseTarget.buyPrice}</span></div>
                   <div className="rounded border bg-white p-2">Total Purchase: {toNonNegativeNumber(purchaseTarget.totalPurchase)}</div>
                   <div className="rounded border bg-white p-2">Total Sold: {toNonNegativeNumber(purchaseTarget.totalSold)}</div>
                 </div>
               </div>
+
+              {purchaseVariantRows.length > 0 && (
+                <div className="space-y-1">
+                  <Label>Select Variant / Color</Label>
+                  <select
+                    className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
+                    value={selectedPurchaseVariantKey}
+                    onChange={(e) => setSelectedPurchaseVariantKey(e.target.value)}
+                  >
+                    {purchaseVariantRows.map((row) => (
+                      <option key={row.key} value={row.key}>
+                        {row.variant || NO_VARIANT} / {row.color || NO_COLOR} • Stock {toNonNegativeNumber(row.stock)} • Buy ₹{toNonNegativeNumber(row.buyPrice)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <Input type="number" placeholder="Purchase quantity" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} />
               <Input type="number" placeholder="Purchase unit price" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
@@ -1405,7 +1498,45 @@ export default function Admin() {
             <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Product Details - {viewingProduct.name}</CardTitle><Button variant="ghost" size="sm" onClick={() => setViewingProduct(null)}><X className="w-4 h-4"/></Button></CardHeader>
             <CardContent className="space-y-3">
               <div className="text-sm">Created: {viewingProduct.createdAt ? new Date(viewingProduct.createdAt).toLocaleString() : 'N/A'}</div>
-              <div className="text-sm">Current stock: {viewingProduct.stock}, Total purchase: {toNonNegativeNumber(viewingProduct.totalPurchase)}, Total sold: {toNonNegativeNumber(viewingProduct.totalSold)}</div>
+              {viewingVariantDetails.hasVariantRows ? (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                    <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Current stock</div><div className="font-semibold">{viewingProduct.stock}</div></div>
+                    <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Total purchase (variants)</div><div className="font-semibold">{viewingVariantDetails.totalPurchase}</div></div>
+                    <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Total sold (variants)</div><div className="font-semibold">{viewingVariantDetails.totalSold}</div></div>
+                    <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Avg Buy / Sell</div><div className="font-semibold">₹{viewingVariantDetails.avgBuyPrice.toFixed(2)} / ₹{viewingVariantDetails.avgSellPrice.toFixed(2)}</div></div>
+                  </div>
+                  <div>
+                    <h4 className="font-semibold mb-1.5">Variant Details</h4>
+                    <div className="border rounded-lg overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead className="bg-muted/40">
+                          <tr>
+                            <th className="p-2 text-left">Variant</th>
+                            <th className="p-2 text-left">Color</th>
+                            <th className="p-2 text-left">Stock</th>
+                            <th className="p-2 text-left">Buy</th>
+                            <th className="p-2 text-left">Sell</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {viewingVariantDetails.rows.map((row, idx) => (
+                            <tr key={`${row.variant}-${row.color}-${idx}`} className="border-t">
+                              <td className="p-2">{row.variant || NO_VARIANT}</td>
+                              <td className="p-2">{row.color || NO_COLOR}</td>
+                              <td className="p-2">{toNonNegativeNumber(row.stock)}</td>
+                              <td className="p-2">₹{toNonNegativeNumber(row.buyPrice)}</td>
+                              <td className="p-2">₹{toNonNegativeNumber(row.sellPrice)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-sm">Current stock: {viewingProduct.stock}, Total purchase: {toNonNegativeNumber(viewingProduct.totalPurchase)}, Total sold: {toNonNegativeNumber(viewingProduct.totalSold)}</div>
+              )}
               <h4 className="font-semibold">Purchase History</h4>
               <div className="border rounded-lg overflow-hidden">
                 <table className="w-full text-xs">

@@ -86,7 +86,14 @@ export default function Customers() {
 
       if (viewingCustomer) {
           const updatedC = data.customers.find(c => c.id === viewingCustomer.id);
-          if (updatedC) setViewingCustomer(updatedC);
+          if (updatedC) {
+            console.info('[FIN][STORE_CREDIT][LOAD]', {
+              customerId: updatedC.id,
+              loadedDue: updatedC.totalDue,
+              loadedStoreCredit: updatedC.storeCredit || 0,
+            });
+            setViewingCustomer(updatedC);
+          }
           else setViewingCustomer(null);
       }
     } catch (error) {
@@ -106,6 +113,15 @@ export default function Customers() {
         window.removeEventListener('local-storage-update', refreshData);
     };
   }, []);
+
+  useEffect(() => {
+    if (!viewingCustomer) return;
+    console.info('[FIN][STORE_CREDIT][UI]', {
+      customerId: viewingCustomer.id,
+      renderedDue: viewingCustomer.totalDue,
+      renderedStoreCredit: viewingCustomer.storeCredit || 0,
+    });
+  }, [viewingCustomer?.id, viewingCustomer?.totalDue, viewingCustomer?.storeCredit]);
 
   const highValueThreshold = useMemo(() => {
     if (customers.length < 3) return Infinity;
@@ -255,21 +271,35 @@ export default function Customers() {
       return combined.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   }, [transactions, upfrontOrders, viewingCustomer]);
 
+  const customerOrderSummary = useMemo(() => {
+      if (!viewingCustomer) return { totalOrders: 0, openOrders: 0, totalValue: 0, paidSoFar: 0, remaining: 0 };
+      const orders = upfrontOrders.filter(o => o.customerId === viewingCustomer.id);
+      const totalOrders = orders.length;
+      const openOrders = orders.filter(o => o.status !== 'cleared').length;
+      const totalValue = orders.reduce((sum, o) => sum + (o.totalCost || 0), 0);
+      const paidSoFar = orders.reduce((sum, o) => sum + (o.advancePaid || 0), 0);
+      const remaining = orders.reduce((sum, o) => sum + (o.remainingAmount || 0), 0);
+      return { totalOrders, openOrders, totalValue, paidSoFar, remaining };
+  }, [upfrontOrders, viewingCustomer]);
+
   const handleRecordPayment = () => {
       setPaymentError(null);
-      if (!viewingCustomer || !paymentAmount) return;
-      const amount = parseFloat(paymentAmount);
+      if (!viewingCustomer) {
+          setPaymentError("Please select a customer.");
+          return;
+      }
+      if (!paymentMethod) {
+          setPaymentError("Please select a payment method.");
+          return;
+      }
+      const amount = Number(paymentAmount);
       
-      if (isNaN(amount) || amount <= 0) {
+      if (!Number.isFinite(amount) || amount <= 0) {
           setPaymentError("Please enter a valid amount.");
           return;
       }
-
-      // ADMIN RESTRICTION: Payment cannot exceed current outstanding due
-      if (amount > (viewingCustomer.totalDue + 0.01)) { // Tiny buffer for float precision
-          setPaymentError(`Cannot pay more than outstanding due (Max: ₹${viewingCustomer.totalDue.toFixed(2)})`);
-          return;
-      }
+      // Overpayment is allowed here by design. The storage balance normalizer
+      // settles due first and writes any excess into storeCredit.
 
       const tx: Transaction = {
           id: Date.now().toString(),
@@ -289,6 +319,12 @@ export default function Customers() {
       setPaymentNote('');
       setPaymentError(null);
   };
+
+  const parsedPaymentAmount = Number(paymentAmount);
+  const paymentAmountValid = Number.isFinite(parsedPaymentAmount) && parsedPaymentAmount > 0;
+  const currentDue = Math.max(0, Number(viewingCustomer?.totalDue || 0));
+  const paymentAppliedToDue = paymentAmountValid ? Math.min(parsedPaymentAmount, currentDue) : 0;
+  const paymentExcessToCredit = paymentAmountValid ? Math.max(0, parsedPaymentAmount - currentDue) : 0;
 
   const handleAddCustomerSubmit = () => {
       setAddCustomerError(null);
@@ -411,6 +447,13 @@ export default function Customers() {
       setSelectedUpfrontOrder(null);
       setCollectPaymentError(null);
   };
+
+  const collectAmountNumber = Number(collectAmount);
+  const isCollectAmountValid = Number.isFinite(collectAmountNumber) && collectAmountNumber > 0;
+  const selectedOrderRemaining = Math.max(0, Number(selectedUpfrontOrder?.remainingAmount || 0));
+  const projectedRemainingAfterCollect = Math.max(0, selectedOrderRemaining - (isCollectAmountValid ? collectAmountNumber : 0));
+  const availableStoreCredit = Math.max(0, Number(viewingCustomer?.storeCredit || 0));
+  const possibleCreditApplication = Math.min(availableStoreCredit, projectedRemainingAfterCollect);
 
   const handleAdminPasswordSubmit = () => {
       // Password check removed as per new security policy
@@ -736,6 +779,7 @@ export default function Customers() {
               <th className="p-3 text-left">Visits</th>
               <th className="p-3 text-left">Total Spend</th>
               <th className="p-3 text-left">Due</th>
+              <th className="p-3 text-left">Store Credit</th>
               <th className="p-3 text-left">Last Visit</th>
               <th className="p-3 text-left">Actions</th>
             </tr>
@@ -757,6 +801,7 @@ export default function Customers() {
                 <td className="p-3">{customer.visitCount}</td>
                 <td className="p-3">₹{customer.totalSpend.toLocaleString()}</td>
                 <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{customer.totalDue.toFixed(2)}</td>
+                <td className={`p-3 font-semibold ${(customer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{(customer.storeCredit || 0).toFixed(2)}</td>
                 <td className="p-3">{new Date(customer.lastVisit).toLocaleDateString()}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
@@ -871,6 +916,10 @@ export default function Customers() {
                                <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
                                <div className={`text-2xl font-black ${viewingCustomer.totalDue > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{viewingCustomer.totalDue.toFixed(2)}</div>
                            </div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomer.storeCredit || 0) > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>Store Credit</div>
+                               <div className={`text-2xl font-black ${(viewingCustomer.storeCredit || 0) > 0 ? 'text-emerald-700' : 'text-slate-700'}`}>₹{(viewingCustomer.storeCredit || 0).toFixed(2)}</div>
+                           </div>
                            <div className="flex flex-col gap-2">
                                <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={viewingCustomer.totalDue <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>
                                    <Coins className="w-4 h-4 mr-1.5" /> Record Payment
@@ -883,10 +932,16 @@ export default function Customers() {
                                </Button>
                            </div>
                       </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
+                        <div className="rounded-lg border bg-slate-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-slate-500">Custom Orders</div><div className="text-sm font-black text-slate-800">{customerOrderSummary.totalOrders}</div></div>
+                        <div className="rounded-lg border bg-amber-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-amber-600">Open Orders</div><div className="text-sm font-black text-amber-700">{customerOrderSummary.openOrders}</div></div>
+                        <div className="rounded-lg border bg-emerald-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-emerald-600">Advance Paid</div><div className="text-sm font-black text-emerald-700">₹{customerOrderSummary.paidSoFar.toFixed(2)}</div></div>
+                        <div className="rounded-lg border bg-rose-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-rose-600">Remaining to Collect</div><div className="text-sm font-black text-rose-700">₹{customerOrderSummary.remaining.toFixed(2)}</div></div>
+                      </div>
                   </CardHeader>
                   <CardContent className="flex-1 overflow-y-auto p-0 bg-background">
                       <div className="bg-slate-50 p-2.5 text-[10px] uppercase font-black px-4 text-slate-500 border-b tracking-widest flex justify-between sticky top-0 z-10 backdrop-blur-md bg-opacity-90">
-                          <span>History & Orders</span>
+                          <span>History & Custom Orders</span>
                           <span className="flex items-center gap-1"><History className="w-3 h-3" /> Ledger List</span>
                       </div>
                       {customerHistory.length === 0 ? (
@@ -916,6 +971,11 @@ export default function Customers() {
                                                     {new Date(tx.date).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
                                                     {tx.notes && <span className="font-medium text-muted-foreground ml-2 truncate max-w-[120px] inline-block align-middle border-l pl-2 italic">- {tx.notes}</span>}
                                                 </div>
+                                                {tx.type === 'sale' && (tx.storeCreditUsed || 0) > 0 && (
+                                                  <div className="text-[10px] text-muted-foreground font-medium mt-1">
+                                                    • Used SC ₹{Number(tx.storeCreditUsed || 0).toFixed(2)} • Paid ₹{Math.max(0, Math.abs(tx.total) - Number(tx.storeCreditUsed || 0)).toFixed(2)} {tx.paymentMethod === 'Credit' ? 'Credit' : tx.paymentMethod}
+                                                  </div>
+                                                )}
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-3 text-right">
@@ -951,14 +1011,17 @@ export default function Customers() {
                                                 <div className="flex items-center gap-2">
                                                     <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">#{order.id.slice(-6)}</span>
                                                     <Badge className={`h-4 px-1.5 text-[9px] font-extrabold uppercase ${order.status === 'cleared' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                                                        {order.status === 'cleared' ? 'Cleared' : 'Unpaid Order'}
+                                                        {order.status === 'cleared' ? 'Paid in Full' : 'Balance Due'}
                                                     </Badge>
                                                 </div>
                                                 <div className="text-xs font-bold mt-1 text-slate-800">
-                                                    {order.productName} ({order.quantity} {order.isCarton ? 'Cartons' : 'Units'})
+                                                    Custom Order • {order.productName} ({order.quantity} {order.isCarton ? 'Cartons' : 'Units'})
                                                 </div>
-                                                <div className="text-[10px] text-muted-foreground font-medium">
-                                                    {new Date(order.date).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                                                <div className="text-[10px] text-muted-foreground font-medium flex flex-wrap gap-x-2">
+                                                    <span>{new Date(order.date).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                                                    <span>• Total ₹{order.totalCost.toFixed(2)}</span>
+                                                    <span>• Advance ₹{order.advancePaid.toFixed(2)}</span>
+                                                    <span>• Remaining ₹{order.remainingAmount.toFixed(2)}</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -1020,7 +1083,14 @@ export default function Customers() {
                             autoFocus 
                           />
                         </div>
-                        <p className="text-[10px] text-muted-foreground font-bold">Limit: ₹{viewingCustomer.totalDue.toFixed(2)}</p>
+                        <p className="text-[10px] text-muted-foreground font-bold">Outstanding due: ₹{viewingCustomer.totalDue.toFixed(2)} (overpayment allowed)</p>
+                        <p className="text-[10px] text-muted-foreground">Any excess above due will be saved as store credit.</p>
+                        {paymentAmountValid && (
+                          <div className="rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-[10px]">
+                            <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to due</span><span className="font-bold text-emerald-700">₹{paymentAppliedToDue.toFixed(2)}</span></div>
+                            <div className="mt-1 flex items-center justify-between"><span className="text-muted-foreground">Added to store credit</span><span className="font-bold text-emerald-700">₹{paymentExcessToCredit.toFixed(2)}</span></div>
+                          </div>
+                        )}
                       </div>
                       <div className="space-y-2">
                         <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Method</Label>
@@ -1132,6 +1202,14 @@ export default function Customers() {
 
                           <div className="h-px bg-slate-800 my-1"></div>
                           <div className="flex justify-between font-black text-xl text-white"><span>Grand Total</span><span>₹{Math.abs(selectedTx.total).toFixed(2)}</span></div>
+                          {selectedTx.type === 'sale' && (selectedTx.storeCreditUsed || 0) > 0 && (
+                            <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800 p-3 text-[11px] space-y-1">
+                              <p className="font-bold uppercase tracking-wider text-slate-300">Settlement Breakdown</p>
+                              <div className="flex justify-between"><span>Total Invoice</span><span>₹{Math.abs(selectedTx.total).toFixed(2)}</span></div>
+                              <div className="flex justify-between"><span>Store Credit Used</span><span>₹{Number(selectedTx.storeCreditUsed || 0).toFixed(2)}</span></div>
+                              <div className="flex justify-between"><span>{selectedTx.paymentMethod === 'Credit' ? 'Credit Due' : selectedTx.paymentMethod === 'Online' ? 'Online Paid' : 'Cash Paid'}</span><span>₹{Math.max(0, Math.abs(selectedTx.total) - Number(selectedTx.storeCreditUsed || 0)).toFixed(2)}</span></div>
+                            </div>
+                          )}
                       </div>
                   </CardContent>
               </Card>
@@ -1143,7 +1221,7 @@ export default function Customers() {
           <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
               <Card className="w-full max-w-md shadow-2xl animate-in zoom-in border-t-4 border-t-primary overflow-hidden">
                   <CardHeader className="flex flex-row justify-between items-center border-b pb-4">
-                      <CardTitle className="text-lg">{editingUpfrontOrder ? 'Edit Order' : 'Create New Order'}</CardTitle>
+                      <CardTitle className="text-lg">{editingUpfrontOrder ? 'Edit Custom Order' : 'Create Custom Order'}</CardTitle>
                       <Button variant="ghost" size="icon" onClick={() => { setIsUpfrontOrderModalOpen(false); setEditingUpfrontOrder(null); setUpfrontOrderError(null); }}><X className="w-4 h-4" /></Button>
                   </CardHeader>
                   <CardContent className="space-y-4 pt-6 max-h-[70vh] overflow-y-auto">
@@ -1153,6 +1231,9 @@ export default function Customers() {
                               {upfrontOrderError}
                           </div>
                       )}
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-600">
+                        Store Credit Available: <span className="font-bold text-emerald-700">₹{availableStoreCredit.toFixed(2)}</span>. Store credit is customer-level and is not auto-applied to a custom order at creation time.
+                      </div>
                       <div className="space-y-2">
                           <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Product Name</Label>
                           <Input value={upfrontOrderForm.productName} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, productName: e.target.value})} placeholder="e.g. Premium Cotton Fabric" />
@@ -1181,15 +1262,15 @@ export default function Customers() {
                           </div>
                       </div>
                       <div className="space-y-2">
-                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Total Order Cost</Label>
+                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Custom Order Total</Label>
                           <Input type="number" value={upfrontOrderForm.totalCost} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, totalCost: e.target.value})} placeholder="0.00" />
                       </div>
                       <div className="space-y-2">
-                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Advance Paid</Label>
+                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Advance Paid (Order-level)</Label>
                           <div className="relative">
                               <Input type="number" value={upfrontOrderForm.advancePaid} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, advancePaid: e.target.value})} placeholder="0.00" />
                               <div className="text-[10px] mt-1 font-bold text-red-600">
-                                  Remaining: ₹{(parseFloat(upfrontOrderForm.totalCost || '0') - parseFloat(upfrontOrderForm.advancePaid || '0')).toFixed(2)}
+                                  Balance Due: ₹{(parseFloat(upfrontOrderForm.totalCost || '0') - parseFloat(upfrontOrderForm.advancePaid || '0')).toFixed(2)}
                               </div>
                           </div>
                       </div>
@@ -1217,7 +1298,7 @@ export default function Customers() {
                       <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-emerald-200">
                           <Coins className="w-6 h-6" />
                       </div>
-                      <CardTitle className="text-lg">Collect Balance</CardTitle>
+                      <CardTitle className="text-lg">Collect Order Balance</CardTitle>
                       <p className="text-xs text-muted-foreground">Order: <b>{selectedUpfrontOrder.productName}</b></p>
                   </CardHeader>
                   <CardContent className="space-y-4 pt-6">
@@ -1229,21 +1310,25 @@ export default function Customers() {
                       )}
                       <div className="bg-slate-50 p-3 rounded-lg border space-y-1">
                           <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                              <span>Total Cost</span>
+                              <span>Order Total</span>
                               <span>₹{selectedUpfrontOrder.totalCost.toFixed(2)}</span>
                           </div>
                           <div className="flex justify-between text-[10px] font-bold text-emerald-600 uppercase tracking-wider">
-                              <span>Paid So Far</span>
+                              <span>Advance Paid</span>
                               <span>₹{selectedUpfrontOrder.advancePaid.toFixed(2)}</span>
                           </div>
                           <div className="h-px bg-slate-200 my-1"></div>
                           <div className="flex justify-between text-xs font-black text-red-600">
-                              <span>Remaining</span>
+                              <span>Balance Due</span>
                               <span>₹{selectedUpfrontOrder.remainingAmount.toFixed(2)}</span>
                           </div>
                       </div>
+                      <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px]">
+                        <div className="flex justify-between"><span className="text-muted-foreground">Store Credit Available</span><span className="font-black text-emerald-700">₹{availableStoreCredit.toFixed(2)}</span></div>
+                        <div className="mt-1 text-muted-foreground">Store credit is customer-level and currently not auto-applied in this collect step.</div>
+                      </div>
                       <div className="space-y-2">
-                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Amount to Collect</Label>
+                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Amount Collecting Now</Label>
                         <Input 
                             type="number" 
                             className="text-xl font-black text-emerald-700 border-2 bg-slate-50 focus:border-emerald-500" 
@@ -1253,9 +1338,16 @@ export default function Customers() {
                             autoFocus 
                         />
                       </div>
+                      {isCollectAmountValid && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] space-y-1">
+                          <div className="flex justify-between"><span className="text-muted-foreground">Remaining after this collection</span><span className="font-black text-slate-700">₹{projectedRemainingAfterCollect.toFixed(2)}</span></div>
+                          <div className="flex justify-between"><span className="text-muted-foreground">Order status after collection</span><span className={`font-black ${projectedRemainingAfterCollect <= 0 ? 'text-emerald-700' : 'text-amber-700'}`}>{projectedRemainingAfterCollect <= 0 ? 'Paid in Full' : 'Balance Due'}</span></div>
+                          <div className="flex justify-between"><span className="text-muted-foreground">Possible store credit application (manual)</span><span className="font-black text-emerald-700">₹{possibleCreditApplication.toFixed(2)}</span></div>
+                        </div>
+                      )}
                       <div className="flex gap-2 pt-4 border-t">
                           <Button variant="ghost" className="flex-1 font-bold text-xs" onClick={() => { setIsCollectPaymentModalOpen(false); setSelectedUpfrontOrder(null); setCollectPaymentError(null); }}>Cancel</Button>
-                          <Button className="flex-1 bg-emerald-700 font-bold text-xs shadow-md" onClick={handleCollectUpfrontPayment}>Collect Payment</Button>
+                          <Button className="flex-1 bg-emerald-700 font-bold text-xs shadow-md" onClick={handleCollectUpfrontPayment}>Collect Balance</Button>
                       </div>
                   </CardContent>
               </Card>

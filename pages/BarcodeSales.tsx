@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
-import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
+import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
@@ -35,7 +35,7 @@ export default function BarcodeSales() {
 
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerTab, setCustomerTab] = useState<'search' | 'new'>('search');
-  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number }> }>({ open: false, product: null, rows: [] });
+  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number; sellPrice: number }> }>({ open: false, product: null, rows: [] });
   const [transactionComplete, setTransactionComplete] = useState<Transaction | null>(null);
   
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -136,6 +136,29 @@ export default function BarcodeSales() {
       ? getAvailableStockForCombination(product, variant, color)
       : Math.max(0, product.stock || 0);
 
+  const lineKey = (id: string, variant?: string, color?: string) => getStockBucketKey(id, variant, color);
+  const getReturnableQty = (id: string, variant?: string, color?: string, customerId?: string) => {
+    const key = lineKey(id, variant, color);
+    const soldQty = transactions
+      .filter((tx) => tx.type === 'sale' && (!customerId || tx.customerId === customerId))
+      .reduce((sum, tx) => sum + tx.items
+        .filter((line) => lineKey(line.id, line.selectedVariant, line.selectedColor) === key)
+        .reduce((lineSum, line) => lineSum + (line.quantity || 0), 0), 0);
+    const returnedQty = transactions
+      .filter((tx) => tx.type === 'return' && (!customerId || tx.customerId === customerId))
+      .reduce((sum, tx) => sum + tx.items
+        .filter((line) => lineKey(line.id, line.selectedVariant, line.selectedColor) === key)
+        .reduce((lineSum, line) => lineSum + (line.quantity || 0), 0), 0);
+    return Math.max(0, soldQty - returnedQty);
+  };
+
+  const getProductReturnableQty = (product: Product, customerId?: string) => {
+    if (!productHasCombinationStock(product)) {
+      return getReturnableQty(product.id, NO_VARIANT, NO_COLOR, customerId);
+    }
+    return getProductStockRows(product).reduce((sum, row) => sum + getReturnableQty(product.id, row.variant, row.color, customerId), 0);
+  };
+
   const handleProductSelect = (scanValue: string, isScan = false, explicitQty: number = 1) => {
     if (isScan && isScanLocked.current) return;
     let targetCode = scanValue;
@@ -146,8 +169,10 @@ export default function BarcodeSales() {
         if (isReturnMode) {
             const currentCart = cartRef.current;
             const inCart = currentCart.filter(c => c.id === product.id).reduce((sum, c) => sum + c.quantity, 0);
-            const sold = product.totalSold || 0;
-            if (sold === 0) error = "Item hasn't been sold yet.";
+            const sold = getProductReturnableQty(product);
+            if (sold === 0) error = productHasCombinationStock(product)
+              ? 'No returnable quantity left for this product variants.'
+              : "Item hasn't been sold yet.";
             else if (sold < (inCart + explicitQty)) error = `Return Limit (${sold}) Exceeded!`;
         } else if (!productHasCombinationStock(product)) {
             const inCart = cartRef.current
@@ -173,10 +198,16 @@ export default function BarcodeSales() {
                 setTimeout(() => setScanMessage(null), 1500);
             }
         } else {
-            const rows = getProductStockRows(product).filter(r => r.stock > 0);
+            const rows = getProductStockRows(product)
+              .map(row => ({ ...row, sellPrice: getResolvedSellPriceForCombination(product, row.variant, row.color) }))
+              .filter(r => r.stock > 0);
         if (productHasCombinationStock(product)) {
             const selected = rows[0];
             if (!selected) { setCartError('Out of stock!'); return; }
+            if (rows.length > 1) {
+              setVariantPicker({ open: true, product, rows: rows.map(row => ({ ...row, qty: 0 })) });
+              return;
+            }
             addToCart(product, explicitQty, selected.variant, selected.color);
         } else {
             addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
@@ -185,8 +216,6 @@ export default function BarcodeSales() {
         }
     } else if (isScan) { isScanLocked.current = true; setScanMessage({ type: 'error', text: "Unknown Product" }); setTimeout(() => { setScanMessage(null); isScanLocked.current = false; }, 2000); }
   };
-
-  const lineKey = (id: string, variant?: string, color?: string) => getStockBucketKey(id, variant, color);
 
   const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
     setCart(prev => {
@@ -197,7 +226,16 @@ export default function BarcodeSales() {
             return prev.map(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(product.id, selectedVariant, selectedColor) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
+        return [...prev, {
+          ...product,
+          buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
+          sellPrice: getResolvedSellPriceForCombination(product, selectedVariant, selectedColor),
+          quantity: qty,
+          discountPercent: 0,
+          discountAmount: 0,
+          selectedVariant: selectedVariant || NO_VARIANT,
+          selectedColor: selectedColor || NO_COLOR
+        }];
     });
   };
 
@@ -209,7 +247,10 @@ export default function BarcodeSales() {
       const newQty = item.quantity + delta;
       if (newQty <= 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
       if (delta > 0) {
-          if (isReturnMode) { const sold = product.totalSold || 0; if (sold < newQty) { setCartError(`Max return: ${sold}`); return; } }
+          if (isReturnMode) {
+            const sold = getReturnableQty(id, variant, color);
+            if (sold < newQty) { setCartError(`Max return: ${sold}`); return; }
+          }
           else {
             const availableStock = getLineAvailableStock(product, variant, color);
             if (availableStock < newQty) { setCartError(`Stock limit: ${availableStock}`); return; }
@@ -227,7 +268,7 @@ export default function BarcodeSales() {
       if (num < 0) return;
       if (num === 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
       if (isReturnMode) {
-          const sold = product.totalSold || 0;
+          const sold = getReturnableQty(id, variant, color);
           if (sold < num) { setCartError(`Max return: ${sold}`); return; }
       } else {
           const availableStock = getLineAvailableStock(product, variant, color);
@@ -316,13 +357,12 @@ export default function BarcodeSales() {
       }
       if (isReturnMode && finalCustomer) {
           for (const item of cart) {
-              const bought = transactions
-                .filter(t => t.customerId === finalCustomer?.id && t.type === 'sale')
-                .reduce((acc, t) => acc + t.items.filter(i => i.id === item.id).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
-              const returned = transactions
-                .filter(t => t.customerId === finalCustomer?.id && t.type === 'return')
-                .reduce((acc, t) => acc + t.items.filter(i => i.id === item.id).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
-              if ((bought - returned) < item.quantity) { setCheckoutError(`${finalCustomer.name} has only bought ${bought - returned} available to return.`); return; }
+              const returnableForCustomer = getReturnableQty(item.id, item.selectedVariant, item.selectedColor, finalCustomer.id);
+              if (returnableForCustomer < item.quantity) {
+                const label = formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor);
+                setCheckoutError(`${finalCustomer.name} can return only ${returnableForCustomer} of ${label}.`);
+                return;
+              }
           }
       }
       if (paymentMethod === 'Credit' && !finalCustomer) { setCheckoutError("Credit requires a customer."); return; }
@@ -409,6 +449,7 @@ export default function BarcodeSales() {
                           return (
                               <div key={`${row.variant}-${row.color}-${idx}`} className="flex items-center justify-between border rounded p-2">
                                   <div><div className="font-medium text-sm">{label}</div><div className="text-xs text-muted-foreground">Stock: {row.stock}</div></div>
+                                  <div className="text-sm font-semibold">₹{row.sellPrice}</div>
                                   <div className="flex items-center gap-2">
                                       <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty <= 0} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.max(0, r.qty - 1) } : r) }))}><Minus className="w-3 h-3" /></Button>
                                       <div className="w-8 text-center text-sm font-bold">{row.qty}</div>
