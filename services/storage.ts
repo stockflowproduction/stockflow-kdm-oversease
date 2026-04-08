@@ -15,11 +15,13 @@ import {
   PurchaseOrder,
   PurchaseOrderLine,
   PurchaseParty,
+  DeletedTransactionRecord,
 } from '../types';
 import { db, auth } from './firebase';
-import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction } from 'firebase/firestore';
+import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
+import { financeLog } from './financeLogger';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -172,6 +174,7 @@ const writeAuditEvent = async (operation: AuditOperation, payload: Record<string
 const getProductsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'products');
 const getCustomersCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'customers');
 const getTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'transactions');
+const getDeletedTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'deletedTransactions');
 const getOperationCommitsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'operationCommits');
 
 const ensureStoreInitializedForCurrentUser = async (
@@ -248,6 +251,14 @@ const readTransactionsFromSubcollection = async (uid: string): Promise<Transacti
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 };
 
+const readDeletedTransactionsFromSubcollection = async (uid: string): Promise<DeletedTransactionRecord[]> => {
+  if (!db) return [];
+  const snap = await getDocs(getDeletedTransactionsCollectionRef(uid));
+  const deleted = snap.docs.map(d => ({ ...(d.data() as DeletedTransactionRecord), id: d.id }));
+  financeLog.load('BIN_LOAD', { source: 'subcollection_read', count: deleted.length });
+  return deleted.sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
+};
+
 const upsertProductInSubcollection = async (product: Product, reason: string) => {
   const user = await assertCloudWriteReady(reason);
   await setDoc(doc(db!, 'stores', user.uid, 'products', product.id), sanitizeData(product), { merge: true });
@@ -273,9 +284,347 @@ const upsertTransactionInSubcollection = async (transaction: Transaction, reason
   await setDoc(doc(db!, 'stores', user.uid, 'transactions', transaction.id), sanitizeData(transaction), { merge: true });
 };
 
-const deleteTransactionInSubcollection = async (transactionId: string, reason: string) => {
+const getDeleteReversalTransactionType = (type: Transaction['type']): Transaction['type'] | null => {
+  if (type === 'sale') return 'return';
+  if (type === 'return') return 'sale';
+  return null;
+};
+
+const toFiniteNumber = (value: unknown, fallback = 0) => Number.isFinite(value) ? Number(value) : fallback;
+const toFiniteNonNegative = (value: unknown) => Math.max(0, toFiniteNumber(value, 0));
+const roundCurrency = (value: number) => Math.round(value * 100) / 100;
+const logMoney = (value: unknown) => roundCurrency(toFiniteNumber(value, 0));
+const RETURN_HANDLING_MODES = ['reduce_due', 'refund_cash', 'refund_online', 'store_credit'] as const;
+type ReturnHandlingMode = typeof RETURN_HANDLING_MODES[number];
+const isReturnHandlingMode = (value: unknown): value is ReturnHandlingMode =>
+  typeof value === 'string' && (RETURN_HANDLING_MODES as readonly string[]).includes(value);
+export const getResolvedReturnHandlingMode = (transaction: Transaction): ReturnHandlingMode => {
+  if (transaction.type !== 'return') return 'refund_cash';
+  if (isReturnHandlingMode(transaction.returnHandlingMode)) return transaction.returnHandlingMode;
+  if (transaction.paymentMethod === 'Online') return 'refund_online';
+  if (transaction.paymentMethod === 'Credit') return 'reduce_due';
+  return 'refund_cash';
+};
+const getReturnFinancialEffects = (transaction: Transaction) => {
+  const mode = getResolvedReturnHandlingMode(transaction);
+  return {
+    mode,
+    affectsCash: mode === 'refund_cash',
+    affectsDue: mode === 'reduce_due' || mode === 'store_credit',
+    affectsStoreCredit: mode === 'store_credit',
+  };
+};
+const getSaleScenarioClass = (settlement: { cashPaid: number; onlinePaid: number; creditDue: number }) => {
+  const hasCash = settlement.cashPaid > 0;
+  const hasOnline = settlement.onlinePaid > 0;
+  const hasDue = settlement.creditDue > 0;
+  if (hasDue && (hasCash || hasOnline)) return 'sale_split';
+  if (hasDue) return 'sale_credit';
+  if (hasCash && hasOnline) return 'sale_cash_online';
+  if (hasOnline) return 'sale_online';
+  return 'sale_cash';
+};
+const getPaymentScenarioClass = (paymentMethod?: Transaction['paymentMethod']) => paymentMethod === 'Online' ? 'payment_online' : 'payment_cash';
+const getTimestampHintFromTransactionId = (transactionId: string) => {
+  const asNumber = Number(transactionId);
+  if (!Number.isFinite(asNumber)) return Number.NaN;
+  if (asNumber < 946684800000 || asNumber > 4102444800000) return Number.NaN;
+  return asNumber;
+};
+const getRequestedStoreCreditUsed = (transaction: Transaction) => {
+  if (transaction.type !== 'sale') return 0;
+  return Math.min(toFiniteNonNegative(transaction.storeCreditUsed), Math.abs(toFiniteNumber(transaction.total, 0)));
+};
+const deriveLegacySaleSettlement = (
+  paymentMethod: Transaction['paymentMethod'],
+  payableAmount: number
+): { cashPaid: number; onlinePaid: number; creditDue: number } => {
+  if (paymentMethod === 'Online') return { cashPaid: 0, onlinePaid: payableAmount, creditDue: 0 };
+  if (paymentMethod === 'Credit') return { cashPaid: 0, onlinePaid: 0, creditDue: payableAmount };
+  return { cashPaid: payableAmount, onlinePaid: 0, creditDue: 0 };
+};
+export const getSaleSettlementBreakdown = (transaction: Transaction): { cashPaid: number; onlinePaid: number; creditDue: number } => {
+  if (transaction.type !== 'sale') return { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
+
+  const payableAfterStoreCredit = Math.max(0, Math.abs(toFiniteNumber(transaction.total, 0)) - getRequestedStoreCreditUsed(transaction));
+  if (!transaction.saleSettlement) {
+    return deriveLegacySaleSettlement(transaction.paymentMethod, payableAfterStoreCredit);
+  }
+
+  let cashPaid = toFiniteNonNegative(transaction.saleSettlement.cashPaid);
+  let onlinePaid = toFiniteNonNegative(transaction.saleSettlement.onlinePaid);
+  let creditDue = toFiniteNonNegative(transaction.saleSettlement.creditDue);
+
+  const paidNow = cashPaid + onlinePaid;
+  if (paidNow > payableAfterStoreCredit) {
+    const scale = payableAfterStoreCredit <= 0 ? 0 : (payableAfterStoreCredit / paidNow);
+    cashPaid = roundCurrency(cashPaid * scale);
+    onlinePaid = roundCurrency(onlinePaid * scale);
+    creditDue = roundCurrency(Math.max(0, payableAfterStoreCredit - cashPaid - onlinePaid));
+  } else {
+    const remainingAfterImmediate = Math.max(0, payableAfterStoreCredit - paidNow);
+    creditDue = roundCurrency(Math.min(creditDue, remainingAfterImmediate));
+    creditDue = roundCurrency(creditDue + Math.max(0, remainingAfterImmediate - creditDue));
+  }
+
+  return {
+    cashPaid: roundCurrency(cashPaid),
+    onlinePaid: roundCurrency(onlinePaid),
+    creditDue: roundCurrency(creditDue),
+  };
+};
+const getClampedStoreCreditUsed = (transaction: Transaction, customer: Customer) => {
+  if (transaction.type !== 'sale') return 0;
+  const requested = toFiniteNonNegative(transaction.storeCreditUsed);
+  const total = Math.abs(toFiniteNumber(transaction.total, 0));
+  const available = toFiniteNonNegative(customer.storeCredit);
+  return Math.min(requested, total, available);
+};
+
+const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Transaction[]): { totalDue: number; storeCredit: number; activeSalesTotal: number; activePaymentsTotal: number; activeReturnsTotal: number } => {
+  let runningBalance = 0;
+  let activeSalesTotal = 0;
+  let activePaymentsTotal = 0;
+  let activeReturnsTotal = 0;
+
+  const customerTransactionsAsc = transactions
+    .filter(tx => tx.customerId === customerId)
+    .sort((a, b) => {
+      const aTime = Number.isFinite(new Date(a.date).getTime()) ? new Date(a.date).getTime() : getTimestampHintFromTransactionId(a.id);
+      const bTime = Number.isFinite(new Date(b.date).getTime()) ? new Date(b.date).getTime() : getTimestampHintFromTransactionId(b.id);
+      const safeATime = Number.isFinite(aTime) ? aTime : 0;
+      const safeBTime = Number.isFinite(bTime) ? bTime : 0;
+      return safeATime - safeBTime;
+    });
+
+  customerTransactionsAsc
+    .forEach((tx) => {
+      const amount = Math.abs(toFiniteNumber(tx.total, 0));
+      if (tx.type === 'sale') {
+        const settlement = getSaleSettlementBreakdown(tx);
+        activeSalesTotal += amount;
+        runningBalance = roundCurrency(runningBalance + settlement.creditDue);
+      } else if (tx.type === 'payment') {
+        activePaymentsTotal += amount;
+        runningBalance = roundCurrency(runningBalance - amount);
+      } else if (tx.type === 'return') {
+        activeReturnsTotal += amount;
+        const returnEffects = getReturnFinancialEffects(tx);
+        if (returnEffects.mode === 'refund_cash') {
+          runningBalance = runningBalance > 0
+            ? roundCurrency(runningBalance - amount)
+            : roundCurrency(runningBalance + amount);
+        } else if (returnEffects.affectsDue) {
+          runningBalance = roundCurrency(runningBalance - amount);
+        }
+      }
+    });
+
+  const normalizedBalance = roundCurrency(runningBalance);
+  const totalDue = normalizedBalance > 0 ? normalizedBalance : 0;
+  const storeCredit = normalizedBalance < 0 ? Math.abs(normalizedBalance) : 0;
+  return { totalDue, storeCredit, activeSalesTotal, activePaymentsTotal, activeReturnsTotal };
+};
+
+const normalizeCustomerBalance = (totalDue: unknown, storeCredit: unknown): { totalDue: number; storeCredit: number } => {
+  const due = toFiniteNumber(totalDue, 0);
+  const credit = toFiniteNonNegative(storeCredit);
+  const net = due - credit;
+  if (net >= 0) return { totalDue: net, storeCredit: 0 };
+  return { totalDue: 0, storeCredit: Math.abs(net) };
+};
+
+const applyCustomerBalanceDelta = (customer: Customer, dueDelta: number): { totalDue: number; storeCredit: number } => {
+  const baseDue = toFiniteNonNegative(customer.totalDue);
+  const baseCredit = toFiniteNonNegative(customer.storeCredit);
+  return normalizeCustomerBalance(baseDue + dueDelta, baseCredit);
+};
+
+const reconcileCustomerAfterDelete = (customer: Customer, transaction: Transaction, activeTransactions: Transaction[]): Customer => {
+  const amount = Math.abs(transaction.total || 0);
+  let nextTotalSpend = Number(customer.totalSpend || 0);
+  let nextVisitCount = Number(customer.visitCount || 0);
+  let dueDelta = 0;
+
+  if (transaction.type === 'sale') {
+    nextTotalSpend = Math.max(0, nextTotalSpend - amount);
+    nextVisitCount = Math.max(0, nextVisitCount - 1);
+    if (transaction.paymentMethod === 'Credit') dueDelta -= amount;
+  } else if (transaction.type === 'return') {
+    nextTotalSpend = Math.max(0, nextTotalSpend + amount);
+    if (transaction.paymentMethod === 'Credit') dueDelta += amount;
+  } else if (transaction.type === 'payment') {
+    dueDelta += amount;
+  }
+
+  const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, activeTransactions);
+
+  return {
+    ...customer,
+    totalSpend: nextTotalSpend,
+    totalDue: rebuilt.totalDue,
+    storeCredit: rebuilt.storeCredit,
+    visitCount: nextVisitCount,
+  };
+};
+
+const reconcileStateAfterDeleteTransaction = (state: AppState, transaction: Transaction): AppState => {
+  const nextTransactions = state.transactions.filter(t => t.id !== transaction.id);
+
+  const nextProducts = (transaction.type === 'sale' || transaction.type === 'return')
+    ? state.products.map(product => applyDeleteStockReversalToProduct(product, transaction))
+    : [...state.products];
+
+  const nextCustomers = transaction.customerId
+    ? state.customers.map(customer => customer.id === transaction.customerId ? reconcileCustomerAfterDelete(customer, transaction, nextTransactions) : customer)
+    : [...state.customers];
+
+  return {
+    ...state,
+    transactions: nextTransactions,
+    products: nextProducts,
+    customers: nextCustomers,
+  };
+};
+
+const getCustomerImpactSnapshot = (state: AppState, customerId?: string): { customerDue: number; customerStoreCredit: number } => {
+  if (!customerId) return { customerDue: 0, customerStoreCredit: 0 };
+  const customer = state.customers.find(c => c.id === customerId);
+  return {
+    customerDue: toFiniteNonNegative(customer?.totalDue),
+    customerStoreCredit: toFiniteNonNegative(customer?.storeCredit),
+  };
+};
+
+const buildDeleteImpactSnapshot = (state: AppState, customerId?: string) => {
+  const customerImpact = getCustomerImpactSnapshot(state, customerId);
+  return {
+    ...customerImpact,
+    activeTransactionsCount: state.transactions.length,
+    estimatedCashFromActiveTransactions: computeCashEstimateFromTransactions(state.transactions),
+  };
+};
+
+const buildDeletedTransactionRecord = ({
+  transaction,
+  beforeState,
+  afterState,
+}: {
+  transaction: Transaction;
+  beforeState: AppState;
+  afterState: AppState;
+}): DeletedTransactionRecord => {
+  const nowIso = new Date().toISOString();
+  const user = auth?.currentUser;
+  return {
+    id: `bin_${transaction.id}_${Date.now()}`,
+    originalTransactionId: transaction.id,
+    originalTransaction: transaction,
+    deletedAt: nowIso,
+    deletedBy: user?.uid || user?.email || 'unknown',
+    deletedByRole: user ? 'admin' : 'unknown',
+    type: transaction.type,
+    customerId: transaction.customerId,
+    customerName: transaction.customerName,
+    amount: Math.abs(transaction.total || 0),
+    paymentMethod: transaction.paymentMethod,
+    itemSnapshot: transaction.items || [],
+    beforeImpact: buildDeleteImpactSnapshot(beforeState, transaction.customerId),
+    afterImpact: buildDeleteImpactSnapshot(afterState, transaction.customerId),
+  };
+};
+
+const deleteTransactionAndReconcileInSubcollection = async (transaction: Transaction, deletedRecord: DeletedTransactionRecord, reason: string) => {
   const user = await assertCloudWriteReady(reason);
-  await deleteDoc(doc(db!, 'stores', user.uid, 'transactions', transactionId));
+  const preloadedCustomerTransactionsForLedger = transaction.customerId
+    ? (await getDocs(query(getTransactionsCollectionRef(user.uid), where('customerId', '==', transaction.customerId)))).docs
+      .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
+      .filter(tx => tx.id !== transaction.id && !((tx as any).isDeleted))
+    : [];
+
+  await runFirestoreTransaction(db!, async (firestoreTx) => {
+    const transactionRef = doc(db!, 'stores', user.uid, 'transactions', transaction.id);
+    const deletedRef = doc(db!, 'stores', user.uid, 'deletedTransactions', deletedRecord.id);
+    const transactionSnap = await firestoreTx.get(transactionRef);
+    if (!transactionSnap.exists()) return;
+
+    const reversalType = getDeleteReversalTransactionType(transaction.type);
+    const bucketedItems = reversalType ? aggregateCartItemsByStockBucket(transaction.items || []) : [];
+    const productIds = Array.from(new Set(bucketedItems.map(item => item.productId)));
+
+    const productSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
+    for (const productId of productIds) {
+      const productRef = doc(db!, 'stores', user.uid, 'products', productId);
+      const productSnap = await firestoreTx.get(productRef);
+      productSnapshots.set(productId, productSnap);
+    }
+
+    let customerSnap: Awaited<ReturnType<typeof firestoreTx.get>> | null = null;
+    if (transaction.customerId) {
+      const customerRef = doc(db!, 'stores', user.uid, 'customers', transaction.customerId);
+      customerSnap = await firestoreTx.get(customerRef);
+    }
+
+    const statsSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
+    if (transaction.customerId && reversalType) {
+      for (const productId of productIds) {
+        const statsDocId = getCustomerProductStatsDocId(transaction.customerId, productId);
+        const statsRef = doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId);
+        const statsSnap = await firestoreTx.get(statsRef);
+        statsSnapshots.set(statsDocId, statsSnap);
+      }
+    }
+
+    if (reversalType) {
+      for (const productId of productIds) {
+        const productRef = doc(db!, 'stores', user.uid, 'products', productId);
+        const productSnap = productSnapshots.get(productId);
+        if (!productSnap?.exists()) continue;
+        const currentProduct = { ...(productSnap.data() as Product), id: productSnap.id };
+        const reconciledProduct = applyDeleteStockReversalToProduct(currentProduct, transaction);
+        firestoreTx.set(productRef, sanitizeData(reconciledProduct), { merge: true });
+      }
+    }
+
+    if (transaction.customerId && customerSnap?.exists()) {
+      const customerRef = doc(db!, 'stores', user.uid, 'customers', transaction.customerId);
+      const currentCustomer = { ...(customerSnap.data() as Customer), id: customerSnap.id };
+      const reconciledCustomer = reconcileCustomerAfterDelete(currentCustomer, transaction, preloadedCustomerTransactionsForLedger);
+      firestoreTx.set(customerRef, sanitizeData(reconciledCustomer), { merge: true });
+    }
+
+    if (transaction.customerId && reversalType) {
+      for (const productId of productIds) {
+        const qty = bucketedItems
+          .filter(item => item.productId === productId)
+          .reduce((sum, item) => sum + item.quantity, 0);
+        const statsDocId = getCustomerProductStatsDocId(transaction.customerId, productId);
+        const statsRef = doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId);
+        const statsSnap = statsSnapshots.get(statsDocId);
+        const stats = statsSnap?.exists()
+          ? (statsSnap.data() as { soldQty?: number; returnedQty?: number })
+          : { soldQty: 0, returnedQty: 0 };
+        const soldQty = Math.max(0, Number.isFinite(stats.soldQty) ? Number(stats.soldQty) : 0);
+        const returnedQty = Math.max(0, Number.isFinite(stats.returnedQty) ? Number(stats.returnedQty) : 0);
+
+        const nextStats = transaction.type === 'sale'
+          ? { soldQty: Math.max(0, soldQty - qty), returnedQty }
+          : { soldQty, returnedQty: Math.max(0, returnedQty - qty) };
+
+        firestoreTx.set(statsRef, sanitizeData({
+          customerId: transaction.customerId,
+          productId,
+          soldQty: nextStats.soldQty,
+          returnedQty: nextStats.returnedQty,
+          updatedAt: new Date().toISOString(),
+          migrationSource: statsSnap?.exists() ? 'transaction_delete_reconcile' : 'transaction_delete_bootstrap',
+        }), { merge: true });
+      }
+    }
+
+    firestoreTx.set(deletedRef, sanitizeData(deletedRecord), { merge: true });
+    firestoreTx.delete(transactionRef);
+  });
 };
 
 
@@ -292,6 +641,11 @@ const commitProcessTransactionAtomically = async ({
   allowLegacySeed: boolean;
 }): Promise<{ created: boolean; committedProducts: Product[]; committedCustomer: Customer | null }> => {
   const user = await assertCloudWriteReady('processTransaction_atomic');
+  const preloadedCustomerTransactionsForLedger = transaction.customerId
+    ? (await getDocs(query(getTransactionsCollectionRef(user.uid), where('customerId', '==', transaction.customerId)))).docs
+      .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
+      .filter(tx => !((tx as any).isDeleted))
+    : [];
 
   return runFirestoreTransaction(db!, async (firestoreTx) => {
     const transactionRef = doc(db!, 'stores', user.uid, 'transactions', transaction.id);
@@ -380,35 +734,59 @@ const commitProcessTransactionAtomically = async ({
 
       const currentCustomer = { ...(currentCustomerSnap.data() as Customer), id: currentCustomerSnap.id };
       const amount = Math.abs(transaction.total);
+      const storeCreditUsed = getClampedStoreCreditUsed(transaction, currentCustomer);
       let newTotalSpend = currentCustomer.totalSpend;
-      let newTotalDue = currentCustomer.totalDue;
       let newVisitCount = currentCustomer.visitCount;
       let newLastVisit = currentCustomer.lastVisit;
+      let totalDue = toFiniteNonNegative(currentCustomer.totalDue);
+      let storeCredit = toFiniteNonNegative(currentCustomer.storeCredit);
+      let dueDelta = 0;
 
       if (transaction.type === 'sale') {
+        const settlement = getSaleSettlementBreakdown(transaction);
         newTotalSpend += amount;
         newVisitCount += 1;
         newLastVisit = new Date().toISOString();
-        if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
+        totalDue = Math.max(0, totalDue + settlement.creditDue);
+        storeCredit = Math.max(0, storeCredit - storeCreditUsed);
       } else if (transaction.type === 'return') {
+        const returnEffects = getReturnFinancialEffects(transaction);
+        const dueBefore = toFiniteNonNegative(currentCustomer.totalDue);
+        if (returnEffects.mode === 'reduce_due' && dueBefore <= MONEY_EPSILON) {
+          console.warn('[FIN][GUARD][RETURN_INVALID]', {
+            txId: transaction.id,
+            customerId: currentCustomer.id,
+            returnHandlingMode: returnEffects.mode,
+            dueBefore: logMoney(dueBefore),
+            attemptedReduction: logMoney(amount),
+          });
+          failValidation('RETURN_REDUCE_DUE_NOT_ALLOWED', 'Cannot reduce due because customer has no outstanding balance. Use store credit or refund instead.', {
+            customerId: currentCustomer.id,
+            dueBefore,
+            attemptedReduction: amount,
+          });
+        }
         newTotalSpend -= amount;
-        if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
+        if (returnEffects.affectsDue) {
+          dueDelta -= amount;
+        }
       } else if (transaction.type === 'payment') {
-        newTotalDue -= amount;
+        dueDelta -= amount;
         newLastVisit = new Date().toISOString();
       }
-
-      if (newTotalDue < -MONEY_EPSILON) {
-        failValidation('INVALID_CUSTOMER_BALANCE', 'Transaction results in invalid customer due balance.', {
-          customerId: currentCustomer.id,
-          resultingTotalDue: newTotalDue,
-        });
+      if (transaction.type !== 'sale') {
+        const updated = applyCustomerBalanceDelta(currentCustomer, dueDelta);
+        totalDue = updated.totalDue;
+        storeCredit = updated.storeCredit;
       }
-
+      const rebuiltBalance = rebuildCustomerBalanceFromLedger(currentCustomer.id, [transaction, ...preloadedCustomerTransactionsForLedger]);
+      totalDue = rebuiltBalance.totalDue;
+      storeCredit = rebuiltBalance.storeCredit;
       committedCustomer = {
         ...currentCustomer,
         totalSpend: newTotalSpend,
-        totalDue: Math.max(0, newTotalDue),
+        totalDue,
+        storeCredit,
         visitCount: newVisitCount,
         lastVisit: newLastVisit,
       };
@@ -505,6 +883,7 @@ const defaultProfile: StoreProfile = {
 const initialData: AppState = {
   products: [],
   transactions: [],
+  deletedTransactions: [],
   categories: [],
   customers: [],
   profile: defaultProfile,
@@ -524,12 +903,99 @@ const initialData: AppState = {
   colorsMaster: []
 };
 
+const computeCashEstimateFromTransactions = (transactions: Transaction[]) => transactions.reduce((sum, tx) => {
+  const amount = Math.abs(tx.total);
+  if (tx.type === 'sale') {
+    if (tx.paymentMethod === 'Cash') return sum + amount;
+    return sum;
+  }
+  if (tx.type === 'payment') {
+    if (tx.paymentMethod === 'Cash') return sum + amount;
+    return sum;
+  }
+  if (tx.type === 'return' && getReturnFinancialEffects(tx).affectsCash) return sum - amount;
+  return sum;
+}, 0);
+
+const logLoadedState = (state: AppState) => {
+  const openShift = (state.cashSessions || []).find(s => s.status === 'open');
+  financeLog.load('STATE', {
+    productsCount: state.products.length,
+    customersCount: state.customers.length,
+    transactionsCount: state.transactions.length,
+    totalDue: state.customers.reduce((sum, c) => sum + (c.totalDue || 0), 0),
+    totalCashEstimate: computeCashEstimateFromTransactions(state.transactions) - (state.expenses || []).reduce((sum, e) => sum + (e.amount || 0), 0),
+    openShift: openShift ? { id: openShift.id, openingBalance: openShift.openingBalance, startTime: openShift.startTime } : null,
+  });
+  if (!hasLoggedInitKpiSnapshot) {
+    logKpiSnapshot('INIT', state);
+    hasLoggedInitKpiSnapshot = true;
+  }
+};
+
+const buildKpiSnapshotPayload = (state: AppState, windowType: 'init' | 'after_tx_create' | 'after_tx_update' | 'after_tx_delete' | 'all_time' = 'all_time') => {
+  const saleTransactions = state.transactions.filter(tx => tx.type === 'sale');
+  const paymentTransactions = state.transactions.filter(tx => tx.type === 'payment');
+  const returnTransactions = state.transactions.filter(tx => tx.type === 'return');
+  const saleSettlementTotals = saleTransactions.reduce((acc, tx) => {
+    const settlement = getSaleSettlementBreakdown(tx);
+    acc.cashPaid += settlement.cashPaid;
+    acc.onlinePaid += settlement.onlinePaid;
+    acc.creditDue += settlement.creditDue;
+    acc.totalSales += Math.abs(tx.total);
+    return acc;
+  }, { cashPaid: 0, onlinePaid: 0, creditDue: 0, totalSales: 0 });
+  const cashCollections = paymentTransactions
+    .filter(tx => tx.paymentMethod === 'Cash')
+    .reduce((sum, tx) => sum + Math.abs(tx.total), 0);
+  const cashRefunds = returnTransactions
+    .filter(tx => getResolvedReturnHandlingMode(tx) === 'refund_cash')
+    .reduce((sum, tx) => sum + Math.abs(tx.total), 0);
+  const onlineCollections = paymentTransactions
+    .filter(tx => tx.paymentMethod === 'Online')
+    .reduce((sum, tx) => sum + Math.abs(tx.total), 0);
+  const returns = returnTransactions.reduce((sum, tx) => sum + Math.abs(tx.total), 0);
+  const expenses = (state.expenses || []).reduce((sum, expense) => sum + (expense.amount || 0), 0);
+  const cogs = saleTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const currentDueTotal = state.customers.reduce((sum, customer) => sum + toFiniteNonNegative(customer.totalDue), 0);
+  const currentStoreCreditTotal = state.customers.reduce((sum, customer) => sum + toFiniteNonNegative(customer.storeCredit), 0);
+  const sessionCashTotal = saleSettlementTotals.cashPaid + cashCollections - cashRefunds - expenses;
+  const profitBeforeClose = saleSettlementTotals.totalSales - returns - cogs - expenses;
+
+  return {
+    windowType,
+    cashInflow: logMoney(saleSettlementTotals.cashPaid + cashCollections),
+    creditSales: logMoney(saleSettlementTotals.creditDue),
+    onlineSales: logMoney(saleSettlementTotals.onlinePaid),
+    onlineCollections: logMoney(onlineCollections),
+    returns: logMoney(returns),
+    totalSales: logMoney(saleSettlementTotals.totalSales),
+    expenses: logMoney(expenses),
+    profitBeforeClose: logMoney(profitBeforeClose),
+    currentDueTotal: logMoney(currentDueTotal),
+    currentStoreCreditTotal: logMoney(currentStoreCreditTotal),
+    sessionCashTotal: logMoney(sessionCashTotal),
+  };
+};
+
+const logKpiSnapshot = (checkpoint: 'INIT' | 'AFTER_TX_CREATE' | 'AFTER_TX_UPDATE' | 'AFTER_TX_DELETE', state: AppState) => {
+  const windowTypeMap: Record<typeof checkpoint, 'init' | 'after_tx_create' | 'after_tx_update' | 'after_tx_delete'> = {
+    INIT: 'init',
+    AFTER_TX_CREATE: 'after_tx_create',
+    AFTER_TX_UPDATE: 'after_tx_update',
+    AFTER_TX_DELETE: 'after_tx_delete',
+  };
+  console.info(`[FIN][KPI][SNAPSHOT][${checkpoint}]`, buildKpiSnapshotPayload(state, windowTypeMap[checkpoint]));
+};
+
 let memoryState: AppState = { ...initialData };
 let hasInitialSynced = false;
+let hasLoggedInitKpiSnapshot = false;
 let unsubscribeSnapshot: any = null;
 let unsubscribeProductsSnapshot: any = null;
 let unsubscribeCustomersSnapshot: any = null;
 let unsubscribeTransactionsSnapshot: any = null;
+let unsubscribeDeletedTransactionsSnapshot: any = null;
 
 // Listen for auth state changes to trigger sync
 if (auth) {
@@ -547,6 +1013,7 @@ if (auth) {
             storeDocumentExists = false;
             isCustomerProductStatsBackfillComplete = false;
             emitCloudSyncStatus(CLOUD_SYNC_STATUSES.IDLE);
+            hasLoggedInitKpiSnapshot = false;
             if (unsubscribeSnapshot) {
                 unsubscribeSnapshot();
                 unsubscribeSnapshot = null;
@@ -562,6 +1029,10 @@ if (auth) {
             if (unsubscribeTransactionsSnapshot) {
                 unsubscribeTransactionsSnapshot();
                 unsubscribeTransactionsSnapshot = null;
+            }
+            if (unsubscribeDeletedTransactionsSnapshot) {
+                unsubscribeDeletedTransactionsSnapshot();
+                unsubscribeDeletedTransactionsSnapshot = null;
             }
             emitLocalStorageUpdate();
         }
@@ -617,6 +1088,9 @@ const syncFromCloud = async () => {
         if (unsubscribeTransactionsSnapshot) {
             unsubscribeTransactionsSnapshot();
         }
+        if (unsubscribeDeletedTransactionsSnapshot) {
+            unsubscribeDeletedTransactionsSnapshot();
+        }
 
         unsubscribeProductsSnapshot = onSnapshot(getProductsCollectionRef(user.uid), (productsSnap) => {
             const products = productsSnap.docs
@@ -624,7 +1098,7 @@ const syncFromCloud = async () => {
               .filter(p => !((p as any).isDeleted));
 
             memoryState = { ...memoryState, products };
-            console.debug('[migration-trace] products snapshot applied', { snapshotCount: products.length });
+            logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to product subcollection:', error);
@@ -636,7 +1110,7 @@ const syncFromCloud = async () => {
               .filter(c => !((c as any).isDeleted));
 
             memoryState = { ...memoryState, customers };
-            console.debug('[migration-trace] customers snapshot applied', { snapshotCount: customers.length });
+            logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to customer subcollection:', error);
@@ -649,10 +1123,21 @@ const syncFromCloud = async () => {
 
             const sortedTransactions = sortTransactionsDesc(transactions);
             memoryState = { ...memoryState, transactions: sortedTransactions };
-            console.debug('[migration-trace] transactions snapshot applied', { snapshotCount: sortedTransactions.length });
+            logLoadedState(memoryState);
             emitLocalStorageUpdate();
         }, (error) => {
             console.error('Error listening to transaction subcollection:', error);
+        });
+
+        unsubscribeDeletedTransactionsSnapshot = onSnapshot(getDeletedTransactionsCollectionRef(user.uid), (deletedSnap) => {
+            const deletedTransactions = deletedSnap.docs
+              .map(docItem => ({ ...(docItem.data() as DeletedTransactionRecord), id: docItem.id }))
+              .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
+            memoryState = { ...memoryState, deletedTransactions };
+            financeLog.load('BIN_LOAD', { source: 'listener', count: deletedTransactions.length });
+            emitLocalStorageUpdate();
+        }, (error) => {
+            console.error('Error listening to deletedTransactions subcollection:', error);
         });
         
         unsubscribeSnapshot = onSnapshot(docRef, async (docSnap) => {
@@ -668,22 +1153,16 @@ const syncFromCloud = async () => {
                 const subcollectionProducts = await readProductsFromSubcollection(user.uid);
                 const subcollectionCustomers = await readCustomersFromSubcollection(user.uid);
                 const subcollectionTransactions = await readTransactionsFromSubcollection(user.uid);
+                const subcollectionDeletedTransactions = await readDeletedTransactionsFromSubcollection(user.uid);
                 const hydratedProducts = subcollectionProducts;
                 const hydratedCustomers = subcollectionCustomers;
                 const hydratedTransactions = subcollectionTransactions;
-                console.debug('[migration-trace] root hydration merge', {
-                  subProducts: subcollectionProducts.length,
-                  subCustomers: subcollectionCustomers.length,
-                  subTransactions: subcollectionTransactions.length,
-                  finalProducts: hydratedProducts.length,
-                  finalCustomers: hydratedCustomers.length,
-                  finalTransactions: hydratedTransactions.length,
-                });
                 memoryState = {
                     ...initialData,
                     ...cloudData,
                     products: hydratedProducts,
                     transactions: hydratedTransactions,
+                    deletedTransactions: subcollectionDeletedTransactions,
                     categories: cloudData.categories || [],
                     customers: hydratedCustomers,
                     upfrontOrders: cloudData.upfrontOrders || [],
@@ -709,6 +1188,7 @@ const syncFromCloud = async () => {
                 if (!memoryState.profile.invoiceFormat) {
                     memoryState.profile.invoiceFormat = 'standard';
                 }
+                logLoadedState(memoryState);
                 isCloudSynced = true;
                 hasCompletedInitialCloudLoad = true;
                 emitCloudSyncStatus(CLOUD_SYNC_STATUSES.READY);
@@ -889,6 +1369,27 @@ const applyTransactionItemsToProduct = (product: Product, items: CartItem[], tra
   };
 };
 
+const applyDeleteStockReversalToProduct = (product: Product, deletedTransaction: Transaction): Product => {
+  if (deletedTransaction.type === 'payment') return product;
+  const relevantBuckets = aggregateCartItemsByStockBucket(deletedTransaction.items || []).filter(bucket => bucket.productId === product.id);
+  if (!relevantBuckets.length) return product;
+
+  let nextProduct = { ...product };
+  let totalSoldDelta = 0;
+  relevantBuckets.forEach((bucket) => {
+    const stockDelta = deletedTransaction.type === 'sale' ? bucket.quantity : -bucket.quantity;
+    const soldDelta = deletedTransaction.type === 'sale' ? -bucket.quantity : bucket.quantity;
+    totalSoldDelta += soldDelta;
+    nextProduct = applyStockDeltaToProduct(nextProduct, stockDelta, bucket.variant, bucket.color);
+  });
+
+  const result = {
+    ...nextProduct,
+    totalSold: Math.max(0, (product.totalSold || 0) + totalSoldDelta),
+  };
+  return result;
+};
+
 const CLOUDINARY_SIGNATURE_TIMEOUT_MS = 45000;
 const CLOUDINARY_UPLOAD_TIMEOUT_MS = 45000;
 const CLOUDINARY_RETRY_DELAY_MS = 1200;
@@ -999,7 +1500,6 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
   for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
     for (const endpoint of endpoints) {
       try {
-        console.debug('[cloudinary] signature fetch start', { endpoint, attempt });
 
         const response = await withTimeout(
           fetch(endpoint, {
@@ -1037,7 +1537,6 @@ const getCloudinarySignature = async (): Promise<CloudinarySignResponse> => {
           continue;
         }
 
-        console.debug('[cloudinary] signature fetch success', { endpoint, attempt });
         return body;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1068,11 +1567,6 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
 
   for (let attempt = 1; attempt <= CLOUDINARY_MAX_ATTEMPTS; attempt += 1) {
     try {
-      console.debug('[cloudinary] upload request start', {
-        attempt,
-        endpoint: uploadEndpoint
-      });
-
       const formData = new FormData();
       formData.append('file', dataUrl);
       formData.append('timestamp', String(signedParams.timestamp));
@@ -1124,11 +1618,6 @@ const uploadDataUrlToCloudinary = async (dataUrl: string): Promise<string> => {
           console.error('[cloudinary] upload failure', error);
           lastError = error;
         } else {
-          console.debug('[cloudinary] upload request success', {
-            attempt,
-            endpoint: uploadEndpoint,
-            imageUrl: uploadBody.secure_url
-          });
           return uploadBody.secure_url as string;
         }
       }
@@ -1159,17 +1648,7 @@ const uploadProductImageIfNeeded = async (product: Product): Promise<Product> =>
   }
 
   try {
-    console.debug('[cloudinary] Product image upload start', {
-      productId: product.id
-    });
-
     const secureUrl = await uploadDataUrlToCloudinary(product.image);
-
-    console.debug('[cloudinary] Product image upload success', {
-      productId: product.id,
-      imageUrl: secureUrl
-    });
-
     return { ...product, image: secureUrl };
   } catch (error) {
     console.error('[cloudinary] Product image upload failure', {
@@ -1201,7 +1680,7 @@ const syncToCloud = async (data: AppState) => {
 
     try {
         // Keep subcollection-owned entities out of root store writes to avoid array-overwrite blast radius.
-        const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, ...rootStateWithoutMigratedEntities } = data;
+        const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, deletedTransactions: _omitDeletedTransactions, ...rootStateWithoutMigratedEntities } = data;
         const normalizedState = { ...rootStateWithoutMigratedEntities };
         const cleanData = sanitizeData(normalizedState);
         if (!cleanData || typeof cleanData !== 'object' || Object.keys(cleanData).length === 0) {
@@ -1209,10 +1688,6 @@ const syncToCloud = async (data: AppState) => {
           return;
         }
         await setDoc(doc(db, "stores", user.uid), cleanData, { merge: true });
-        console.debug('[firestore] Store sync successful', {
-          uid: user.uid,
-          productsCount: Array.isArray(data.products) ? data.products.length : 0
-        });
     } catch (e) {
         console.error('[firestore] Error syncing to cloud', {
           uid: user.uid,
@@ -1232,9 +1707,12 @@ export const loadData = (): AppState => {
     emitCloudSyncStatus(CLOUD_SYNC_STATUSES.OFFLINE, 'Internet connection required to load live business data.');
     // strict online-first guard: until we have hydrated once from cloud, do not treat local memory defaults as authoritative
     if (!hasCompletedInitialCloudLoad) {
-      return { ...initialData };
+      const bootState = { ...initialData };
+      logLoadedState(bootState);
+      return bootState;
     }
   }
+  logLoadedState(memoryState);
   return memoryState;
 };
 
@@ -1275,12 +1753,29 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
   const previousState = memoryState;
   const suspicious = isSuspiciousDrop(previousState, data);
   if (suspicious.suspicious && !options?.allowDestructive) {
+    const reason = options?.reason || 'saveData';
+    const dangerousDropKeys = suspicious.dangerousDrops.map(([key]) => key);
+    const financeCashSessionAppendLikely = data.cashSessions.length >= previousState.cashSessions.length
+      && (reason.includes('finance') || reason.includes('shift') || dangerousDropKeys.length > 0);
+    console.warn('[FIN][GUARD][DESTRUCTIVE_WRITE]', {
+      blockedAt: new Date().toISOString(),
+      reason,
+      route: typeof window !== 'undefined' ? window.location.hash || window.location.pathname : 'unknown',
+      beforeCounts: suspicious.prevCounts,
+      afterCounts: suspicious.nextCounts,
+      droppedKeys: dangerousDropKeys,
+      dangerousDrops: suspicious.dangerousDrops,
+      cashSessionsBefore: previousState.cashSessions.length,
+      cashSessionsAfter: data.cashSessions.length,
+      financeCashSessionAppendLikely,
+      staleSnapshotLikely: dangerousDropKeys.length > 0 && data.cashSessions.length >= 1,
+    });
     await writeAuditEvent('BLOCKED_WRITE', {
       reason: 'suspicious_count_drop',
       drops: suspicious.dangerousDrops,
       beforeCounts: suspicious.prevCounts,
       afterCounts: suspicious.nextCounts,
-      routeContext: options?.reason || 'saveData',
+      routeContext: reason,
     });
     const err = new Error('Blocked suspicious destructive write. Explicit privileged flow required.');
     emitDataOpStatus({ phase: DATA_OP_PHASES.ERROR, op: options?.reason || 'saveData', entity: 'state', error: err.message });
@@ -1291,6 +1786,7 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
 
   if (!db) {
     memoryState = data;
+    logLoadedState(memoryState);
     emitLocalStorageUpdate();
     emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: options?.reason || 'saveData', entity: 'state', message: 'Saved.' });
     return;
@@ -1299,6 +1795,7 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
   try {
     await syncToCloud(data);
     memoryState = data;
+    logLoadedState(memoryState);
     emitLocalStorageUpdate();
     await writeAuditEvent(options?.auditOperation || 'UPDATE', {
       routeContext: options?.reason || 'saveData',
@@ -1677,6 +2174,47 @@ const assertTransactionFinancials = (transaction: Transaction) => {
       expectedTotal: expectedSignedTotal
     });
   }
+
+  if (transaction.type === 'sale' && transaction.saleSettlement) {
+    const cashPaid = toFiniteNumber(transaction.saleSettlement.cashPaid, Number.NaN);
+    const onlinePaid = toFiniteNumber(transaction.saleSettlement.onlinePaid, Number.NaN);
+    const creditDue = toFiniteNumber(transaction.saleSettlement.creditDue, Number.NaN);
+    if (![cashPaid, onlinePaid, creditDue].every(value => Number.isFinite(value) && value >= 0)) {
+      console.warn('[FIN][GUARD][INVALID_SETTLEMENT_FIELDS]', { txId: transaction.id, saleSettlement: transaction.saleSettlement });
+      failValidation('INVALID_SALE_SETTLEMENT_FIELDS', 'Sale settlement fields must be non-negative finite numbers.', {
+        saleSettlement: transaction.saleSettlement,
+      });
+    }
+    const storeCreditUsed = getRequestedStoreCreditUsed(transaction);
+    const expectedPayable = Math.max(0, Math.abs(transaction.total) - storeCreditUsed);
+    const settlementTotal = cashPaid + onlinePaid + creditDue;
+    if (Math.abs(settlementTotal - expectedPayable) > MONEY_EPSILON) {
+      console.warn('[FIN][GUARD][INVALID_SETTLEMENT_TOTAL]', { txId: transaction.id, expectedPayable, settlementTotal });
+      failValidation('INVALID_SALE_SETTLEMENT_TOTAL', 'Sale settlement must match payable after store credit.', {
+        expectedPayable,
+        settlementTotal,
+        saleSettlement: transaction.saleSettlement,
+      });
+    }
+  }
+
+  if (transaction.type === 'return') {
+    if (transaction.returnHandlingMode !== undefined && !isReturnHandlingMode(transaction.returnHandlingMode)) {
+      console.warn('[FIN][GUARD][INVALID_RETURN_MODE]', { txId: transaction.id, returnHandlingMode: transaction.returnHandlingMode });
+      failValidation('INVALID_RETURN_HANDLING_MODE', 'Return handling mode is invalid.', { returnHandlingMode: transaction.returnHandlingMode });
+    }
+    const mode = getResolvedReturnHandlingMode(transaction);
+    if ((mode === 'reduce_due' || mode === 'store_credit') && !transaction.customerId) {
+      console.warn('[FIN][GUARD][RETURN_MODE_REQUIRES_CUSTOMER]', { txId: transaction.id, mode });
+      failValidation('RETURN_MODE_REQUIRES_CUSTOMER', 'Selected return mode requires customer.', { mode });
+    }
+  } else if (transaction.returnHandlingMode !== undefined) {
+    console.warn('[FIN][GUARD][RETURN_MODE_FOR_NON_RETURN]', { txId: transaction.id, transactionType: transaction.type, returnHandlingMode: transaction.returnHandlingMode });
+    failValidation('RETURN_MODE_FOR_NON_RETURN', 'Return handling mode is only valid for return transactions.', {
+      transactionType: transaction.type,
+      returnHandlingMode: transaction.returnHandlingMode,
+    });
+  }
 };
 
 const assertTransactionInventoryRules = (transaction: Transaction, products: Product[], historicalTransactions: Transaction[]) => {
@@ -1734,11 +2272,13 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
 export const addCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers);
+    const { totalDue, storeCredit } = normalizeCustomerBalance(customer.totalDue, customer.storeCredit);
 
     const newCustomer = {
       ...customer,
       totalSpend: Number.isFinite(customer.totalSpend) ? Math.max(0, customer.totalSpend) : 0,
-      totalDue: Number.isFinite(customer.totalDue) ? Math.max(0, customer.totalDue) : 0,
+      totalDue,
+      storeCredit,
       visitCount: Number.isFinite(customer.visitCount) ? Math.max(0, Math.floor(customer.visitCount)) : 0,
       lastVisit: customer.lastVisit || new Date().toISOString(),
     };
@@ -1772,19 +2312,25 @@ export const addCustomer = (customer: Customer): Customer[] => {
 export const updateCustomer = (customer: Customer): Customer[] => {
     const data = loadData();
     assertCustomerPayload(customer, data.customers.filter(c => c.id !== customer.id));
-    const newCustomers = data.customers.map(c => c.id === customer.id ? customer : c);
+    const { totalDue, storeCredit } = normalizeCustomerBalance(customer.totalDue, customer.storeCredit);
+    const normalizedCustomer: Customer = {
+      ...customer,
+      totalDue,
+      storeCredit,
+    };
+    const newCustomers = data.customers.map(c => c.id === customer.id ? normalizedCustomer : c);
 
     if (!db) {
       void saveData({ ...data, customers: newCustomers }, { reason: 'updateCustomer_local_fallback', auditOperation: 'UPDATE' });
       return newCustomers;
     }
 
-    void upsertCustomerInSubcollection(customer, 'updateCustomer')
+    void upsertCustomerInSubcollection(normalizedCustomer, 'updateCustomer')
       .then(() => syncToCloud({ ...data }))
       .then(() => writeAuditEvent('UPDATE', {
         reason: 'updateCustomer_subcollection',
         migrationPhase: CUSTOMERS_MIGRATION_PHASE,
-        customerId: customer.id,
+        customerId: normalizedCustomer.id,
         customersCount: newCustomers.length,
       }))
       .then(() => {
@@ -2385,7 +2931,12 @@ export const receivePurchaseOrder = async (orderId: string, method: PurchasePric
 
 export const processTransaction = (transaction: Transaction): AppState => {
   const data = loadData();
-
+  const effectiveTransaction: Transaction = transaction.type === 'sale'
+    ? { ...transaction, saleSettlement: getSaleSettlementBreakdown(transaction) }
+    : transaction.type === 'return'
+      ? { ...transaction, returnHandlingMode: getResolvedReturnHandlingMode(transaction) }
+      : transaction;
+  const txAmount = Math.abs(transaction?.total || 0);
   if (!transaction || typeof transaction !== 'object') {
     failValidation('INVALID_TRANSACTION_PAYLOAD', 'Transaction payload is invalid.');
   }
@@ -2404,95 +2955,204 @@ export const processTransaction = (transaction: Transaction): AppState => {
     return data;
   }
 
-  assertPaymentMethodByType(transaction.type, transaction.paymentMethod);
-  assertTransactionFinancials(transaction);
-  assertTransactionInventoryRules(transaction, data.products, data.transactions);
+  assertPaymentMethodByType(effectiveTransaction.type, effectiveTransaction.paymentMethod);
+  assertTransactionFinancials(effectiveTransaction);
+  assertTransactionInventoryRules(effectiveTransaction, data.products, data.transactions);
 
-  const newTransactions = [transaction, ...data.transactions];
+  const newTransactions = [effectiveTransaction, ...data.transactions];
   let newProducts = [...data.products];
-  if (transaction.type !== 'payment') {
-      newProducts = data.products.map(p => applyTransactionItemsToProduct(p, transaction.items, transaction.type));
+  if (effectiveTransaction.type !== 'payment') {
+      newProducts = data.products.map(p => applyTransactionItemsToProduct(p, effectiveTransaction.items, effectiveTransaction.type));
   }
   let newCustomers = [...data.customers];
-  if (transaction.customerId) {
-      const customerIndex = newCustomers.findIndex(c => c.id === transaction.customerId);
+  if (effectiveTransaction.customerId) {
+      const customerIndex = newCustomers.findIndex(c => c.id === effectiveTransaction.customerId);
       if (customerIndex === -1) {
-        failValidation('CUSTOMER_NOT_FOUND', 'Transaction customer not found.', { customerId: transaction.customerId });
+        failValidation('CUSTOMER_NOT_FOUND', 'Transaction customer not found.', { customerId: effectiveTransaction.customerId });
       }
 
       const c = newCustomers[customerIndex];
+      const dueBefore = toFiniteNonNegative(c.totalDue);
+      const storeCreditBefore = toFiniteNonNegative(c.storeCredit);
       let newTotalSpend = c.totalSpend;
-      let newTotalDue = c.totalDue;
       let newVisitCount = c.visitCount;
       let newLastVisit = c.lastVisit;
-      const amount = Math.abs(transaction.total);
-      if (transaction.type === 'sale') {
+      let totalDue = toFiniteNonNegative(c.totalDue);
+      let storeCredit = toFiniteNonNegative(c.storeCredit);
+      let dueDelta = 0;
+      const amount = Math.abs(effectiveTransaction.total);
+      const storeCreditUsed = getClampedStoreCreditUsed(effectiveTransaction, c);
+      if (effectiveTransaction.type === 'sale') {
+          const settlement = getSaleSettlementBreakdown(effectiveTransaction);
           newTotalSpend += amount;
           newVisitCount += 1;
           newLastVisit = new Date().toISOString();
-          if (transaction.paymentMethod === 'Credit') newTotalDue += amount;
-      } else if (transaction.type === 'return') {
+          totalDue = Math.max(0, totalDue + settlement.creditDue);
+          storeCredit = Math.max(0, storeCredit - storeCreditUsed);
+          if (settlement.cashPaid > 0) {
+            financeLog.cash('INFLOW', { txId: effectiveTransaction.id, amount: settlement.cashPaid, reason: 'cash sale received', paymentMode: 'Cash', source: 'sale' });
+          }
+          console.info('[FIN][SALE][SETTLEMENT]', {
+            txId: effectiveTransaction.id,
+            customerId: c.id,
+            total: logMoney(amount),
+            subtotal: logMoney(effectiveTransaction.subtotal),
+            discount: logMoney(effectiveTransaction.discount),
+            tax: logMoney(effectiveTransaction.tax),
+            storeCreditUsed: logMoney(storeCreditUsed),
+            cashPaid: logMoney(settlement.cashPaid),
+            onlinePaid: logMoney(settlement.onlinePaid),
+            creditDue: logMoney(settlement.creditDue),
+            paymentMethod: effectiveTransaction.paymentMethod || 'Cash',
+            scenarioClass: getSaleScenarioClass(settlement),
+          });
+      } else if (effectiveTransaction.type === 'return') {
+          const returnEffects = getReturnFinancialEffects(effectiveTransaction);
+          if (returnEffects.mode === 'reduce_due' && dueBefore <= MONEY_EPSILON) {
+            console.warn('[FIN][GUARD][RETURN_INVALID]', {
+              txId: effectiveTransaction.id,
+              customerId: c.id,
+              returnHandlingMode: returnEffects.mode,
+              dueBefore: logMoney(dueBefore),
+              attemptedReduction: logMoney(amount),
+            });
+            failValidation('RETURN_REDUCE_DUE_NOT_ALLOWED', 'Cannot reduce due because customer has no outstanding balance. Use store credit or refund instead.', {
+              customerId: c.id,
+              dueBefore,
+              attemptedReduction: amount,
+            });
+          }
           newTotalSpend -= amount;
-          if (transaction.paymentMethod === 'Credit') newTotalDue -= amount;
-      } else if (transaction.type === 'payment') {
-          newTotalDue -= amount;
+          if (returnEffects.affectsDue) {
+            dueDelta -= amount;
+          }
+          console.info('[FIN][RETURN][SETTLEMENT]', {
+            txId: effectiveTransaction.id,
+            customerId: c.id,
+            total: logMoney(amount),
+            returnHandlingMode: returnEffects.mode,
+            affectsCash: returnEffects.affectsCash,
+            affectsDue: returnEffects.affectsDue,
+            affectsStoreCredit: returnEffects.affectsStoreCredit,
+            cashImpact: logMoney(returnEffects.affectsCash ? -amount : 0),
+            onlineImpact: logMoney(returnEffects.mode === 'refund_online' ? -amount : 0),
+            dueImpact: logMoney(returnEffects.affectsDue ? -amount : 0),
+            storeCreditImpact: logMoney(returnEffects.mode === 'store_credit' ? amount : 0),
+            scenarioClass: `return_${returnEffects.mode}`,
+          });
+          if (returnEffects.affectsCash) {
+            financeLog.cash('OUTFLOW', { txId: effectiveTransaction.id, amount, reason: 'cash return refunded', paymentMode: 'Cash', source: 'return_refund' });
+          }
+      } else if (effectiveTransaction.type === 'payment') {
+          dueDelta -= amount;
           newLastVisit = new Date().toISOString();
+          financeLog.cash('INFLOW', { txId: effectiveTransaction.id, amount, reason: 'customer payment collected', paymentMode: effectiveTransaction.paymentMethod, source: 'payment' });
       }
-
-      if (newTotalDue < -MONEY_EPSILON) {
-        failValidation('INVALID_CUSTOMER_BALANCE', 'Transaction results in invalid customer due balance.', {
-          customerId: c.id,
-          resultingTotalDue: newTotalDue
-        });
+      if (effectiveTransaction.type !== 'sale') {
+        const updated = applyCustomerBalanceDelta(c, dueDelta);
+        totalDue = updated.totalDue;
+        storeCredit = updated.storeCredit;
       }
-
+      const rebuiltBalance = rebuildCustomerBalanceFromLedger(c.id, newTransactions);
+      totalDue = rebuiltBalance.totalDue;
+      storeCredit = rebuiltBalance.storeCredit;
       newCustomers[customerIndex] = {
         ...c,
         totalSpend: newTotalSpend,
-        totalDue: Math.max(0, newTotalDue),
+        totalDue,
+        storeCredit,
         visitCount: newVisitCount,
         lastVisit: newLastVisit
       };
+      if (effectiveTransaction.type === 'payment') {
+        console.info('[FIN][PAYMENT][SETTLEMENT]', {
+          txId: effectiveTransaction.id,
+          customerId: c.id,
+          amount: logMoney(amount),
+          paymentMethod: effectiveTransaction.paymentMethod || 'Cash',
+          dueBefore: logMoney(dueBefore),
+          dueAfter: logMoney(totalDue),
+          storeCreditBefore: logMoney(storeCreditBefore),
+          storeCreditAfter: logMoney(storeCredit),
+          cashImpact: logMoney((effectiveTransaction.paymentMethod || 'Cash') === 'Cash' ? amount : 0),
+          onlineImpact: logMoney(effectiveTransaction.paymentMethod === 'Online' ? amount : 0),
+          scenarioClass: getPaymentScenarioClass(effectiveTransaction.paymentMethod),
+        });
+      }
+      console.info('[FIN][LEDGER][RESULT]', {
+        txId: effectiveTransaction.id,
+        customerId: c.id,
+        reason: effectiveTransaction.type,
+        finalDue: logMoney(totalDue),
+        finalStoreCredit: logMoney(storeCredit),
+        runningNet: logMoney(totalDue - storeCredit),
+        transactionCount: newTransactions.filter(tx => tx.customerId === c.id).length,
+      });
   }
-  const touchedProductIds = transaction.type !== 'payment'
-    ? Array.from(new Set(transaction.items.map(item => item.id)))
+  if (effectiveTransaction.type === 'sale') {
+    const gross = effectiveTransaction.items.reduce((sum, item) => sum + (item.sellPrice * item.quantity), 0);
+    const discount = logMoney(effectiveTransaction.discount ?? Math.max(0, gross - Math.abs(effectiveTransaction.total)));
+    const tax = logMoney(effectiveTransaction.tax);
+    const net = logMoney(Math.abs(effectiveTransaction.total));
+    const cogs = logMoney(effectiveTransaction.items.reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0));
+    financeLog.pnl('EVENT', {
+      txId: effectiveTransaction.id,
+      type: 'sale',
+      gross: logMoney(gross),
+      discount,
+      tax,
+      net,
+      cogs,
+      profitContribution: logMoney(net - cogs),
+    });
+  } else if (effectiveTransaction.type === 'return') {
+    const returnEffects = getReturnFinancialEffects(effectiveTransaction);
+    const cogs = logMoney(effectiveTransaction.items.reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0));
+    financeLog.pnl('EVENT', {
+      txId: effectiveTransaction.id,
+      type: 'return',
+      gross: logMoney(Math.abs(effectiveTransaction.total)),
+      discount: logMoney(effectiveTransaction.discount),
+      tax: logMoney(effectiveTransaction.tax),
+      net: logMoney(-txAmount),
+      cogs,
+      profitContribution: logMoney(-(Math.abs(effectiveTransaction.total) - cogs)),
+      scenarioClass: `return_${returnEffects.mode}`,
+    });
+  }
+  const touchedProductIds = effectiveTransaction.type !== 'payment'
+    ? Array.from(new Set(effectiveTransaction.items.map(item => item.id)))
     : [];
 
   const legacyCustomerProductStatsSeed: Record<string, { soldQty: number; returnedQty: number }> = {};
-  if (transaction.customerId && transaction.type !== 'payment') {
+  if (effectiveTransaction.customerId && effectiveTransaction.type !== 'payment') {
     touchedProductIds.forEach((productId) => {
       const soldQty = data.transactions
-        .filter(t => t.customerId === transaction.customerId && t.type === 'sale')
+        .filter(t => t.customerId === effectiveTransaction.customerId && t.type === 'sale')
         .reduce((acc, t) => acc + t.items.filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       const returnedQty = data.transactions
-        .filter(t => t.customerId === transaction.customerId && t.type === 'return')
+        .filter(t => t.customerId === effectiveTransaction.customerId && t.type === 'return')
         .reduce((acc, t) => acc + t.items.filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       legacyCustomerProductStatsSeed[productId] = { soldQty, returnedQty };
     });
   }
 
   if (db) {
-    emitBehaviorStateChange({ type: 'payment_to_order_chain_started', entityId: transaction.id, metadata: { transactionType: transaction.type, paymentMethod: transaction.paymentMethod } });
-    emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…', transactionId: transaction.id });
+    emitBehaviorStateChange({ type: 'payment_to_order_chain_started', entityId: effectiveTransaction.id, metadata: { transactionType: effectiveTransaction.type, paymentMethod: effectiveTransaction.paymentMethod } });
+    emitDataOpStatus({ phase: DATA_OP_PHASES.START, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Saving transaction…', transactionId: effectiveTransaction.id });
 
     void commitProcessTransactionAtomically({
-      transaction,
+      transaction: effectiveTransaction,
       legacyCustomerProductStatsSeed,
       allowLegacySeed: !isCustomerProductStatsBackfillComplete,
     })
       .then(({ created, committedProducts, committedCustomer }) => {
-        console.debug('[migration-trace] processTransaction commit result', {
-          transactionId: transaction.id,
-          created,
-          committedProducts: committedProducts.length,
-          committedCustomer: committedCustomer?.id || null,
-        });
         if (!created) {
-          emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction already applied.', transactionId: transaction.id });
+          emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction already applied.', transactionId: effectiveTransaction.id });
           void writeAuditEvent('BLOCKED_WRITE', {
             reason: 'processTransaction_idempotent_duplicate_skip',
             migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
-            transactionId: transaction.id,
+            transactionId: effectiveTransaction.id,
           });
           return;
         }
@@ -2501,9 +3161,9 @@ export const processTransaction = (transaction: Transaction): AppState => {
         committedProducts.forEach(p => productMap.set(p.id, p));
         const customerMap = new Map(memoryState.customers.map(c => [c.id, c]));
         if (committedCustomer) customerMap.set(committedCustomer.id, committedCustomer);
-        const nextTransactions = memoryState.transactions.some(t => t.id === transaction.id)
+        const nextTransactions = memoryState.transactions.some(t => t.id === effectiveTransaction.id)
           ? memoryState.transactions
-          : [transaction, ...memoryState.transactions];
+          : [effectiveTransaction, ...memoryState.transactions];
         memoryState = {
           ...memoryState,
           products: Array.from(productMap.values()),
@@ -2511,30 +3171,39 @@ export const processTransaction = (transaction: Transaction): AppState => {
           transactions: nextTransactions,
         };
         emitLocalStorageUpdate();
-        emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.', transactionId: transaction.id });
-        emitBehaviorStateChange({ type: transaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: transaction.id, to: 'committed', metadata: { transactionType: transaction.type, paymentMethod: transaction.paymentMethod, total: transaction.total } });
+        console.info('[FIN][ACTION][TX_CREATE]', {
+          actionType: 'TX_CREATE',
+          txId: effectiveTransaction.id,
+          customerId: effectiveTransaction.customerId || null,
+          transactionType: effectiveTransaction.type,
+          returnHandlingMode: effectiveTransaction.type === 'return' ? getResolvedReturnHandlingMode(effectiveTransaction) : null,
+          source: 'processTransaction_atomic_commit',
+        });
+        logKpiSnapshot('AFTER_TX_CREATE', memoryState);
+        emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved.', transactionId: effectiveTransaction.id });
+        emitBehaviorStateChange({ type: effectiveTransaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: effectiveTransaction.id, to: 'committed', metadata: { transactionType: effectiveTransaction.type, paymentMethod: effectiveTransaction.paymentMethod, total: effectiveTransaction.total } });
 
         void Promise.all([
           touchedProductIds.length > 0
             ? writeAuditEvent('UPDATE', {
               reason: 'processTransaction_product_stock_update_subcollection_atomic',
               migrationPhase: PRODUCTS_MIGRATION_PHASE,
-              transactionId: transaction.id,
+              transactionId: effectiveTransaction.id,
               productIds: touchedProductIds,
             })
             : Promise.resolve(),
-          transaction.customerId
+          effectiveTransaction.customerId
             ? writeAuditEvent('UPDATE', {
               reason: 'processTransaction_customer_balance_update_subcollection_atomic',
               migrationPhase: CUSTOMERS_MIGRATION_PHASE,
-              transactionId: transaction.id,
-              customerIds: [transaction.customerId],
+              transactionId: effectiveTransaction.id,
+              customerIds: [effectiveTransaction.customerId],
             })
             : Promise.resolve(),
           writeAuditEvent('CREATE', {
             reason: 'processTransaction_transaction_write_subcollection_atomic',
             migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
-            transactionId: transaction.id,
+            transactionId: effectiveTransaction.id,
           }),
 syncToCloud({ ...data }),
         ]).catch(error => {
@@ -2543,7 +3212,7 @@ syncToCloud({ ...data }),
       })
       .catch(error => {
         console.error('[storage-transactions] failed atomic processTransaction commit', {
-          transactionId: transaction.id,
+          transactionId: effectiveTransaction.id,
           error,
         });
         memoryState = { ...memoryState, products: data.products, transactions: data.transactions, customers: data.customers };
@@ -2553,7 +3222,7 @@ syncToCloud({ ...data }),
           op: OPERATION_TYPES.PROCESS_TRANSACTION,
           entity: 'transaction',
           error: error instanceof Error ? error.message : 'Transaction save failed.',
-          transactionId: transaction.id,
+          transactionId: effectiveTransaction.id,
         });
       });
 
@@ -2565,8 +3234,17 @@ syncToCloud({ ...data }),
 
   const fallbackState = { ...data, products: newProducts, transactions: newTransactions, customers: newCustomers };
   void saveData(fallbackState, { reason: 'processTransaction_local_fallback', auditOperation: 'CREATE' });
-  emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved locally.', transactionId: transaction.id });
-  emitBehaviorStateChange({ type: transaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: transaction.id, to: 'local_saved', metadata: { transactionType: transaction.type, paymentMethod: transaction.paymentMethod, total: transaction.total } });
+  console.info('[FIN][ACTION][TX_CREATE]', {
+    actionType: 'TX_CREATE',
+    txId: effectiveTransaction.id,
+    customerId: effectiveTransaction.customerId || null,
+    transactionType: effectiveTransaction.type,
+    returnHandlingMode: effectiveTransaction.type === 'return' ? getResolvedReturnHandlingMode(effectiveTransaction) : null,
+    source: 'processTransaction_local_fallback',
+  });
+  logKpiSnapshot('AFTER_TX_CREATE', fallbackState);
+  emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: OPERATION_TYPES.PROCESS_TRANSACTION, entity: 'transaction', message: 'Transaction saved locally.', transactionId: effectiveTransaction.id });
+  emitBehaviorStateChange({ type: effectiveTransaction.type === 'payment' ? 'payment_recorded' : 'order_created', entityId: effectiveTransaction.id, to: 'local_saved', metadata: { transactionType: effectiveTransaction.type, paymentMethod: effectiveTransaction.paymentMethod, total: effectiveTransaction.total } });
   return fallbackState;
 };
 
@@ -2612,18 +3290,67 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
 
 export const deleteTransaction = (transactionId: string): Transaction[] => {
   const data = loadData();
-  const next = data.transactions.filter(t => t.id !== transactionId);
+  const target = data.transactions.find(t => t.id === transactionId);
+  if (!target) return data.transactions;
+  const reconciledState = reconcileStateAfterDeleteTransaction(data, target);
+  const deletedRecord = buildDeletedTransactionRecord({ transaction: target, beforeState: data, afterState: reconciledState });
+  console.info('[FIN][RECONCILE][DELETE]', {
+    txId: transactionId,
+    type: target.type,
+    stockAffected: target.type !== 'payment',
+    customerAffected: Boolean(target.customerId),
+    dueBefore: logMoney(deletedRecord.beforeImpact.customerDue),
+    dueAfter: logMoney(deletedRecord.afterImpact.customerDue),
+    storeCreditBefore: logMoney(deletedRecord.beforeImpact.customerStoreCredit),
+    storeCreditAfter: logMoney(deletedRecord.afterImpact.customerStoreCredit),
+  });
+  if (target.customerId) {
+    console.info('[FIN][LEDGER][RESULT]', {
+      txId: transactionId,
+      customerId: target.customerId,
+      reason: 'delete',
+      finalDue: logMoney(deletedRecord.afterImpact.customerDue),
+      finalStoreCredit: logMoney(deletedRecord.afterImpact.customerStoreCredit),
+      runningNet: logMoney(deletedRecord.afterImpact.customerDue - deletedRecord.afterImpact.customerStoreCredit),
+    });
+  }
+  const next = reconciledState.transactions;
+  const nextDeletedTransactions = [deletedRecord, ...(data.deletedTransactions || [])]
+    .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
+  const reconciledWithBin: AppState = { ...reconciledState, deletedTransactions: nextDeletedTransactions };
 
   if (!db) {
-    void saveData({ ...data, transactions: next }, { reason: 'deleteTransaction_local_fallback', auditOperation: 'DELETE' });
+    void saveData(reconciledWithBin, { reason: 'deleteTransaction_local_fallback', auditOperation: 'DELETE' });
+    console.info('[FIN][ACTION][TX_DELETE]', {
+      actionType: 'TX_DELETE',
+      txId: transactionId,
+      customerId: target.customerId || null,
+      transactionType: target.type,
+      source: 'deleteTransaction_local_fallback',
+    });
+    logKpiSnapshot('AFTER_TX_DELETE', reconciledWithBin);
     return next;
   }
 
-  memoryState = { ...memoryState, transactions: next };
+  memoryState = {
+    ...memoryState,
+    transactions: next,
+    deletedTransactions: nextDeletedTransactions,
+    products: reconciledState.products,
+    customers: reconciledState.customers,
+  };
   emitLocalStorageUpdate();
+  console.info('[FIN][ACTION][TX_DELETE]', {
+    actionType: 'TX_DELETE',
+    txId: transactionId,
+    customerId: target.customerId || null,
+    transactionType: target.type,
+    source: 'deleteTransaction_reconcile',
+  });
+  logKpiSnapshot('AFTER_TX_DELETE', memoryState);
 
-  void deleteTransactionInSubcollection(transactionId, 'deleteTransaction')
-    .then(() => syncToCloud({ ...data }))
+  void deleteTransactionAndReconcileInSubcollection(target, deletedRecord, 'deleteTransaction')
+    .then(() => syncToCloud({ ...reconciledWithBin }))
     .then(() => writeAuditEvent('DELETE', {
       reason: 'deleteTransaction_subcollection',
       migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
@@ -2632,7 +3359,7 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
     }))
     .catch(error => {
       console.error('[storage-transactions] failed to delete transaction', error);
-      memoryState = { ...memoryState, transactions: data.transactions };
+      memoryState = { ...memoryState, transactions: data.transactions, deletedTransactions: data.deletedTransactions || [], products: data.products, customers: data.customers };
       emitLocalStorageUpdate();
     });
 
@@ -2641,28 +3368,194 @@ export const deleteTransaction = (transactionId: string): Transaction[] => {
 
 export const updateTransaction = async (updatedTransaction: Transaction): Promise<Transaction[]> => {
   const data = loadData();
-  const next = sortTransactionsDesc(data.transactions.map(t => t.id === updatedTransaction.id ? updatedTransaction : t));
-
-  if (!db) {
-    await saveData({ ...data, transactions: next }, { throwOnError: true, reason: 'updateTransaction_local_fallback', auditOperation: 'UPDATE' });
-    return next;
+  const originalTransaction = data.transactions.find(t => t.id === updatedTransaction.id);
+  if (!originalTransaction) {
+    failValidation('TRANSACTION_NOT_FOUND', 'Transaction to update was not found.', { transactionId: updatedTransaction.id });
   }
 
-  await upsertTransactionInSubcollection(updatedTransaction, 'updateTransaction_subcollection');
-  memoryState = { ...memoryState, transactions: sortTransactionsDesc(memoryState.transactions.map(t => t.id === updatedTransaction.id ? updatedTransaction : t)) };
+  const effectiveUpdatedTransaction: Transaction = updatedTransaction.type === 'sale'
+    ? { ...updatedTransaction, saleSettlement: getSaleSettlementBreakdown(updatedTransaction) }
+    : updatedTransaction.type === 'return'
+      ? { ...updatedTransaction, returnHandlingMode: getResolvedReturnHandlingMode(updatedTransaction) }
+      : updatedTransaction;
+
+  const stateWithoutOriginal = reconcileStateAfterDeleteTransaction(data, originalTransaction);
+  if (effectiveUpdatedTransaction.customerId) {
+    const customerExists = stateWithoutOriginal.customers.some(c => c.id === effectiveUpdatedTransaction.customerId);
+    if (!customerExists) {
+      failValidation('CUSTOMER_NOT_FOUND', 'Edited transaction customer not found.', { customerId: effectiveUpdatedTransaction.customerId });
+    }
+  }
+
+  assertPaymentMethodByType(effectiveUpdatedTransaction.type, effectiveUpdatedTransaction.paymentMethod);
+  assertTransactionFinancials(effectiveUpdatedTransaction);
+  assertTransactionInventoryRules(effectiveUpdatedTransaction, stateWithoutOriginal.products, stateWithoutOriginal.transactions);
+
+  const nextTransactions = sortTransactionsDesc([effectiveUpdatedTransaction, ...stateWithoutOriginal.transactions]);
+  const nextProducts = effectiveUpdatedTransaction.type === 'payment'
+    ? [...stateWithoutOriginal.products]
+    : stateWithoutOriginal.products.map(product => applyTransactionItemsToProduct(product, effectiveUpdatedTransaction.items, effectiveUpdatedTransaction.type));
+
+  const nextCustomers = stateWithoutOriginal.customers.map((customer) => {
+    const customerTransactions = nextTransactions.filter(tx => tx.customerId === customer.id);
+    const salesTotal = customerTransactions.filter(tx => tx.type === 'sale').reduce((sum, tx) => sum + Math.abs(tx.total), 0);
+    const returnsTotal = customerTransactions.filter(tx => tx.type === 'return').reduce((sum, tx) => sum + Math.abs(tx.total), 0);
+    const visitCount = customerTransactions.filter(tx => tx.type === 'sale').length;
+    const lastVisitIso = customerTransactions
+      .map(tx => tx.date)
+      .reduce<string | null>((latest, current) => {
+        if (!latest) return current;
+        return new Date(current).getTime() > new Date(latest).getTime() ? current : latest;
+      }, null);
+    const rebuilt = rebuildCustomerBalanceFromLedger(customer.id, nextTransactions);
+    return {
+      ...customer,
+      totalSpend: salesTotal - returnsTotal,
+      totalDue: rebuilt.totalDue,
+      storeCredit: rebuilt.storeCredit,
+      visitCount,
+      lastVisit: lastVisitIso || customer.lastVisit,
+    };
+  });
+
+  const reconciledState: AppState = {
+    ...stateWithoutOriginal,
+    transactions: nextTransactions,
+    products: nextProducts,
+    customers: nextCustomers,
+  };
+
+  if (!db) {
+    await saveData(reconciledState, { throwOnError: true, reason: 'updateTransaction_local_reconcile', auditOperation: 'UPDATE' });
+    console.info('[FIN][ACTION][TX_UPDATE]', {
+      actionType: 'TX_UPDATE',
+      txId: effectiveUpdatedTransaction.id,
+      customerId: effectiveUpdatedTransaction.customerId || null,
+      originalType: originalTransaction.type,
+      updatedType: effectiveUpdatedTransaction.type,
+      settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
+      source: 'updateTransaction_local_reconcile',
+    });
+    logKpiSnapshot('AFTER_TX_UPDATE', reconciledState);
+    return reconciledState.transactions;
+  }
+
+  const affectedProductIds = new Set<string>();
+  if (originalTransaction.type !== 'payment') originalTransaction.items.forEach(item => affectedProductIds.add(item.id));
+  if (effectiveUpdatedTransaction.type !== 'payment') effectiveUpdatedTransaction.items.forEach(item => affectedProductIds.add(item.id));
+  const affectedCustomerIds = new Set<string>();
+  if (originalTransaction.customerId) affectedCustomerIds.add(originalTransaction.customerId);
+  if (effectiveUpdatedTransaction.customerId) affectedCustomerIds.add(effectiveUpdatedTransaction.customerId);
+  const dueBefore = Array.from(affectedCustomerIds).reduce((sum, customerId) => {
+    const customer = data.customers.find(c => c.id === customerId);
+    return sum + toFiniteNonNegative(customer?.totalDue);
+  }, 0);
+  const storeCreditBefore = Array.from(affectedCustomerIds).reduce((sum, customerId) => {
+    const customer = data.customers.find(c => c.id === customerId);
+    return sum + toFiniteNonNegative(customer?.storeCredit);
+  }, 0);
+  const dueAfter = Array.from(affectedCustomerIds).reduce((sum, customerId) => {
+    const customer = nextCustomers.find(c => c.id === customerId);
+    return sum + toFiniteNonNegative(customer?.totalDue);
+  }, 0);
+  const storeCreditAfter = Array.from(affectedCustomerIds).reduce((sum, customerId) => {
+    const customer = nextCustomers.find(c => c.id === customerId);
+    return sum + toFiniteNonNegative(customer?.storeCredit);
+  }, 0);
+
+  await Promise.all([
+    ...Array.from(affectedProductIds).map(async (productId) => {
+      const product = nextProducts.find(p => p.id === productId);
+      if (!product) return;
+      await upsertProductInSubcollection(product, 'updateTransaction_reconcile_product');
+    }),
+    ...Array.from(affectedCustomerIds).map(async (customerId) => {
+      const customer = nextCustomers.find(c => c.id === customerId);
+      if (!customer) return;
+      await upsertCustomerInSubcollection(customer, 'updateTransaction_reconcile_customer');
+    }),
+    upsertTransactionInSubcollection(effectiveUpdatedTransaction, 'updateTransaction_reconcile_transaction'),
+  ]);
+
+  if (Array.from(affectedCustomerIds).length > 0 && Array.from(affectedProductIds).length > 0) {
+    const user = await assertCloudWriteReady('updateTransaction_reconcile_customer_product_stats');
+    await Promise.all(Array.from(affectedCustomerIds).flatMap((customerId) => Array.from(affectedProductIds).map(async (productId) => {
+      const soldQty = nextTransactions
+        .filter(tx => tx.customerId === customerId && tx.type === 'sale')
+        .reduce((sum, tx) => sum + tx.items.filter(item => item.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
+      const returnedQty = nextTransactions
+        .filter(tx => tx.customerId === customerId && tx.type === 'return')
+        .reduce((sum, tx) => sum + tx.items.filter(item => item.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
+      const statsDocId = getCustomerProductStatsDocId(customerId, productId);
+      await setDoc(doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId), sanitizeData({
+        customerId,
+        productId,
+        soldQty: Math.max(0, soldQty),
+        returnedQty: Math.max(0, returnedQty),
+        updatedAt: new Date().toISOString(),
+        migrationSource: 'transaction_update_reconcile',
+      }), { merge: true });
+    })));
+  }
+
+  memoryState = {
+    ...memoryState,
+    transactions: reconciledState.transactions,
+    products: reconciledState.products,
+    customers: reconciledState.customers,
+  };
   emitLocalStorageUpdate();
 
   void Promise.all([
     writeAuditEvent('UPDATE', {
-      reason: 'updateTransaction_subcollection',
+      reason: 'updateTransaction_reconciled',
       migrationPhase: TRANSACTIONS_MIGRATION_PHASE,
-      transactionId: updatedTransaction.id,
-      transactionsCount: next.length,
+      transactionId: effectiveUpdatedTransaction.id,
+      originalType: originalTransaction.type,
+      updatedType: effectiveUpdatedTransaction.type,
+      customerChanged: originalTransaction.customerId !== effectiveUpdatedTransaction.customerId,
+      stockAffected: originalTransaction.type !== 'payment' || effectiveUpdatedTransaction.type !== 'payment',
+      settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
     }),
-    syncToCloud({ ...data }),
+    syncToCloud({ ...reconciledState }),
   ]).catch(error => {
-    console.error('[storage-transactions] failed to update transaction', error);
+    console.error('[storage-transactions] failed to update transaction with reconciliation', error);
   });
 
-  return memoryState.transactions;
+  console.info('[FIN][RECONCILE][UPDATE]', {
+    txId: effectiveUpdatedTransaction.id,
+    originalType: originalTransaction.type,
+    updatedType: effectiveUpdatedTransaction.type,
+    stockAffected: originalTransaction.type !== 'payment' || effectiveUpdatedTransaction.type !== 'payment',
+    settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
+    customerChanged: originalTransaction.customerId !== effectiveUpdatedTransaction.customerId,
+    dueBefore: logMoney(dueBefore),
+    dueAfter: logMoney(dueAfter),
+    storeCreditBefore: logMoney(storeCreditBefore),
+    storeCreditAfter: logMoney(storeCreditAfter),
+  });
+  affectedCustomerIds.forEach((customerId) => {
+    const customer = nextCustomers.find(c => c.id === customerId);
+    if (!customer) return;
+    console.info('[FIN][LEDGER][RESULT]', {
+      txId: effectiveUpdatedTransaction.id,
+      customerId,
+      reason: 'update',
+      finalDue: logMoney(toFiniteNonNegative(customer.totalDue)),
+      finalStoreCredit: logMoney(toFiniteNonNegative(customer.storeCredit)),
+      runningNet: logMoney(toFiniteNonNegative(customer.totalDue) - toFiniteNonNegative(customer.storeCredit)),
+    });
+  });
+  console.info('[FIN][ACTION][TX_UPDATE]', {
+    actionType: 'TX_UPDATE',
+    txId: effectiveUpdatedTransaction.id,
+    customerId: effectiveUpdatedTransaction.customerId || null,
+    originalType: originalTransaction.type,
+    updatedType: effectiveUpdatedTransaction.type,
+    settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
+    source: 'updateTransaction_reconciled',
+  });
+  logKpiSnapshot('AFTER_TX_UPDATE', memoryState);
+
+  return reconciledState.transactions;
 };

@@ -4,21 +4,21 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
-import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
+import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
-import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, CreditCard, Wallet, Coins, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
+import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
 
-const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, onAdd }) => {
+const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
     const [qty, setQty] = useState(1);
     const [flashMsg, setFlashMsg] = useState<string | null>(null);
 
     const isOutOfStock = !isReturnMode && product.stock <= 0;
-    const maxReturnable = product.totalSold || 0;
+    const maxReturnable = returnableQty;
     const canReturn = isReturnMode && maxReturnable > 0;
     const isLowStock = !isReturnMode && product.stock > 0 && product.stock < 5;
 
@@ -122,6 +122,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
 };
 
 export default function Sales() {
+  type ReturnHandlingMode = 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -141,7 +142,7 @@ export default function Sales() {
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
   const [customerTab, setCustomerTab] = useState<'search' | 'new'>('search');
   const [bulkModal, setBulkModal] = useState<{ isOpen: boolean, product: Product | null }>({ isOpen: false, product: null });
-  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number }> }>({ open: false, product: null, rows: [] });
+  const [variantPicker, setVariantPicker] = useState<{ open: boolean; product: Product | null; rows: Array<{ variant: string; color: string; stock: number; qty: number; sellPrice: number }> }>({ open: false, product: null, rows: [] });
   const [transactionComplete, setTransactionComplete] = useState<Transaction | null>(null);
   
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -150,8 +151,11 @@ export default function Sales() {
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
-  const [cashReceived, setCashReceived] = useState('');
+  const [storeCreditMode, setStoreCreditMode] = useState<'none' | 'full' | 'custom'>('none');
+  const [customStoreCreditUse, setCustomStoreCreditUse] = useState('');
+  const [cashPaidInput, setCashPaidInput] = useState('');
+  const [onlinePaidInput, setOnlinePaidInput] = useState('');
+  const [returnHandlingMode, setReturnHandlingMode] = useState<ReturnHandlingMode>('refund_cash');
   const [transactionCashDetails, setTransactionCashDetails] = useState<{ cashReceived: number; changeReturned: number } | null>(null);
   
   const [selectedTax, setSelectedTax] = useState(TAX_OPTIONS[0]);
@@ -242,6 +246,13 @@ export default function Sales() {
     return Math.max(0, soldQty - returnedQty);
   };
 
+  const getProductReturnableQty = (product: Product, customerId?: string) => {
+    if (!productHasCombinationStock(product)) {
+      return getReturnableQty(product.id, NO_VARIANT, NO_COLOR, customerId);
+    }
+    return getProductStockRows(product).reduce((sum, row) => sum + getReturnableQty(product.id, row.variant, row.color, customerId), 0);
+  };
+
   const handleProductSelect = (scanValue: string, explicitQty: number = 1) => {
     let targetCode = scanValue;
     try { const p = JSON.parse(scanValue); if (p.sku) targetCode = p.sku; if(p.barcode) targetCode = p.barcode; } catch(e) {}
@@ -252,10 +263,12 @@ export default function Sales() {
     if (isReturnMode) {
       const currentCart = cartRef.current;
       const inCart = currentCart
-        .filter(c => lineKey(c.id, c.selectedVariant, c.selectedColor) === lineKey(product.id, NO_VARIANT, NO_COLOR))
+        .filter(c => c.id === product.id)
         .reduce((sum, c) => sum + c.quantity, 0);
-      const sold = getReturnableQty(product.id, NO_VARIANT, NO_COLOR);
-      if (sold === 0) error = "Item hasn't been sold yet.";
+      const sold = getProductReturnableQty(product);
+      if (sold === 0) error = productHasCombinationStock(product)
+        ? 'No returnable quantity left for this product variants.'
+        : "Item hasn't been sold yet.";
       else if (sold < (inCart + explicitQty)) error = `Return Limit (${sold}) Exceeded!`;
     } else if (!productHasCombinationStock(product)) {
       const inCart = cartRef.current
@@ -269,6 +282,7 @@ export default function Sales() {
     if (productHasCombinationStock(product)) {
       const rows = getProductStockRows(product).map(row => ({
         ...row,
+        sellPrice: getResolvedSellPriceForCombination(product, row.variant, row.color),
         stock: isReturnMode ? getReturnableQty(product.id, row.variant, row.color) : row.stock,
         qty: 0
       }));
@@ -288,7 +302,16 @@ export default function Sales() {
             return prev.map(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
-        return [...prev, { ...product, quantity: qty, discountPercent: 0, discountAmount: 0, selectedVariant: selectedVariant || NO_VARIANT, selectedColor: selectedColor || NO_COLOR }];
+        return [...prev, {
+          ...product,
+          buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
+          sellPrice: getResolvedSellPriceForCombination(product, selectedVariant, selectedColor),
+          quantity: qty,
+          discountPercent: 0,
+          discountAmount: 0,
+          selectedVariant: selectedVariant || NO_VARIANT,
+          selectedColor: selectedColor || NO_COLOR
+        }];
     });
   };
 
@@ -384,7 +407,10 @@ export default function Sales() {
       if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
       setSelectedTransactionDate('');
-      if (isReturnMode) setPaymentMethod('Cash');
+      setStoreCreditMode('none');
+      setCustomStoreCreditUse('');
+      setCashPaidInput('');
+      setOnlinePaidInput('');
       setIsCustomerModalOpen(true);
   };
 
@@ -464,54 +490,100 @@ export default function Sales() {
           }
       }
 
-      if (paymentMethod === 'Credit' && !finalCustomer) { 
-          setCheckoutError("Credit requires a customer."); 
-          return; 
-      }
-
       const subtotal = cart.reduce((acc, item) => acc + (item.sellPrice * item.quantity), 0);
       const totalDiscount = cart.reduce((acc, item) => acc + (item.discountAmount || 0), 0);
       const taxableAmount = subtotal - totalDiscount;
       const taxAmount = (taxableAmount * (selectedTax.value / 100));
       const total = isReturnMode ? -(taxableAmount + taxAmount) : (taxableAmount + taxAmount);
+      const availableCreditAtSubmit = Math.max(0, Number(finalCustomer?.storeCredit || 0));
+      const maxCreditAtSubmit = !isReturnMode && finalCustomer ? Math.min(Math.abs(total), availableCreditAtSubmit) : 0;
+      const requestedCreditAtSubmit = storeCreditMode === 'full'
+        ? maxCreditAtSubmit
+        : storeCreditMode === 'custom'
+          ? Math.max(0, Number(customStoreCreditUse || 0))
+          : 0;
+      const appliedStoreCredit = Math.min(requestedCreditAtSubmit, maxCreditAtSubmit);
+      const payableAfterCredit = Math.max(0, Math.abs(total) - appliedStoreCredit);
+      const cashPaid = Number(cashPaidInput || 0);
+      const onlinePaid = Number(onlinePaidInput || 0);
+      if (!isReturnMode) {
+          if (!Number.isFinite(cashPaid) || cashPaid < 0 || !Number.isFinite(onlinePaid) || onlinePaid < 0) {
+              setCheckoutError('Cash/Online paid values must be valid non-negative numbers.');
+              return;
+          }
+          if ((cashPaid + onlinePaid) > (payableAfterCredit + 0.0001)) {
+              setCheckoutError('Cash + Online paid cannot exceed remaining payable.');
+              return;
+          }
+      }
+      const creditDue = isReturnMode ? 0 : Math.max(0, payableAfterCredit - cashPaid - onlinePaid);
+      if (!isReturnMode && creditDue > 0 && !finalCustomer) {
+          setCheckoutError("Customer is required when credit due is created.");
+          return;
+      }
+      if (isReturnMode && (returnHandlingMode === 'reduce_due' || returnHandlingMode === 'store_credit') && !finalCustomer) {
+          setCheckoutError("Selected return handling mode requires a customer.");
+          return;
+      }
+      const returnPaymentMethod: 'Cash' | 'Credit' | 'Online' =
+        returnHandlingMode === 'refund_cash'
+          ? 'Cash'
+          : returnHandlingMode === 'refund_online'
+            ? 'Online'
+            : 'Credit';
+      const resolvedPaymentMethod: 'Cash' | 'Credit' | 'Online' = isReturnMode
+        ? returnPaymentMethod
+        : creditDue > 0
+          ? 'Credit'
+          : onlinePaid > 0 && cashPaid === 0
+            ? 'Online'
+            : 'Cash';
 
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
-      if (!isReturnMode && paymentMethod === 'Cash') {
-          const receivedValue = cashReceived.trim();
-          if (receivedValue) {
-              const receivedAmount = Number(receivedValue);
-              if (!Number.isFinite(receivedAmount) || receivedAmount < total) {
-                  setCheckoutError('Received amount is less than total bill.');
-                  return;
-              }
-              currentCashDetails = {
-                  cashReceived: receivedAmount,
-                  changeReturned: receivedAmount - total
-              };
-          }
+      if (!isReturnMode && cashPaid > 0) {
+          currentCashDetails = {
+              cashReceived: cashPaid,
+              changeReturned: 0
+          };
       }
 
       const tx: Transaction = {
           id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount,
           taxRate: selectedTax.value, taxLabel: selectedTax.label, date: buildEffectiveTransactionDate(), type: isReturnMode ? 'return' : 'sale',
-          customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod
+          customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod: resolvedPaymentMethod, storeCreditUsed: appliedStoreCredit,
+          returnHandlingMode: isReturnMode ? returnHandlingMode : undefined,
+          saleSettlement: isReturnMode ? undefined : {
+            cashPaid,
+            onlinePaid,
+            creditDue,
+          }
       };
 
       pendingCheckoutRef.current = { transactionId: tx.id, cart: [...cart], transaction: tx, cashDetails: currentCashDetails };
       setTransactionSyncStatus({ phase: 'pending', message: 'Saving sale locally…' });
-      const newState = processTransaction(tx);
-      setProducts(newState.products); setCustomers(newState.customers); setTransactions(newState.transactions);
-      
-      // Cleanup
-      setIsCustomerModalOpen(false); 
-      setCart([]); 
-      setSelectedCustomer(null);
-      setNewCustomerName('');
-      setNewCustomerPhone('');
-      setCustomerSearch('');
-      setCashReceived('');
-      setSelectedTransactionDate('');
-      if(isReturnMode) setIsReturnMode(false);
+      try {
+        const newState = processTransaction(tx);
+        setProducts(newState.products); setCustomers(newState.customers); setTransactions(newState.transactions);
+        
+        // Cleanup
+        setIsCustomerModalOpen(false); 
+        setCart([]); 
+        setSelectedCustomer(null);
+        setNewCustomerName('');
+        setNewCustomerPhone('');
+        setCustomerSearch('');
+        setCashPaidInput('');
+        setOnlinePaidInput('');
+        setReturnHandlingMode('refund_cash');
+        setStoreCreditMode('none');
+        setCustomStoreCreditUse('');
+        setSelectedTransactionDate('');
+        if(isReturnMode) setIsReturnMode(false);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to save transaction. Please try again.';
+        setCheckoutError(message);
+        setTransactionSyncStatus({ phase: 'error', message });
+      }
   };
 
   const handlePrintReceipt = () => {
@@ -533,6 +605,22 @@ export default function Sales() {
   const taxable = subtotal - totalDiscount;
   const taxVal = (taxable * (selectedTax.value / 100));
   const grandTotal = isReturnMode ? -(taxable + taxVal) : (taxable + taxVal);
+  const availableStoreCredit = Math.max(0, Number(selectedCustomer?.storeCredit || 0));
+  const maxApplicableStoreCredit = isReturnMode || !selectedCustomer ? 0 : Math.min(Math.abs(grandTotal), availableStoreCredit);
+  const customStoreCreditNumber = Math.max(0, Number(customStoreCreditUse || 0));
+  const storeCreditUsed = !selectedCustomer || isReturnMode
+    ? 0
+    : storeCreditMode === 'full'
+      ? maxApplicableStoreCredit
+      : storeCreditMode === 'custom'
+        ? Math.min(customStoreCreditNumber, maxApplicableStoreCredit)
+        : 0;
+  const remainingPayable = Math.max(0, Math.abs(grandTotal) - storeCreditUsed);
+  const cashPaidValue = Math.max(0, Number(cashPaidInput || 0));
+  const onlinePaidValue = Math.max(0, Number(onlinePaidInput || 0));
+  const settlementPaidNow = cashPaidValue + onlinePaidValue;
+  const settlementOverpay = settlementPaidNow - remainingPayable;
+  const creditDuePreview = Math.max(0, remainingPayable - settlementPaidNow);
 
   const categories = ['All', ...Array.from(new Set(products.map((p) => p.category || 'Uncategorized')))];
   const filteredProducts = products.filter(p => {
@@ -552,8 +640,8 @@ export default function Sales() {
               <Input value={productSearch} onChange={e => setProductSearch(e.target.value)} className="pl-9 h-9" placeholder="Search product, barcode, variant" />
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <Button variant={!isReturnMode ? 'default' : 'outline'} className={!isReturnMode ? '' : 'text-foreground'} onClick={() => { setIsReturnMode(false); setCart([]); }}>Sale</Button>
-              <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setCart([]); }}>Return</Button>
+              <Button variant={!isReturnMode ? 'default' : 'outline'} className={!isReturnMode ? '' : 'text-foreground'} onClick={() => { setIsReturnMode(false); setReturnHandlingMode('refund_cash'); setCart([]); }}>Sale</Button>
+              <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setReturnHandlingMode('refund_cash'); setCart([]); }}>Return</Button>
             </div>
           </div>
           <div className="flex gap-2 overflow-x-auto pb-1">
@@ -569,12 +657,14 @@ export default function Sales() {
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
             {filteredProducts.map(p => {
               const cartItem = cart.find(item => item.id === p.id);
+              const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
               return (
                 <ProductGridItem
                   key={p.id}
                   product={p}
                   isReturnMode={isReturnMode}
                   cartQty={cartItem?.quantity || 0}
+                  returnableQty={returnableQty}
                   onAdd={(qty) => handleProductSelect(`${p.id}`, qty)}
                 />
               );
@@ -599,7 +689,7 @@ export default function Sales() {
                   <div key={`${row.variant}-${row.color}-${idx}`} className={`grid grid-cols-[1fr_80px_90px_116px] items-center gap-3 border rounded-xl p-3 ${disabled ? 'opacity-60 bg-muted/40' : ''}`}>
                     <div className="font-semibold text-sm">{label}</div>
                     <div className="text-xs text-muted-foreground text-center">{isReturnMode ? 'Sold left' : 'Stock'}: {row.stock}</div>
-                    <div className={`text-sm font-semibold text-center ${isReturnMode ? 'text-orange-600' : ''}`}>₹{variantPicker.product?.sellPrice}</div>
+                    <div className={`text-sm font-semibold text-center ${isReturnMode ? 'text-orange-600' : ''}`}>₹{row.sellPrice}</div>
                     <div className="flex items-center gap-2 justify-end">
                       <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty <= 0} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.max(0, r.qty - 1) } : r) }))}><Minus className="w-3 h-3" /></Button>
                       <div className="w-8 text-center text-sm font-bold">{row.qty}</div>
@@ -736,20 +826,23 @@ export default function Sales() {
             <CardContent className="p-5 h-[calc(88vh-66px)] grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)] gap-4">
               <div className="border rounded-xl p-4 space-y-4 overflow-y-auto">
                 {!isReturnMode && (
-                  <div className="grid grid-cols-3 gap-2">
-                    <Button variant={paymentMethod === 'Cash' ? 'default' : 'outline'} className="h-9 text-xs" onClick={() => setPaymentMethod('Cash')}><Coins className="w-3.5 h-3.5 mr-1.5" /> Cash</Button>
-                    <Button variant={paymentMethod === 'Online' ? 'default' : 'outline'} className="h-9 text-xs" onClick={() => { setPaymentMethod('Online'); setCashReceived(''); }}><Wallet className="w-3.5 h-3.5 mr-1.5" /> Online</Button>
-                    <Button variant={paymentMethod === 'Credit' ? 'default' : 'outline'} className="h-9 text-xs" onClick={() => { setPaymentMethod('Credit'); setCashReceived(''); }}><CreditCard className="w-3.5 h-3.5 mr-1.5" /> Credit</Button>
-                  </div>
-                )}
-
-                {!isReturnMode && paymentMethod === 'Cash' && (
-                  <div className="space-y-1.5">
-                    <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Received</Label>
-                    <Input type="number" min="0" step="0.01" placeholder="Enter received amount" value={cashReceived} onChange={(e) => { setCashReceived(e.target.value); setCheckoutError(null); }} />
-                    {Number(cashReceived) >= grandTotal && grandTotal > 0 && (
-                      <p className="text-xs font-bold text-green-700">₹{(Number(cashReceived) - grandTotal).toFixed(2)} change to be given</p>
-                    )}
+                  <div className="space-y-2.5 rounded-lg border p-3 bg-muted/10">
+                    <p className="text-xs font-bold uppercase text-muted-foreground">Settlement Split</p>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Paid</Label>
+                      <Input type="number" min="0" step="0.01" placeholder="0.00" value={cashPaidInput} onChange={(e) => { setCashPaidInput(e.target.value); setCheckoutError(null); }} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Online Paid</Label>
+                      <Input type="number" min="0" step="0.01" placeholder="0.00" value={onlinePaidInput} onChange={(e) => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} />
+                    </div>
+                    <div className="text-xs space-y-1 border-t pt-2">
+                      <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{settlementPaidNow.toFixed(2)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Credit Due (Auto)</span><span>₹{creditDuePreview.toFixed(2)}</span></div>
+                      {settlementOverpay > 0.0001 && (
+                        <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{settlementOverpay.toFixed(2)}</p>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -819,6 +912,62 @@ export default function Sales() {
                   </div>
                 )}
 
+                {!isReturnMode && selectedCustomer && (
+                  <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span>
+                      <span className="font-bold">₹{availableStoreCredit.toFixed(2)}</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <Button size="sm" variant={storeCreditMode === 'none' ? 'default' : 'outline'} onClick={() => { setStoreCreditMode('none'); setCustomStoreCreditUse(''); }}>No Use</Button>
+                      <Button size="sm" variant={storeCreditMode === 'full' ? 'default' : 'outline'} onClick={() => { setStoreCreditMode('full'); setCustomStoreCreditUse(''); }} disabled={maxApplicableStoreCredit <= 0}>Use Full</Button>
+                      <Button size="sm" variant={storeCreditMode === 'custom' ? 'default' : 'outline'} onClick={() => setStoreCreditMode('custom')} disabled={maxApplicableStoreCredit <= 0}>Custom</Button>
+                    </div>
+                    {storeCreditMode === 'custom' && (
+                      <div className="space-y-1">
+                        <Input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={customStoreCreditUse}
+                          onChange={(e) => {
+                            const raw = Math.max(0, Number(e.target.value || 0));
+                            const clamped = Math.min(raw, maxApplicableStoreCredit);
+                            setCustomStoreCreditUse(Number.isFinite(clamped) ? clamped.toString() : '');
+                          }}
+                          placeholder="Enter amount"
+                        />
+                        <p className="text-[11px] text-muted-foreground">Max usable: ₹{maxApplicableStoreCredit.toFixed(2)} (auto-applied)</p>
+                      </div>
+                    )}
+                    <div className="text-xs space-y-1 border-t pt-2">
+                      <div className="flex justify-between"><span>Invoice Total</span><span>₹{Math.abs(grandTotal).toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span>Store Credit Used</span><span>-₹{storeCreditUsed.toFixed(2)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{remainingPayable.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span>Cash Paid</span><span>₹{cashPaidValue.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span>Online Paid</span><span>₹{onlinePaidValue.toFixed(2)}</span></div>
+                      <div className="flex justify-between text-muted-foreground"><span>Credit Due to Create</span><span>₹{creditDuePreview.toFixed(2)}</span></div>
+                    </div>
+                  </div>
+                )}
+                {isReturnMode && (
+                  <div className="rounded-lg border p-3 space-y-2 bg-orange-50/40">
+                    <div className="text-xs font-semibold uppercase text-muted-foreground">Return Handling</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button size="sm" variant={returnHandlingMode === 'reduce_due' ? 'default' : 'outline'} onClick={() => setReturnHandlingMode('reduce_due')}>Reduce Due</Button>
+                      <Button size="sm" variant={returnHandlingMode === 'refund_cash' ? 'default' : 'outline'} onClick={() => setReturnHandlingMode('refund_cash')}>Refund Cash</Button>
+                      <Button size="sm" variant={returnHandlingMode === 'refund_online' ? 'default' : 'outline'} onClick={() => setReturnHandlingMode('refund_online')}>Refund Online</Button>
+                      <Button size="sm" variant={returnHandlingMode === 'store_credit' ? 'default' : 'outline'} onClick={() => setReturnHandlingMode('store_credit')}>Store Credit</Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {returnHandlingMode === 'refund_cash' && 'Cash outflow from drawer.'}
+                      {returnHandlingMode === 'refund_online' && 'Online/bank refund (no drawer cash impact).'}
+                      {returnHandlingMode === 'reduce_due' && 'Apply against customer due (customer required).'}
+                      {returnHandlingMode === 'store_credit' && 'Convert to customer store credit (customer required).'}
+                    </p>
+                  </div>
+                )}
+
                 {!(customerSearch && !selectedCustomer && filteredCustomers.length === 0 && customerTab === 'search') && (
                   <Button className={`w-full h-11 text-base font-bold ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''}`} onClick={completeCheckout} disabled={transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing'}>
                     {transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing' ? 'Processing…' : 'Confirm & Pay'}
@@ -873,6 +1022,16 @@ export default function Sales() {
                           <p>Total: ₹{transactionComplete.total.toFixed(2)}</p>
                           <p>Cash Received: ₹{transactionCashDetails.cashReceived.toFixed(2)}</p>
                           <p className="font-bold text-green-700">Change Returned: ₹{transactionCashDetails.changeReturned.toFixed(2)}</p>
+                        </div>
+                      )}
+                      {transactionComplete.type === 'sale' && (
+                        <div className="text-sm bg-muted rounded-lg p-3 space-y-1 text-left">
+                          <p className="font-semibold">Settlement Breakdown</p>
+                          <p>Total Invoice: ₹{Math.abs(transactionComplete.total).toFixed(2)}</p>
+                          <p>Store Credit Used: ₹{Number(transactionComplete.storeCreditUsed || 0).toFixed(2)}</p>
+                          <p>Cash Paid: ₹{Number(transactionComplete.saleSettlement?.cashPaid || 0).toFixed(2)}</p>
+                          <p>Online Paid: ₹{Number(transactionComplete.saleSettlement?.onlinePaid || 0).toFixed(2)}</p>
+                          <p>Credit Due: ₹{Number(transactionComplete.saleSettlement?.creditDue || 0).toFixed(2)}</p>
                         </div>
                       )}
                       <div className="flex gap-3 pt-4">

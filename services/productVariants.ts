@@ -14,9 +14,21 @@ export const productHasCombinationStock = (product: Product) => {
 export const getProductStockRows = (product: Product) => {
   const rows = product.stockByVariantColor || [];
   if (!rows.length) {
-    return [{ variant: NO_VARIANT, color: NO_COLOR, stock: Math.max(0, product.stock || 0) }];
+    return [{
+      variant: NO_VARIANT,
+      color: NO_COLOR,
+      stock: Math.max(0, product.stock || 0),
+      buyPrice: product.buyPrice,
+      sellPrice: product.sellPrice
+    }];
   }
-  return rows.map(r => ({ variant: normalizeVariant(r.variant), color: normalizeColor(r.color), stock: Math.max(0, r.stock || 0) }));
+  return rows.map(r => ({
+    variant: normalizeVariant(r.variant),
+    color: normalizeColor(r.color),
+    stock: Math.max(0, r.stock || 0),
+    buyPrice: r.buyPrice,
+    sellPrice: r.sellPrice
+  }));
 };
 
 export const getAvailableStockForCombination = (product: Product, variant?: string, color?: string) => {
@@ -39,4 +51,32 @@ export const formatItemNameWithVariant = (name: string, variant?: string, color?
   if (v !== NO_VARIANT && c !== NO_COLOR) return `${name} - ${v} - ${c}`;
   if (v !== NO_VARIANT) return `${name} - ${v}`;
   return `${name} - ${c}`;
+};
+
+export const getResolvedSellPriceForCombination = (product: Product, variant?: string, color?: string) => {
+  const rows = getProductStockRows(product);
+  const v = normalizeVariant(variant);
+  const c = normalizeColor(color);
+  const matchingRow = rows.find(r => r.variant === v && r.color === c);
+  if (typeof matchingRow?.sellPrice === 'number' && Number.isFinite(matchingRow.sellPrice)) {
+    return matchingRow.sellPrice;
+  }
+  if (typeof product.sellPrice === 'number' && Number.isFinite(product.sellPrice)) {
+    return product.sellPrice;
+  }
+  return 0;
+};
+
+export const getResolvedBuyPriceForCombination = (product: Product, variant?: string, color?: string) => {
+  const rows = getProductStockRows(product);
+  const v = normalizeVariant(variant);
+  const c = normalizeColor(color);
+  const matchingRow = rows.find(r => r.variant === v && r.color === c);
+  if (typeof matchingRow?.buyPrice === 'number' && Number.isFinite(matchingRow.buyPrice)) {
+    return matchingRow.buyPrice;
+  }
+  if (typeof product.buyPrice === 'number' && Number.isFinite(product.buyPrice)) {
+    return product.buyPrice;
+  }
+  return 0;
 };
