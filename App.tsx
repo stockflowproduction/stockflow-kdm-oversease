@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { HashRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import Admin from './pages/Admin';
 import Sales from './pages/Sales';
-import BarcodeSales from './pages/BarcodeSales';
 import Reports from './pages/Reports';
 import Transactions from './pages/Transactions';
 import Customers from './pages/Customers';
@@ -16,7 +15,7 @@ import { getCurrentUser, logout } from './services/auth';
 import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
-import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, ScanQrCode, RotateCcw, Layers, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
 
 // --- Components ---
@@ -178,7 +177,6 @@ export default function App() {
             <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 mt-2">Menu</p>
             <NavItem to="/" icon={LayoutDashboard} label="Inventory" />
             <NavItem to="/sales" icon={ShoppingCart} label="POS System" />
-            <NavItem to="/barcode-pos" icon={ScanQrCode} label="Barcode POS" />
             <NavItem to="/transactions" icon={ArrowRightLeft} label="Transactions" />
             <NavItem to="/customers" icon={Users} label="Customers" />
             <NavItem to="/pdf" icon={FileText} label="Reports" />
@@ -189,9 +187,8 @@ export default function App() {
 
             <div className="pt-6">
                 <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Quick Actions</p>
-                <QuickLink to="/barcode-pos?mode=scan" icon={ScanQrCode} label="Scan to Sell" />
-                <QuickLink to="/barcode-pos?mode=return_scan" icon={RotateCcw} label="Scan Return" />
-                <QuickLink to="/barcode-pos?mode=bulk_scan" icon={Layers} label="Bulk Scan" />
+                <QuickLink to="/sales?mode=sale" icon={ShoppingCart} label="Quick Sale" />
+                <QuickLink to="/sales?mode=return" icon={ArrowRightLeft} label="Quick Return" />
             </div>
           </nav>
           
@@ -215,12 +212,6 @@ export default function App() {
               <ShoppingCart className="w-5 h-5" />
               <span className="text-[10px] font-medium mt-1">POS</span>
            </Link>
-           
-           <div className="relative -top-5">
-              <Link to="/barcode-pos?mode=scan" className="flex items-center justify-center w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg hover:scale-105 transition-transform border-4 border-background active:scale-95">
-                  <ScanQrCode className="w-7 h-7" />
-              </Link>
-           </div>
 
            <Link to="/customers" className="flex flex-col items-center justify-center w-14 h-full text-muted-foreground hover:text-primary active:text-primary/70">
               <Users className="w-5 h-5" />
@@ -304,7 +295,6 @@ export default function App() {
               
               {/* Unprotected Route (POS) */}
               <Route path="/sales" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Sales /></ProtectedRoute>} />
-              <Route path="/barcode-pos" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><BarcodeSales /></ProtectedRoute>} />
               
               <Route path="/verify-email" element={<VerificationRequired email={currentEmail || undefined} />} />
               <Route path="*" element={<Navigate to="/" />} />

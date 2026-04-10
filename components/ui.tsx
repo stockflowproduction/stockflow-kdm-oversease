@@ -38,10 +38,20 @@ export const Button = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttrib
 );
 
 export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
-  ({ className, ...props }, ref) => {
+  ({ className, onWheel, type, ...props }, ref) => {
+    const handleWheel = (event: React.WheelEvent<HTMLInputElement>) => {
+      onWheel?.(event);
+      if (event.defaultPrevented) return;
+      if (type !== 'number') return;
+      if (document.activeElement !== event.currentTarget) return;
+      event.currentTarget.blur();
+    };
+
     return (
       <input
         ref={ref}
+        type={type}
+        onWheel={handleWheel}
         className={cn(
           "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
           className

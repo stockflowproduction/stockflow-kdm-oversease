@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
+import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -12,6 +12,7 @@ import { downloadCustomersData, downloadCustomersTemplate, importCustomersFromFi
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label } from '../components/ui';
 import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
+import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 
 export default function Customers() {
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -87,11 +88,6 @@ export default function Customers() {
       if (viewingCustomer) {
           const updatedC = data.customers.find(c => c.id === viewingCustomer.id);
           if (updatedC) {
-            console.info('[FIN][STORE_CREDIT][LOAD]', {
-              customerId: updatedC.id,
-              loadedDue: updatedC.totalDue,
-              loadedStoreCredit: updatedC.storeCredit || 0,
-            });
             setViewingCustomer(updatedC);
           }
           else setViewingCustomer(null);
@@ -114,15 +110,6 @@ export default function Customers() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!viewingCustomer) return;
-    console.info('[FIN][STORE_CREDIT][UI]', {
-      customerId: viewingCustomer.id,
-      renderedDue: viewingCustomer.totalDue,
-      renderedStoreCredit: viewingCustomer.storeCredit || 0,
-    });
-  }, [viewingCustomer?.id, viewingCustomer?.totalDue, viewingCustomer?.storeCredit]);
-
   const highValueThreshold = useMemo(() => {
     if (customers.length < 3) return Infinity;
     const sorted = [...customers].sort((a, b) => b.totalSpend - a.totalSpend);
@@ -130,8 +117,30 @@ export default function Customers() {
     return sorted[index].totalSpend;
   }, [customers]);
 
+  const canonicalBalanceSnapshot = useMemo(() => {
+    const snapshot = getCanonicalCustomerBalanceSnapshot(customers, transactions);
+    console.info('[FIN][CUSTOMERS][CURRENT_BALANCE]', {
+      customerCount: customers.length,
+      totalDue: snapshot.totalDue,
+      totalStoreCredit: snapshot.totalStoreCredit,
+    });
+    return snapshot;
+  }, [customers, transactions]);
+
+  const canonicalCustomers = useMemo(() => (
+    customers.map((customer) => {
+      const canonical = canonicalBalanceSnapshot.balances.get(customer.id);
+      if (!canonical) return customer;
+      return {
+        ...customer,
+        totalDue: canonical.totalDue,
+        storeCredit: canonical.storeCredit,
+      };
+    })
+  ), [customers, canonicalBalanceSnapshot]);
+
   const filteredData = useMemo(() => {
-    let processed = [...customers];
+    let processed = [...canonicalCustomers];
     
     if (searchQuery) {
         const lowerQ = searchQuery.toLowerCase();
@@ -157,7 +166,18 @@ export default function Customers() {
 
     const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
-  }, [customers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold]);
+  }, [canonicalCustomers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold]);
+
+  const viewingCustomerCanonical = useMemo(() => {
+    if (!viewingCustomer) return null;
+    const canonical = canonicalBalanceSnapshot.balances.get(viewingCustomer.id);
+    if (!canonical) return viewingCustomer;
+    return {
+      ...viewingCustomer,
+      totalDue: canonical.totalDue,
+      storeCredit: canonical.storeCredit,
+    };
+  }, [viewingCustomer, canonicalBalanceSnapshot]);
   const selectedCustomers = useMemo(
     () => customers.filter(customer => selectedCustomerIds.includes(customer.id)),
     [customers, selectedCustomerIds]
@@ -270,6 +290,16 @@ export default function Customers() {
 
       return combined.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   }, [transactions, upfrontOrders, viewingCustomer]);
+  const customerLedgerRows = useMemo(() => {
+      if (!viewingCustomer) return [];
+      const txHistory = transactions
+        .filter(tx => tx.customerId === viewingCustomer.id)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      return buildCustomerLedgerRows(txHistory);
+  }, [transactions, viewingCustomer]);
+  const ledgerRowByTxId = useMemo(() => {
+      return new Map(customerLedgerRows.map(row => [row.tx.id, row]));
+  }, [customerLedgerRows]);
 
   const customerOrderSummary = useMemo(() => {
       if (!viewingCustomer) return { totalOrders: 0, openOrders: 0, totalValue: 0, paidSoFar: 0, remaining: 0 };
@@ -322,7 +352,7 @@ export default function Customers() {
 
   const parsedPaymentAmount = Number(paymentAmount);
   const paymentAmountValid = Number.isFinite(parsedPaymentAmount) && parsedPaymentAmount > 0;
-  const currentDue = Math.max(0, Number(viewingCustomer?.totalDue || 0));
+  const currentDue = Math.max(0, Number(viewingCustomerCanonical?.totalDue || 0));
   const paymentAppliedToDue = paymentAmountValid ? Math.min(parsedPaymentAmount, currentDue) : 0;
   const paymentExcessToCredit = paymentAmountValid ? Math.max(0, parsedPaymentAmount - currentDue) : 0;
 
@@ -436,7 +466,7 @@ export default function Customers() {
       }
 
       if (amount > selectedUpfrontOrder.remainingAmount + 0.01) {
-          setCollectPaymentError(`Cannot collect more than remaining balance (₹${selectedUpfrontOrder.remainingAmount.toFixed(2)})`);
+          setCollectPaymentError(`Cannot collect more than remaining balance (${formatINRPrecise(selectedUpfrontOrder.remainingAmount)})`);
           return;
       }
 
@@ -452,7 +482,7 @@ export default function Customers() {
   const isCollectAmountValid = Number.isFinite(collectAmountNumber) && collectAmountNumber > 0;
   const selectedOrderRemaining = Math.max(0, Number(selectedUpfrontOrder?.remainingAmount || 0));
   const projectedRemainingAfterCollect = Math.max(0, selectedOrderRemaining - (isCollectAmountValid ? collectAmountNumber : 0));
-  const availableStoreCredit = Math.max(0, Number(viewingCustomer?.storeCredit || 0));
+  const availableStoreCredit = Math.max(0, Number(viewingCustomerCanonical?.storeCredit || 0));
   const possibleCreditApplication = Math.min(availableStoreCredit, projectedRemainingAfterCollect);
 
   const handleAdminPasswordSubmit = () => {
@@ -505,9 +535,9 @@ export default function Customers() {
       doc.text(profile.storeName?.toUpperCase() || "STOCKFLOW ERP", pageWidth / 2, 10, { align: "center" });
 
       // Period Section
-      const history = [...customerHistory].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-      const startDate = history.length > 0 ? new Date(history[0].date).toLocaleDateString() : "N/A";
-      const endDate = history.length > 0 ? new Date(history[history.length - 1].date).toLocaleDateString() : new Date().toLocaleDateString();
+      const txRows = [...customerLedgerRows];
+      const startDate = txRows.length > 0 ? new Date(txRows[0].tx.date).toLocaleDateString() : "N/A";
+      const endDate = txRows.length > 0 ? new Date(txRows[txRows.length - 1].tx.date).toLocaleDateString() : new Date().toLocaleDateString();
 
       doc.setDrawColor(15, 48, 87);
       doc.setFillColor(211, 227, 245);
@@ -536,47 +566,20 @@ export default function Customers() {
       doc.text(`GSTIN: ${profile.gstin || "-"}`, pageWidth - 14, 51, { align: "right" });
 
       // Ledger Logic (Correcting the running balance bug)
-      let runningBalance = 0;
       let totalSalesAmount = 0;
-      let totalReceiptsAmount = 0;
-
-      const bodyData = history.map((tx) => {
-          const isSale = tx.type === 'sale';
-          const isPayment = tx.type === 'payment';
-          const isReturn = tx.type === 'return';
-          const settlement = isSale ? getSaleSettlementBreakdown(tx) : null;
-          
-          const amount = Math.abs(tx.total);
-          
-          // DEBIT logic: Sale total is recorded as invoice debit
-          const debit = isSale ? amount : 0;
-          
-          // CREDIT logic: 
-          // 1. Payments and returns are always credits
-          // 2. For sale rows, settled-now amount offsets debit immediately; only creditDue stays in running due.
-          let credit = (isPayment || isReturn) ? amount : 0;
-          if (isSale && settlement) {
-              credit += Math.max(0, settlement.cashPaid + settlement.onlinePaid + Math.max(0, Number(tx.storeCreditUsed || 0)));
-          }
-          
-          if (isSale) totalSalesAmount += debit;
-          if (isPayment || isReturn) totalReceiptsAmount += (isPayment ? amount : 0);
-          
-          runningBalance += (debit - credit);
-
-          const statusLabel = runningBalance >= 0 ? "Dr" : "Cr";
-          const description = isSale ? `Invoice #${tx.id.slice(-6)}${settlement ? ` (Paid ₹${(settlement.cashPaid + settlement.onlinePaid).toFixed(0)}, Due ₹${settlement.creditDue.toFixed(0)})` : ''}` : 
-                             (isReturn ? `Return #${tx.id.slice(-6)}` : `Payment #${tx.id.slice(-6)}`);
-
+      let totalPaymentsAmount = 0;
+      const bodyData = txRows.map((row) => {
+          if (row.tx.type === 'sale') totalSalesAmount += row.saleTotal;
+          if (row.tx.type === 'payment') totalPaymentsAmount += row.paymentAmount;
+          const statusLabel = row.netAfter >= 0 ? "Dr" : "Cr";
           return {
-              date: new Date(tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }),
-              desc: description,
-              debit: debit > 0 ? `${debit.toFixed(2)}` : "",
-              credit: credit > 0 ? `${credit.toFixed(2)}` : "",
+              date: new Date(row.tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }),
+              desc: row.statementDescription,
+              debit: row.debit > 0 ? `${formatMoneyPrecise(row.debit)}` : "",
+              credit: row.credit > 0 ? `${formatMoneyPrecise(row.credit)}` : "",
               type: statusLabel,
-              balance: `${Math.abs(runningBalance).toFixed(2)}`,
-              rawType: tx.type,
-              pm: tx.paymentMethod
+              balance: `${formatMoneyPrecise(Math.abs(row.netAfter))}`,
+              rawType: row.tx.type
           };
       });
 
@@ -615,12 +618,7 @@ export default function Customers() {
                   
                   // Color Debit Column
                   if (data.column.index === 2 && rowMeta.debit !== "") {
-                      // Sale: Green if Paid, Red if Unpaid (Credit)
-                      if (rowMeta.pm === 'Cash' || rowMeta.pm === 'Online') {
-                          data.cell.styles.textColor = [21, 128, 61]; // Green
-                      } else {
-                          data.cell.styles.textColor = [185, 28, 28]; // Red
-                      }
+                      data.cell.styles.textColor = [185, 28, 28]; // Customer due increased
                   }
                   
                   // Color Credit Column
@@ -648,11 +646,12 @@ export default function Customers() {
       
       doc.setFontSize(8);
       doc.text(`Total Sales: Rs. ${totalSalesAmount.toLocaleString()}`, pageWidth - 80, finalY + 15);
-      doc.text(`Total Receipts: Rs. ${totalReceiptsAmount.toLocaleString()}`, pageWidth - 80, finalY + 20);
+      doc.text(`Total Payments: Rs. ${totalPaymentsAmount.toLocaleString()}`, pageWidth - 80, finalY + 20);
       
       doc.setFontSize(10);
       doc.setFont("helvetica", "bold");
-      doc.text(`Final Due: Rs. ${Math.abs(runningBalance).toLocaleString()}`, pageWidth - 80, finalY + 27);
+      const finalNet = txRows.length ? txRows[txRows.length - 1].netAfter : 0;
+      doc.text(`Final Balance: ${finalNet >= 0 ? 'Dr' : 'Cr'} Rs. ${Math.abs(finalNet).toLocaleString()}`, pageWidth - 80, finalY + 27);
 
       doc.save(`Statement_${viewingCustomer.name.replace(/\s+/g, '_')}.pdf`);
   };
@@ -663,8 +662,8 @@ export default function Customers() {
       doc.setFillColor(15, 23, 42); doc.rect(0, 0, pageWidth, 40, 'F');
       doc.setFontSize(20); doc.setTextColor(255, 255, 255); doc.text("Customer Dues Report", 14, 20);
       doc.setFontSize(10); doc.setTextColor(203, 213, 225); doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 26);
-      const tableBody = filteredData.displayCustomers.map(c => [c.name, c.phone, `Rs.${c.totalSpend.toFixed(0)}`, `Rs.${c.totalDue.toFixed(2)}`]);
-      tableBody.push(['TOTAL', '', '', `Rs.${filteredData.totalDues.toFixed(2)}`]);
+      const tableBody = filteredData.displayCustomers.map(c => [c.name, c.phone, `Rs.${formatMoneyWhole(c.totalSpend)}`, `Rs.${formatMoneyPrecise(c.totalDue)}`]);
+      tableBody.push(['TOTAL', '', '', `Rs.${formatMoneyPrecise(filteredData.totalDues)}`]);
       autoTable(doc, { startY: 50, head: [['Name', 'Phone', 'Total Spend', 'Current Due']], body: tableBody, theme: 'striped', columnStyles: { 3: { halign: 'right', fontStyle: 'bold', textColor: [220, 38, 38] } } });
       doc.save(`Customer_Dues_Report.pdf`);
   };
@@ -734,7 +733,7 @@ export default function Customers() {
                      <AlertCircle className="w-5 h-5" />
                      <span className="text-xs font-bold uppercase tracking-wider">Overall Outstanding Dues</span>
                  </div>
-                 <span className="text-lg font-bold text-red-800">₹{filteredData.totalDues.toLocaleString()}</span>
+                 <span className="text-lg font-bold text-red-800">₹{formatMoneyWhole(filteredData.totalDues)}</span>
              </div>
           )}
 
@@ -799,9 +798,9 @@ export default function Customers() {
                 <td className="p-3 font-medium">{customer.name}</td>
                 <td className="p-3">{customer.phone}</td>
                 <td className="p-3">{customer.visitCount}</td>
-                <td className="p-3">₹{customer.totalSpend.toLocaleString()}</td>
-                <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{customer.totalDue.toFixed(2)}</td>
-                <td className={`p-3 font-semibold ${(customer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{(customer.storeCredit || 0).toFixed(2)}</td>
+                <td className="p-3">₹{formatMoneyWhole(customer.totalSpend)}</td>
+                <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{formatMoneyPrecise(customer.totalDue)}</td>
+                <td className={`p-3 font-semibold ${(customer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{formatMoneyPrecise(customer.storeCredit || 0)}</td>
                 <td className="p-3">{new Date(customer.lastVisit).toLocaleDateString()}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
@@ -912,16 +911,16 @@ export default function Customers() {
                           </div>
                       </div>
                       <div className="flex gap-3 mt-6">
-                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${viewingCustomer.totalDue > 0 ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'}`}>
-                               <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
-                               <div className={`text-2xl font-black ${viewingCustomer.totalDue > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{viewingCustomer.totalDue.toFixed(2)}</div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
+                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyPrecise(viewingCustomerCanonical?.totalDue || 0)}</div>
                            </div>
-                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomer.storeCredit || 0) > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
-                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>Store Credit</div>
-                               <div className={`text-2xl font-black ${(viewingCustomer.storeCredit || 0) > 0 ? 'text-emerald-700' : 'text-slate-700'}`}>₹{(viewingCustomer.storeCredit || 0).toFixed(2)}</div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>Store Credit</div>
+                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'text-emerald-700' : 'text-slate-700'}`}>₹{formatMoneyPrecise(viewingCustomerCanonical?.storeCredit || 0)}</div>
                            </div>
                            <div className="flex flex-col gap-2">
-                               <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={viewingCustomer.totalDue <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>
+                               <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={(viewingCustomerCanonical?.totalDue || 0) <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>
                                    <Coins className="w-4 h-4 mr-1.5" /> Record Payment
                                </Button>
                                <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
@@ -935,8 +934,8 @@ export default function Customers() {
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
                         <div className="rounded-lg border bg-slate-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-slate-500">Custom Orders</div><div className="text-sm font-black text-slate-800">{customerOrderSummary.totalOrders}</div></div>
                         <div className="rounded-lg border bg-amber-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-amber-600">Open Orders</div><div className="text-sm font-black text-amber-700">{customerOrderSummary.openOrders}</div></div>
-                        <div className="rounded-lg border bg-emerald-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-emerald-600">Advance Paid</div><div className="text-sm font-black text-emerald-700">₹{customerOrderSummary.paidSoFar.toFixed(2)}</div></div>
-                        <div className="rounded-lg border bg-rose-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-rose-600">Remaining to Collect</div><div className="text-sm font-black text-rose-700">₹{customerOrderSummary.remaining.toFixed(2)}</div></div>
+                        <div className="rounded-lg border bg-emerald-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-emerald-600">Advance Paid</div><div className="text-sm font-black text-emerald-700">₹{formatMoneyPrecise(customerOrderSummary.paidSoFar)}</div></div>
+                        <div className="rounded-lg border bg-rose-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-rose-600">Remaining to Collect</div><div className="text-sm font-black text-rose-700">₹{formatMoneyPrecise(customerOrderSummary.remaining)}</div></div>
                       </div>
                   </CardHeader>
                   <CardContent className="flex-1 overflow-y-auto p-0 bg-background">
@@ -955,6 +954,7 @@ export default function Customers() {
                                 if (item.historyType === 'transaction') {
                                   const tx = item as Transaction;
                                   const saleSettlement = getSaleSettlementView(tx);
+                                  const ledgerRow = ledgerRowByTxId.get(tx.id);
                                   const hasDue = (saleSettlement?.creditDue || 0) > 0.0001;
                                   const hasPaidNow = (saleSettlement?.paidNow || 0) > 0.0001;
                                   const isSplitSale = Boolean(saleSettlement) && hasDue && hasPaidNow;
@@ -980,11 +980,16 @@ export default function Customers() {
                                                     • Paid Now ₹{saleSettlement.paidNow.toFixed(2)} • Credit Due ₹{saleSettlement.creditDue.toFixed(2)}{saleSettlement.storeCreditUsed > 0 ? ` • Used SC ₹${saleSettlement.storeCreditUsed.toFixed(2)}` : ''}
                                                   </div>
                                                 )}
+                                                {!saleSettlement && ledgerRow && (
+                                                  <div className="text-[10px] text-muted-foreground font-medium mt-1">
+                                                    • {ledgerRow.listDescription}
+                                                  </div>
+                                                )}
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-3 text-right">
                                             <div className={`text-sm sm:text-base font-black ${tx.type === 'payment' ? 'text-emerald-700' : isSplitSale ? 'text-amber-700' : (tx.paymentMethod === 'Credit' ? 'text-red-700' : 'text-slate-900')}`}>
-                                                {tx.type === 'payment' ? '-' : ''}₹{Math.abs(tx.total).toFixed(2)}
+                                                {tx.type === 'payment' ? '-' : ''}₹{formatMoneyPrecise(Math.abs(tx.total))}
                                             </div>
                                             {tx.type !== 'payment' && (
                                                 <div className="flex items-center gap-1">
@@ -1023,15 +1028,15 @@ export default function Customers() {
                                                 </div>
                                                 <div className="text-[10px] text-muted-foreground font-medium flex flex-wrap gap-x-2">
                                                     <span>{new Date(order.date).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</span>
-                                                    <span>• Total ₹{order.totalCost.toFixed(2)}</span>
-                                                    <span>• Advance ₹{order.advancePaid.toFixed(2)}</span>
-                                                    <span>• Remaining ₹{order.remainingAmount.toFixed(2)}</span>
+                                                    <span>• Total ₹{formatMoneyPrecise(order.totalCost)}</span>
+                                                    <span>• Advance ₹{formatMoneyPrecise(order.advancePaid)}</span>
+                                                    <span>• Remaining ₹{formatMoneyPrecise(order.remainingAmount)}</span>
                                                 </div>
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-3 text-right">
                                             <div className="text-sm sm:text-base font-black text-amber-700">
-                                                ₹{order.totalCost.toFixed(2)}
+                                                ₹{formatMoneyPrecise(order.totalCost)}
                                             </div>
                                             <div className="flex items-center gap-1">
                                                 {order.status !== 'cleared' && (
@@ -1087,12 +1092,12 @@ export default function Customers() {
                             autoFocus 
                           />
                         </div>
-                        <p className="text-[10px] text-muted-foreground font-bold">Outstanding due: ₹{viewingCustomer.totalDue.toFixed(2)} (overpayment allowed)</p>
+                        <p className="text-[10px] text-muted-foreground font-bold">Outstanding due: ₹{formatMoneyPrecise(viewingCustomerCanonical?.totalDue || 0)} (overpayment allowed)</p>
                         <p className="text-[10px] text-muted-foreground">Any excess above due will be saved as store credit.</p>
                         {paymentAmountValid && (
                           <div className="rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-[10px]">
-                            <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to due</span><span className="font-bold text-emerald-700">₹{paymentAppliedToDue.toFixed(2)}</span></div>
-                            <div className="mt-1 flex items-center justify-between"><span className="text-muted-foreground">Added to store credit</span><span className="font-bold text-emerald-700">₹{paymentExcessToCredit.toFixed(2)}</span></div>
+                            <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to due</span><span className="font-bold text-emerald-700">₹{formatMoneyPrecise(paymentAppliedToDue)}</span></div>
+                            <div className="mt-1 flex items-center justify-between"><span className="text-muted-foreground">Added to store credit</span><span className="font-bold text-emerald-700">₹{formatMoneyPrecise(paymentExcessToCredit)}</span></div>
                           </div>
                         )}
                       </div>
@@ -1169,12 +1174,12 @@ export default function Customers() {
                                     </p>
                                     {item.discountAmount !== undefined && item.discountAmount > 0 ? (
                                         <p className="text-[9px] font-bold text-emerald-600 mt-0.5">
-                                            Discount: -₹{item.discountAmount.toFixed(2)} ({item.discountPercent}%)
+                                            Discount: -₹{formatMoneyPrecise(item.discountAmount)} ({item.discountPercent}%)
                                         </p>
                                     ) : null}
                                 </div>
                                 <div className="text-sm font-black text-slate-900 bg-slate-50 px-2 py-1 rounded-lg">
-                                    ₹{((item.sellPrice * item.quantity) - (item.discountAmount || 0)).toFixed(2)}
+                                    ₹{formatMoneyPrecise((item.sellPrice * item.quantity) - (item.discountAmount || 0))}
                                 </div>
                             </div>
                         ))}
@@ -1183,13 +1188,13 @@ export default function Customers() {
                       <div className="bg-slate-900 p-5 rounded-2xl text-sm space-y-3 text-white shadow-xl mt-4">
                           <div className="flex justify-between text-slate-400 font-bold uppercase text-[10px] tracking-widest">
                               <span>Subtotal</span>
-                              <span>₹{selectedTx.subtotal?.toFixed(2)}</span>
+                              <span>₹{formatMoneyPrecise(selectedTx.subtotal || 0)}</span>
                           </div>
                           
                           <div className="flex justify-between text-emerald-400 font-bold uppercase text-[10px] tracking-widest">
                               <span>Savings</span>
                               {selectedTx.discount && selectedTx.discount > 0 ? (
-                                  <span>-₹{selectedTx.discount.toFixed(2)}</span>
+                                  <span>-₹{formatMoneyPrecise(selectedTx.discount)}</span>
                               ) : (
                                   <span className="text-slate-500 normal-case font-medium">No discount</span>
                               )}
@@ -1198,22 +1203,22 @@ export default function Customers() {
                           <div className="flex justify-between text-slate-400 font-bold uppercase text-[10px] tracking-widest">
                               <span>Tax {selectedTx.tax && selectedTx.tax > 0 ? `(${selectedTx.taxLabel})` : ''}</span>
                               {selectedTx.tax && selectedTx.tax > 0 ? (
-                                  <span>₹{selectedTx.tax.toFixed(2)}</span>
+                                  <span>₹{formatMoneyPrecise(selectedTx.tax)}</span>
                               ) : (
                                   <span className="text-slate-500 normal-case font-medium">No tax applied</span>
                               )}
                           </div>
 
                           <div className="h-px bg-slate-800 my-1"></div>
-                          <div className="flex justify-between font-black text-xl text-white"><span>Grand Total</span><span>₹{Math.abs(selectedTx.total).toFixed(2)}</span></div>
+                          <div className="flex justify-between font-black text-xl text-white"><span>Grand Total</span><span>₹{formatMoneyWhole(Math.abs(selectedTx.total))}</span></div>
                           {selectedTx.type === 'sale' && (
                             <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800 p-3 text-[11px] space-y-1">
                               <p className="font-bold uppercase tracking-wider text-slate-300">Settlement Breakdown</p>
-                              <div className="flex justify-between"><span>Total Sale</span><span>₹{Math.abs(selectedTx.total).toFixed(2)}</span></div>
-                              <div className="flex justify-between"><span>Store Credit Used</span><span>₹{Math.max(0, Number(selectedTx.storeCreditUsed || 0)).toFixed(2)}</span></div>
-                              <div className="flex justify-between"><span>Cash Paid</span><span>₹{getSaleSettlementBreakdown(selectedTx).cashPaid.toFixed(2)}</span></div>
-                              <div className="flex justify-between"><span>Online Paid</span><span>₹{getSaleSettlementBreakdown(selectedTx).onlinePaid.toFixed(2)}</span></div>
-                              <div className="flex justify-between font-semibold"><span>Credit Due Created</span><span>₹{getSaleSettlementBreakdown(selectedTx).creditDue.toFixed(2)}</span></div>
+                              <div className="flex justify-between"><span>Total Sale</span><span>₹{formatMoneyWhole(Math.abs(selectedTx.total))}</span></div>
+                              <div className="flex justify-between"><span>Store Credit Used</span><span>₹{formatMoneyPrecise(Math.max(0, Number(selectedTx.storeCreditUsed || 0)))}</span></div>
+                              <div className="flex justify-between"><span>Cash Paid</span><span>₹{formatMoneyPrecise(getSaleSettlementBreakdown(selectedTx).cashPaid)}</span></div>
+                              <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyPrecise(getSaleSettlementBreakdown(selectedTx).onlinePaid)}</span></div>
+                              <div className="flex justify-between font-semibold"><span>Credit Due Created</span><span>₹{formatMoneyPrecise(getSaleSettlementBreakdown(selectedTx).creditDue)}</span></div>
                             </div>
                           )}
                       </div>
@@ -1238,7 +1243,7 @@ export default function Customers() {
                           </div>
                       )}
                       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-600">
-                        Store Credit Available: <span className="font-bold text-emerald-700">₹{availableStoreCredit.toFixed(2)}</span>. Store credit is customer-level and is not auto-applied to a custom order at creation time.
+                        Store Credit Available: <span className="font-bold text-emerald-700">₹{formatMoneyPrecise(availableStoreCredit)}</span>. Store credit is customer-level and is not auto-applied to a custom order at creation time.
                       </div>
                       <div className="space-y-2">
                           <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Product Name</Label>
@@ -1276,7 +1281,7 @@ export default function Customers() {
                           <div className="relative">
                               <Input type="number" value={upfrontOrderForm.advancePaid} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, advancePaid: e.target.value})} placeholder="0.00" />
                               <div className="text-[10px] mt-1 font-bold text-red-600">
-                                  Balance Due: ₹{(parseFloat(upfrontOrderForm.totalCost || '0') - parseFloat(upfrontOrderForm.advancePaid || '0')).toFixed(2)}
+                                  Balance Due: ₹{formatMoneyPrecise(parseFloat(upfrontOrderForm.totalCost || '0') - parseFloat(upfrontOrderForm.advancePaid || '0'))}
                               </div>
                           </div>
                       </div>
@@ -1330,7 +1335,7 @@ export default function Customers() {
                           </div>
                       </div>
                       <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px]">
-                        <div className="flex justify-between"><span className="text-muted-foreground">Store Credit Available</span><span className="font-black text-emerald-700">₹{availableStoreCredit.toFixed(2)}</span></div>
+                        <div className="flex justify-between"><span className="text-muted-foreground">Store Credit Available</span><span className="font-black text-emerald-700">₹{formatMoneyPrecise(availableStoreCredit)}</span></div>
                         <div className="mt-1 text-muted-foreground">Store credit is customer-level and currently not auto-applied in this collect step.</div>
                       </div>
                       <div className="space-y-2">
@@ -1411,11 +1416,81 @@ export default function Customers() {
     </div>
   );
 }
-  const getSaleSettlementView = (tx: Transaction) => {
-    if (tx.type !== 'sale') return null;
-    const settlement = getSaleSettlementBreakdown(tx);
-    const total = Math.abs(Number(tx.total || 0));
-    const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
-    const paidNow = settlement.cashPaid + settlement.onlinePaid;
-    return { total, storeCreditUsed, cashPaid: settlement.cashPaid, onlinePaid: settlement.onlinePaid, creditDue: settlement.creditDue, paidNow };
-  };
+const getSaleSettlementView = (tx: Transaction) => {
+  if (tx.type !== 'sale') return null;
+  const settlement = getSaleSettlementBreakdown(tx);
+  const total = Math.abs(Number(tx.total || 0));
+  const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+  const paidNow = settlement.cashPaid + settlement.onlinePaid;
+  return { total, storeCreditUsed, cashPaid: settlement.cashPaid, onlinePaid: settlement.onlinePaid, creditDue: settlement.creditDue, paidNow };
+};
+
+type CustomerLedgerRow = {
+  tx: Transaction;
+  debit: number;
+  credit: number;
+  saleTotal: number;
+  paymentAmount: number;
+  netAfter: number;
+  statementDescription: string;
+  listDescription: string;
+};
+
+const buildCustomerLedgerRows = (transactions: Transaction[]): CustomerLedgerRow[] => {
+  const sorted = [...transactions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const rows: CustomerLedgerRow[] = [];
+  let runningDue = 0;
+  let runningStoreCredit = 0;
+  const processed: Transaction[] = [];
+
+  sorted.forEach((tx) => {
+    const amount = Math.abs(Number(tx.total || 0));
+    const dueBefore = runningDue;
+    const storeCreditBefore = runningStoreCredit;
+    const netBefore = dueBefore - storeCreditBefore;
+    let statementDescription = '';
+    let listDescription = '';
+    let saleTotal = 0;
+    let paymentAmount = 0;
+
+    if (tx.type === 'sale') {
+      const settlement = getSaleSettlementBreakdown(tx);
+      const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+      runningDue = Math.max(0, runningDue + settlement.creditDue);
+      runningStoreCredit = Math.max(0, runningStoreCredit - storeCreditUsed);
+      saleTotal = amount;
+      statementDescription = `Invoice #${tx.id.slice(-6)} (Total ${formatINRPrecise(amount)}, Paid ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)}, Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? `, Used SC ${formatINRPrecise(storeCreditUsed)}` : ''})`;
+      listDescription = `Sale ${formatINRPrecise(amount)} • Paid now ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)} • Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? ` • Used SC ${formatINRPrecise(storeCreditUsed)}` : ''}`;
+    } else if (tx.type === 'payment') {
+      const dueReduced = Math.min(runningDue, amount);
+      const storeCreditAdded = Math.max(0, amount - dueReduced);
+      runningDue = Math.max(0, runningDue - dueReduced);
+      runningStoreCredit = Math.max(0, runningStoreCredit + storeCreditAdded);
+      paymentAmount = amount;
+      statementDescription = `Payment #${tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}, Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? `, SC +${formatINRPrecise(storeCreditAdded)}` : ''})`;
+      listDescription = `${tx.paymentMethod || 'Cash'} payment ${formatINRPrecise(amount)} • Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? ` • Store credit +${formatINRPrecise(storeCreditAdded)}` : ''}`;
+    } else {
+      const allocation = getCanonicalReturnAllocation(tx, processed, runningDue);
+      runningDue = Math.max(0, runningDue - allocation.dueReduction);
+      runningStoreCredit = Math.max(0, runningStoreCredit + allocation.storeCreditIncrease);
+      statementDescription = `Return #${tx.id.slice(-6)} (${allocation.mode.replace('_', ' ')}: Cash ${formatINRPrecise(allocation.cashRefund)}, Online ${formatINRPrecise(allocation.onlineRefund)}, Due -${formatINRPrecise(allocation.dueReduction)}, SC +${formatINRPrecise(allocation.storeCreditIncrease)})`;
+      listDescription = `Return ${allocation.mode.replace('_', ' ')} • Cash ${formatINRPrecise(allocation.cashRefund)} • Online ${formatINRPrecise(allocation.onlineRefund)} • Due -${formatINRPrecise(allocation.dueReduction)}${allocation.storeCreditIncrease > 0 ? ` • SC +${formatINRPrecise(allocation.storeCreditIncrease)}` : ''}`;
+    }
+
+    const netAfter = runningDue - runningStoreCredit;
+    const netDelta = netAfter - netBefore;
+    rows.push({
+      tx,
+      debit: netDelta > 0 ? netDelta : 0,
+      credit: netDelta < 0 ? Math.abs(netDelta) : 0,
+      saleTotal,
+      paymentAmount,
+      netAfter,
+      statementDescription,
+      listDescription,
+    });
+    processed.push(tx);
+  });
+
+  return rows;
+};

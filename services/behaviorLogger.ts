@@ -78,7 +78,7 @@ const getCurrentTab = (): TabName => {
   if (path.includes('seller')) return 'Seller';
   if (path.includes('delivery')) return 'Delivery';
   if (path.includes('admin')) return 'Admin';
-  if (path.includes('sales') || path.includes('barcode-pos')) return 'POS';
+  if (path.includes('sales')) return 'POS';
   if (path.includes('pdf') || path.includes('report')) return 'Reports';
   if (path.includes('finance')) return 'Finance';
   if (path.includes('/') || path.includes('inventory')) return 'Inventory';

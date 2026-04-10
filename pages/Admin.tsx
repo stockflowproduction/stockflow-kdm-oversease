@@ -6,7 +6,7 @@ import { Product } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
 import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
-import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye } from 'lucide-react';
+import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -45,6 +45,10 @@ export default function Admin() {
   const [purchaseQty, setPurchaseQty] = useState('');
   const [purchasePrice, setPurchasePrice] = useState('');
   const [purchaseNextBuyPrice, setPurchaseNextBuyPrice] = useState('');
+  const [purchaseReference, setPurchaseReference] = useState('');
+  const [purchaseNotes, setPurchaseNotes] = useState('');
+  const [purchaseModalTab, setPurchaseModalTab] = useState<'add' | 'history'>('add');
+  const [purchaseHistoryVariantFilter, setPurchaseHistoryVariantFilter] = useState('all');
   const [selectedPurchaseVariantKey, setSelectedPurchaseVariantKey] = useState('');
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
   const barcodeCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -140,26 +144,156 @@ export default function Admin() {
     return Math.max(0, purchase - sold);
   };
 
+  const getVariantRowKey = (variant?: string, color?: string) => `${variant || NO_VARIANT}__${color || NO_COLOR}`;
+  const formatVariantColorValue = (value?: string, fallbackToken?: string) => {
+    if (!value) return 'Default';
+    if (fallbackToken && value === fallbackToken) return 'Default';
+    return value;
+  };
+
+  const renderPurchaseHistoryCards = (
+    productName: string,
+    rows: NonNullable<Product['purchaseHistory']>
+  ) => (
+    <div className="space-y-2">
+      {rows.map((h) => (
+        <div key={h.id} className="rounded-lg border bg-muted/10 p-3 text-xs space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-semibold">{productName}</div>
+            <div className="text-muted-foreground">{new Date(h.date).toLocaleString()}</div>
+          </div>
+          <div className="text-muted-foreground">
+            <span className="font-medium text-foreground">Variant:</span> {formatVariantColorValue(h.variant, NO_VARIANT)} &nbsp;•&nbsp;
+            <span className="font-medium text-foreground">Color:</span> {formatVariantColorValue(h.color, NO_COLOR)}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Qty</div><div className="font-semibold">{toNonNegativeNumber(h.quantity)}</div></div>
+            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Unit Cost</div><div className="font-semibold">₹{toNonNegativeNumber(h.unitPrice).toFixed(2)}</div></div>
+            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Prev Stock</div><div className="font-semibold">{toNonNegativeNumber(h.previousStock)}</div></div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded border bg-background px-2 py-1">
+              <span className="text-muted-foreground">Prev Buy:</span> ₹{toNonNegativeNumber(h.previousBuyPrice).toFixed(2)}
+            </span>
+            <span className="rounded border bg-background px-2 py-1">
+              <span className="text-muted-foreground">New Buy:</span> ₹{toNonNegativeNumber(h.nextBuyPrice).toFixed(2)}
+            </span>
+          </div>
+          <div className="space-y-1 text-[11px]">
+            <div><span className="text-muted-foreground">Reference:</span> {h.reference || '—'}</div>
+            <div><span className="text-muted-foreground">Notes:</span> {h.notes || '—'}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const computeProductInventoryMetrics = (product: Product) => {
+    const hasVariantRows = productHasCombinationStock(product);
+    if (!hasVariantRows) {
+      const stock = toNonNegativeNumber(product.stock);
+      const buyPrice = toNonNegativeNumber(product.buyPrice);
+      const sellPrice = toNonNegativeNumber(product.sellPrice);
+      const totalPurchase = toNonNegativeNumber(product.totalPurchase);
+      const totalSold = toNonNegativeNumber(product.totalSold);
+      return {
+        hasVariantRows: false,
+        totalPurchase,
+        totalSold,
+        combinedAvgBuyPrice: buyPrice,
+        combinedAvgSellPrice: sellPrice,
+        currentInventoryValue: stock * buyPrice,
+        totalInvestmentTillDate: totalPurchase * buyPrice,
+      };
+    }
+
+    const stockRows = getProductStockRows(product);
+    const sourceRows = Array.isArray(product.stockByVariantColor) ? product.stockByVariantColor : [];
+    const totalsByRowKey = new Map<string, { totalPurchase: number; totalSold: number }>();
+    sourceRows.forEach((row) => {
+      totalsByRowKey.set(getVariantRowKey(row.variant, row.color), {
+        totalPurchase: toNonNegativeNumber(row.totalPurchase),
+        totalSold: toNonNegativeNumber(row.totalSold),
+      });
+    });
+
+    let totalPurchase = 0;
+    let totalSold = 0;
+    let currentInventoryValue = 0;
+    let totalInvestmentTillDate = 0;
+    let buyWeightedByPurchase = 0;
+    let buyWeightedByStock = 0;
+    let totalStock = 0;
+    let sellWeightedBySold = 0;
+    let sellWeightedByStock = 0;
+    let buySum = 0;
+    let sellSum = 0;
+    let rowCount = 0;
+
+    stockRows.forEach((row) => {
+      const stock = toNonNegativeNumber(row.stock);
+      const buyPrice = toNonNegativeNumber(row.buyPrice);
+      const sellPrice = toNonNegativeNumber(row.sellPrice);
+      const totals = totalsByRowKey.get(getVariantRowKey(row.variant, row.color));
+      const rowPurchase = totals?.totalPurchase ?? 0;
+      const rowSold = totals?.totalSold ?? 0;
+
+      totalPurchase += rowPurchase;
+      totalSold += rowSold;
+      currentInventoryValue += stock * buyPrice;
+      totalInvestmentTillDate += rowPurchase * buyPrice;
+      buyWeightedByPurchase += rowPurchase * buyPrice;
+      buyWeightedByStock += stock * buyPrice;
+      sellWeightedBySold += rowSold * sellPrice;
+      sellWeightedByStock += stock * sellPrice;
+      totalStock += stock;
+      buySum += buyPrice;
+      sellSum += sellPrice;
+      rowCount += 1;
+    });
+
+    const combinedAvgBuyPrice = totalPurchase > 0
+      ? buyWeightedByPurchase / totalPurchase
+      : totalStock > 0
+        ? buyWeightedByStock / totalStock
+        : (rowCount ? buySum / rowCount : 0);
+    const combinedAvgSellPrice = totalSold > 0
+      ? sellWeightedBySold / totalSold
+      : totalStock > 0
+        ? sellWeightedByStock / totalStock
+        : (rowCount ? sellSum / rowCount : 0);
+
+    return {
+      hasVariantRows: true,
+      totalPurchase,
+      totalSold,
+      combinedAvgBuyPrice,
+      combinedAvgSellPrice,
+      currentInventoryValue,
+      totalInvestmentTillDate,
+    };
+  };
+
   const viewingVariantDetails = useMemo(() => {
     if (!viewingProduct) {
       return { hasVariantRows: false, rows: [], totalPurchase: 0, totalSold: 0, avgBuyPrice: 0, avgSellPrice: 0 };
     }
 
-    const hasVariantRows = productHasCombinationStock(viewingProduct);
-    if (!hasVariantRows) {
+    const metrics = computeProductInventoryMetrics(viewingProduct);
+    if (!metrics.hasVariantRows) {
       return { hasVariantRows: false, rows: [], totalPurchase: 0, totalSold: 0, avgBuyPrice: 0, avgSellPrice: 0 };
     }
 
     const rows = getProductStockRows(viewingProduct);
-    const sourceRows = Array.isArray(viewingProduct.stockByVariantColor) ? viewingProduct.stockByVariantColor : [];
-    const totalPurchase = sourceRows.reduce((sum, row) => sum + toNonNegativeNumber(row.totalPurchase), 0);
-    const totalSold = sourceRows.reduce((sum, row) => sum + toNonNegativeNumber(row.totalSold), 0);
-    const pricedBuyRows = rows.filter(row => Number.isFinite(row.buyPrice));
-    const pricedSellRows = rows.filter(row => Number.isFinite(row.sellPrice));
-    const avgBuyPrice = pricedBuyRows.length ? pricedBuyRows.reduce((sum, row) => sum + toNonNegativeNumber(row.buyPrice), 0) / pricedBuyRows.length : 0;
-    const avgSellPrice = pricedSellRows.length ? pricedSellRows.reduce((sum, row) => sum + toNonNegativeNumber(row.sellPrice), 0) / pricedSellRows.length : 0;
 
-    return { hasVariantRows: true, rows, totalPurchase, totalSold, avgBuyPrice, avgSellPrice };
+    return {
+      hasVariantRows: true,
+      rows,
+      totalPurchase: metrics.totalPurchase,
+      totalSold: metrics.totalSold,
+      avgBuyPrice: metrics.combinedAvgBuyPrice,
+      avgSellPrice: metrics.combinedAvgSellPrice,
+    };
   }, [viewingProduct]);
 
   const saveProduct = async (keepOpenForNext = false) => {
@@ -268,6 +402,32 @@ export default function Admin() {
     [purchaseVariantRows, selectedPurchaseVariantKey]
   );
 
+  const purchaseHistoryRows = useMemo(() => {
+    if (!purchaseTarget) return [];
+    const rows = [...(purchaseTarget.purchaseHistory || [])].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    if (purchaseHistoryVariantFilter === 'all') return rows;
+    return rows.filter((row) => `${row.variant || NO_VARIANT}::${row.color || NO_COLOR}` === purchaseHistoryVariantFilter);
+  }, [purchaseTarget, purchaseHistoryVariantFilter]);
+
+  const purchaseHistoryVariantOptions = useMemo(() => {
+    if (!purchaseTarget) return [];
+    const map = new Map<string, { variant: string; color: string }>();
+    (purchaseTarget.purchaseHistory || []).forEach((row) => {
+      const variant = row.variant || NO_VARIANT;
+      const color = row.color || NO_COLOR;
+      const key = `${variant}::${color}`;
+      if (!map.has(key)) {
+        map.set(key, { variant, color });
+      }
+    });
+    return Array.from(map.entries()).map(([key, value]) => ({ key, ...value }));
+  }, [purchaseTarget]);
+
+  const viewingPurchaseHistoryRows = useMemo(
+    () => [...(viewingProduct?.purchaseHistory || [])].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
+    [viewingProduct]
+  );
+
   useEffect(() => {
     if (!purchaseTarget || !productHasCombinationStock(purchaseTarget)) {
       setSelectedPurchaseVariantKey('');
@@ -295,6 +455,8 @@ export default function Admin() {
     const weightedAvg = currentStock + qty > 0 ? ((currentStock * currentBuyPrice) + (qty * unitPrice)) / (currentStock + qty) : unitPrice;
     const manualBuyPrice = parseOptionalNonNegative(purchaseNextBuyPrice);
     const nextBuyPrice = manualBuyPrice ?? weightedAvg;
+    const reference = purchaseReference.trim() || undefined;
+    const notes = purchaseNotes.trim() || undefined;
 
     const updatedVariantRows = isVariantPurchase
       ? (purchaseTarget.stockByVariantColor || []).map((row) => {
@@ -342,6 +504,8 @@ export default function Admin() {
           previousStock: currentStock,
           previousBuyPrice: currentBuyPrice,
           nextBuyPrice,
+          reference,
+          notes,
         },
         ...(purchaseTarget.purchaseHistory || []),
       ],
@@ -353,6 +517,8 @@ export default function Admin() {
     setPurchaseQty('');
     setPurchasePrice('');
     setPurchaseNextBuyPrice('');
+    setPurchaseReference('');
+    setPurchaseNotes('');
     setSelectedPurchaseVariantKey('');
   };
 
@@ -709,12 +875,12 @@ export default function Admin() {
 
   // Calculate Dashboard Stats
   const stats = useMemo(() => {
-      // Inventory Value based on Buy Price (Cost)
-      const totalInventoryValue = products.reduce((acc, p) => acc + (p.stock * p.buyPrice), 0);
+      const totalInventoryValue = products.reduce((acc, p) => acc + computeProductInventoryMetrics(p).currentInventoryValue, 0);
+      const totalInvestmentTillDate = products.reduce((acc, p) => acc + computeProductInventoryMetrics(p).totalInvestmentTillDate, 0);
       const lowStockCount = products.filter(p => p.stock > 0 && p.stock <= 10).length;
       const outOfStockCount = products.filter(p => p.stock === 0).length;
       
-      return { totalInventoryValue, lowStockCount, outOfStockCount };
+      return { totalInventoryValue, totalInvestmentTillDate, lowStockCount, outOfStockCount };
   }, [products]);
 
   const lowStockProducts = useMemo(() => {
@@ -1042,14 +1208,14 @@ export default function Admin() {
     <div className="space-y-6 max-w-[1600px] mx-auto pb-20 md:pb-0">
       
       {/* 1. Header & Stats Section */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="col-span-full md:col-span-1 lg:col-span-2 space-y-1">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+          <div className="col-span-full md:col-span-2 lg:col-span-2 space-y-1">
               <h1 className="text-3xl font-bold tracking-tight text-foreground">Inventory</h1>
               <p className="text-muted-foreground">Manage your stock, products, and pricing.</p>
           </div>
           
           {/* Executive Stats Cards */}
-          <Card className="bg-blue-50/50 border-blue-100 shadow-sm relative overflow-hidden group">
+	          <Card className="bg-blue-50/50 border-blue-100 shadow-sm relative overflow-hidden group">
                <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
                    <div>
                        <p className="text-xs font-bold text-blue-600 uppercase tracking-widest">Inventory Value (Cost)</p>
@@ -1059,9 +1225,21 @@ export default function Admin() {
                        <Coins className="w-5 h-5" />
                    </div>
                </CardContent>
-          </Card>
+	          </Card>
 
-          <Card 
+            <Card className="bg-emerald-50/50 border-emerald-100 shadow-sm relative overflow-hidden group">
+               <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
+                   <div>
+                       <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Total Investment till date</p>
+                       <p className="text-2xl font-bold text-emerald-900 mt-1">₹{stats.totalInvestmentTillDate.toLocaleString()}</p>
+                   </div>
+                   <div className="absolute right-2 top-2 p-2 bg-emerald-100 rounded-lg text-emerald-600 opacity-50 group-hover:opacity-100 transition-opacity">
+                       <TrendingUp className="w-5 h-5" />
+                   </div>
+               </CardContent>
+	          </Card>
+
+	          <Card 
             className="bg-amber-50/50 border-amber-100 shadow-sm relative overflow-hidden group cursor-pointer hover:bg-amber-100/50 transition-colors"
             onClick={() => setIsLowStockModalOpen(true)}
           >
@@ -1156,7 +1334,9 @@ export default function Admin() {
             </tr>
           </thead>
           <tbody>
-            {filteredProducts.map(product => (
+            {filteredProducts.map(product => {
+              const metrics = computeProductInventoryMetrics(product);
+              return (
               <tr key={product.id} className="border-t align-top">
                 <td className="p-3">
                   <input
@@ -1201,19 +1381,19 @@ export default function Admin() {
                   </div>
                 </td>
                 <td className="p-3">{product.category}</td>
-                <td className="p-3">{toNonNegativeNumber(product.totalPurchase)} / {toNonNegativeNumber(product.totalSold)}</td>
+                <td className="p-3">{toNonNegativeNumber(metrics.totalPurchase)} / {toNonNegativeNumber(metrics.totalSold)}</td>
                 <td className="p-3 font-semibold">{product.stock}</td>
-                <td className="p-3">₹{product.buyPrice} / ₹{product.sellPrice}</td>
+                <td className="p-3">₹{metrics.combinedAvgBuyPrice.toFixed(2)} / ₹{metrics.combinedAvgSellPrice.toFixed(2)}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); }}>Add Purchase</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
                     <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
                     <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
                   </div>
                 </td>
               </tr>
-            ))}
+            )})}
           </tbody>
         </table>
 
@@ -1444,6 +1624,12 @@ export default function Admin() {
           <Card className="w-full max-w-lg">
             <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Add Purchase - {purchaseTarget.name}</CardTitle><Button variant="ghost" size="sm" onClick={() => setPurchaseTarget(null)}><X className="w-4 h-4"/></Button></CardHeader>
             <CardContent className="space-y-3">
+              <div className="flex gap-2 border-b pb-2">
+                <Button size="sm" variant={purchaseModalTab === 'add' ? 'default' : 'outline'} onClick={() => setPurchaseModalTab('add')}>Add Purchase</Button>
+                <Button size="sm" variant={purchaseModalTab === 'history' ? 'default' : 'outline'} onClick={() => setPurchaseModalTab('history')}>Purchase History</Button>
+              </div>
+              {purchaseModalTab === 'add' ? (
+                <>
               <div className="rounded-lg border bg-muted/20 p-3">
                 <div className="flex items-center gap-3">
                   <div className="h-16 w-16 rounded-md border overflow-hidden bg-white flex items-center justify-center">
@@ -1481,12 +1667,51 @@ export default function Admin() {
 
               <Input type="number" placeholder="Purchase quantity" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} />
               <Input type="number" placeholder="Purchase unit price" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
+              <Input placeholder="Reference (optional)" value={purchaseReference} onChange={(e) => setPurchaseReference(e.target.value)} />
+              <textarea
+                value={purchaseNotes}
+                onChange={(e) => setPurchaseNotes(e.target.value)}
+                placeholder="Notes (optional)"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                rows={2}
+              />
               <div className="flex gap-2">
                 <Button type="button" variant="outline" onClick={() => setPurchaseNextBuyPrice(purchaseAveragePrice.toFixed(2))}>Average Price: ₹{purchaseAveragePrice.toFixed(2)}</Button>
                 <Input type="number" placeholder="New buy price (you can edit)" value={purchaseNextBuyPrice} onChange={(e) => setPurchaseNextBuyPrice(e.target.value)} />
               </div>
               <p className="text-xs text-muted-foreground">Click Average Price to auto-fill, or edit manually before applying.</p>
               <Button onClick={handleAddPurchase} className="w-full">Apply Purchase</Button>
+                </>
+              ) : (
+                <div className="space-y-3">
+                  {purchaseHistoryVariantOptions.length > 1 && (
+                    <div className="space-y-1">
+                      <Label>Filter by Variant / Color</Label>
+                      <select
+                        className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
+                        value={purchaseHistoryVariantFilter}
+                        onChange={(e) => setPurchaseHistoryVariantFilter(e.target.value)}
+                      >
+                        <option value="all">All variants/colors</option>
+                        {purchaseHistoryVariantOptions.map((opt) => (
+                          <option key={opt.key} value={opt.key}>
+                            {opt.variant} / {opt.color}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {!purchaseHistoryRows.length ? (
+                    <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                      No purchase history found for this product yet.
+                    </div>
+                  ) : (
+                    <div className="max-h-[420px] overflow-y-auto rounded-md border p-2">
+                      {renderPurchaseHistoryCards(purchaseTarget.name, purchaseHistoryRows)}
+                    </div>
+                  )}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -1538,12 +1763,15 @@ export default function Admin() {
                 <div className="text-sm">Current stock: {viewingProduct.stock}, Total purchase: {toNonNegativeNumber(viewingProduct.totalPurchase)}, Total sold: {toNonNegativeNumber(viewingProduct.totalSold)}</div>
               )}
               <h4 className="font-semibold">Purchase History</h4>
-              <div className="border rounded-lg overflow-hidden">
-                <table className="w-full text-xs">
-                  <thead className="bg-muted/40"><tr><th className="p-2 text-left">Date</th><th className="p-2 text-left">Qty</th><th className="p-2 text-left">Price</th><th className="p-2 text-left">Prev Stock</th><th className="p-2 text-left">New Buy</th></tr></thead>
-                  <tbody>{(viewingProduct.purchaseHistory || []).map((h) => <tr key={h.id} className="border-t"><td className="p-2">{new Date(h.date).toLocaleString()}</td><td className="p-2">{h.quantity}</td><td className="p-2">₹{h.unitPrice}</td><td className="p-2">{h.previousStock}</td><td className="p-2">₹{h.nextBuyPrice.toFixed(2)}</td></tr>)}</tbody>
-                </table>
-              </div>
+              {!viewingPurchaseHistoryRows.length ? (
+                <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  No purchase history found for this product yet.
+                </div>
+              ) : (
+                <div className="max-h-[380px] overflow-y-auto rounded-lg border p-2">
+                  {renderPurchaseHistoryCards(viewingProduct.name, viewingPurchaseHistoryRows)}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

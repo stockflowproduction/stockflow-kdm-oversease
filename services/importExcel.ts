@@ -20,6 +20,7 @@ type TemplateField = {
 
 const IMPORT_BATCH_SIZE = 10;
 const IMPORT_BATCH_DELAY_MS = 150;
+const RETURN_HANDLING_MODES = ['refund_cash', 'refund_online', 'reduce_due', 'store_credit'] as const;
 
 const toStr = (v: any) => (v === null || v === undefined ? '' : String(v).trim());
 const toNum = (v: any) => {
@@ -33,6 +34,62 @@ const normName = (value: string) => value.trim().toLowerCase();
 const includesNormalized = (items: string[] | undefined, value: string) => {
   const normalizedValue = normName(value);
   return Array.isArray(items) && items.some(item => normName(toStr(item)) === normalizedValue);
+};
+const isValidReturnHandlingMode = (value: string): value is typeof RETURN_HANDLING_MODES[number] =>
+  (RETURN_HANDLING_MODES as readonly string[]).includes(value);
+
+const deriveFallbackSaleSettlement = (
+  paymentMethod: Transaction['paymentMethod'],
+  payableAmount: number
+) => {
+  if (paymentMethod === 'Online') return { cashPaid: 0, onlinePaid: payableAmount, creditDue: 0 };
+  if (paymentMethod === 'Credit') return { cashPaid: 0, onlinePaid: 0, creditDue: payableAmount };
+  return { cashPaid: payableAmount, onlinePaid: 0, creditDue: 0 };
+};
+
+const buildCanonicalImportedSaleSettlement = (
+  paymentMethod: Transaction['paymentMethod'],
+  total: number,
+  storeCreditUsed: number,
+  rawCashPaid: number,
+  rawOnlinePaid: number,
+  rawCreditDue: number
+) => {
+  const payableAfterStoreCredit = Math.max(0, Math.abs(total) - Math.max(0, storeCreditUsed));
+  const fallback = deriveFallbackSaleSettlement(paymentMethod, payableAfterStoreCredit);
+  const hasExplicitSettlement = Number.isFinite(rawCashPaid) || Number.isFinite(rawOnlinePaid) || Number.isFinite(rawCreditDue);
+
+  if (!hasExplicitSettlement) return fallback;
+
+  const cashPaid = Number.isFinite(rawCashPaid) ? Math.max(0, rawCashPaid) : fallback.cashPaid;
+  const onlinePaid = Number.isFinite(rawOnlinePaid) ? Math.max(0, rawOnlinePaid) : fallback.onlinePaid;
+  const paidNow = cashPaid + onlinePaid;
+
+  if (paidNow >= payableAfterStoreCredit) {
+    if (payableAfterStoreCredit <= 0) return { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
+    const scale = payableAfterStoreCredit / paidNow;
+    return {
+      cashPaid: Number((cashPaid * scale).toFixed(2)),
+      onlinePaid: Number((onlinePaid * scale).toFixed(2)),
+      creditDue: 0,
+    };
+  }
+
+  const inferredRemainingDue = Math.max(0, payableAfterStoreCredit - paidNow);
+  const creditDue = Number.isFinite(rawCreditDue) ? Math.min(Math.max(0, rawCreditDue), inferredRemainingDue) : inferredRemainingDue;
+
+  return {
+    cashPaid: Number(cashPaid.toFixed(2)),
+    onlinePaid: Number(onlinePaid.toFixed(2)),
+    creditDue: Number(creditDue.toFixed(2)),
+  };
+};
+
+const resolveImportedReturnHandlingMode = (paymentMethod: Transaction['paymentMethod'], value: string) => {
+  if (isValidReturnHandlingMode(value)) return value;
+  if (paymentMethod === 'Online') return 'refund_online';
+  if (paymentMethod === 'Credit') return 'reduce_due';
+  return 'refund_cash';
 };
 
 const isDataUrlImage = (value: string) => /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(value);
@@ -158,8 +215,8 @@ export const downloadCustomersTemplate = () => writeTemplate(
 
 export const downloadTransactionsTemplate = () => writeTemplate(
   'Transactions',
-  ['Transaction ID', 'Date', 'Type', 'Customer ID', 'Customer Phone', 'Customer Name', 'Payment Method', 'Product ID', 'Product Barcode', 'Variant', 'Color', 'Quantity', 'Unit Sell Price', 'Item Discount', 'Tax Rate', 'Tax Label', 'Subtotal', 'Discount', 'Tax', 'Total', 'Amount', 'Notes'],
-  ['TX-1001', new Date().toISOString(), 'sale', 'customer-001', '9876543210', 'Ravi Kumar', 'Cash', 'product-001', 'SKU-1001', NO_VARIANT, NO_COLOR, 2, 499, 0, 0, 'GST', 998, 0, 0, 998, '', 'sample sale import'],
+  ['Transaction ID', 'Date', 'Type', 'Customer ID', 'Customer Phone', 'Customer Name', 'Payment Method', 'Product ID', 'Product Barcode', 'Variant', 'Color', 'Quantity', 'Unit Sell Price', 'Item Discount', 'Tax Rate', 'Tax Label', 'Subtotal', 'Discount', 'Tax', 'Total', 'Amount', 'Sale Cash Paid', 'Sale Online Paid', 'Sale Credit Due', 'Store Credit Used', 'Return Handling Mode', 'Notes'],
+  ['TX-1001', new Date().toISOString(), 'sale', 'customer-001', '9876543210', 'Ravi Kumar', 'Cash', 'product-001', 'SKU-1001', NO_VARIANT, NO_COLOR, 2, 499, 0, 0, 'GST', 998, 0, 0, 998, '', 998, 0, 0, 0, '', 'sample sale import'],
   [
     { field: 'Transaction ID', behavior: 'Derived / system-managed', required: 'Mandatory', format: 'Text', notes: 'Unique ID per transaction. Same ID groups multiple item rows.', example: 'TX-1001' },
     { field: 'Date', behavior: 'Editable', required: 'Mandatory', format: 'ISO or parseable date-time', notes: 'Transaction date/time.', example: new Date().toISOString() },
@@ -177,6 +234,9 @@ export const downloadTransactionsTemplate = () => writeTemplate(
     { field: 'Tax Label', behavior: 'Editable', required: 'Optional', format: 'Text', notes: 'Tax label metadata.', example: 'GST' },
     { field: 'Subtotal/Discount/Tax/Total', behavior: 'Validation-only', required: 'Optional', format: 'Numbers', notes: 'If provided, validated against computed values.', example: '998 / 0 / 0 / 998' },
     { field: 'Amount', behavior: 'Editable', required: 'Mandatory', format: 'Number > 0', notes: 'Payment amount.', example: '500' },
+    { field: 'Sale Cash Paid / Sale Online Paid / Sale Credit Due', behavior: 'Editable', required: 'Optional', format: 'Number >= 0', notes: 'Optional canonical settlement override for sales (especially historical split sales). If blank, payment-method fallback is used.', example: '200 / 200 / 800' },
+    { field: 'Store Credit Used', behavior: 'Editable', required: 'Optional', format: 'Number >= 0', notes: 'Optional store credit consumed for sale. If blank, defaults to 0.', example: '100' },
+    { field: 'Return Handling Mode', behavior: 'Editable', required: 'Optional', format: 'refund_cash | refund_online | reduce_due | store_credit', notes: 'Optional canonical return mode. If blank, payment-method fallback is used.', example: 'refund_online' },
     { field: 'Notes', behavior: 'Editable', required: 'Optional', format: 'Text', notes: 'Additional transaction note.', example: 'sample sale import' },
   ]
 );
@@ -286,6 +346,11 @@ export const downloadTransactionsData = (transactions?: Transaction[] | unknown)
         'Tax': tx.tax ?? '',
         'Total': tx.total,
         'Amount': tx.type === 'payment' ? tx.total : '',
+        'Sale Cash Paid': tx.type === 'sale' ? tx.saleSettlement?.cashPaid ?? '' : '',
+        'Sale Online Paid': tx.type === 'sale' ? tx.saleSettlement?.onlinePaid ?? '' : '',
+        'Sale Credit Due': tx.type === 'sale' ? tx.saleSettlement?.creditDue ?? '' : '',
+        'Store Credit Used': tx.type === 'sale' ? tx.storeCreditUsed ?? '' : '',
+        'Return Handling Mode': tx.type === 'return' ? tx.returnHandlingMode ?? '' : '',
         'Notes': tx.notes || '',
       });
       return;
@@ -313,6 +378,11 @@ export const downloadTransactionsData = (transactions?: Transaction[] | unknown)
         'Tax': tx.tax ?? '',
         'Total': tx.total,
         'Amount': '',
+        'Sale Cash Paid': tx.type === 'sale' ? tx.saleSettlement?.cashPaid ?? '' : '',
+        'Sale Online Paid': tx.type === 'sale' ? tx.saleSettlement?.onlinePaid ?? '' : '',
+        'Sale Credit Due': tx.type === 'sale' ? tx.saleSettlement?.creditDue ?? '' : '',
+        'Store Credit Used': tx.type === 'sale' ? tx.storeCreditUsed ?? '' : '',
+        'Return Handling Mode': tx.type === 'return' ? tx.returnHandlingMode ?? '' : '',
         'Notes': tx.notes || '',
       });
     });
@@ -339,6 +409,9 @@ export const downloadTransactionsData = (transactions?: Transaction[] | unknown)
     { field: 'Tax', behavior: 'Validation-only', required: 'Optional', format: 'Number', notes: 'If provided, must match computed tax; final stored value is recomputed.', example: '0' },
     { field: 'Total', behavior: 'Validation-only', required: 'Optional', format: 'Number', notes: 'If provided, must match computed total; final stored value is recomputed.', example: '998' },
     { field: 'Amount', behavior: 'Editable', required: 'Mandatory', format: 'Number > 0', notes: 'Used only for payment type (for sale/return this column is ignored).', example: '500' },
+    { field: 'Sale Cash Paid / Sale Online Paid / Sale Credit Due', behavior: 'Editable', required: 'Optional', format: 'Number >= 0', notes: 'Optional canonical sale settlement fields for split historical imports.', example: '200 / 200 / 800' },
+    { field: 'Store Credit Used', behavior: 'Editable', required: 'Optional', format: 'Number >= 0', notes: 'Optional canonical store-credit usage for sale rows.', example: '100' },
+    { field: 'Return Handling Mode', behavior: 'Editable', required: 'Optional', format: 'refund_cash|refund_online|reduce_due|store_credit', notes: 'Optional canonical mode for return rows.', example: 'refund_online' },
     { field: 'Notes', behavior: 'Editable', required: 'Optional', format: 'Text', notes: 'Stored transaction note.', example: 'sample sale import' },
   ], 'Transactions_Data');
 };
@@ -605,6 +678,11 @@ export const importTransactionsFromFile = async (
     const date = toStr(row0['Date']);
     const type = toStr(row0['Type']).toLowerCase();
     const paymentMethod = toStr(row0['Payment Method']) || 'Cash';
+    const saleCashPaidRaw = toNum(row0['Sale Cash Paid']);
+    const saleOnlinePaidRaw = toNum(row0['Sale Online Paid']);
+    const saleCreditDueRaw = toNum(row0['Sale Credit Due']);
+    const storeCreditUsedRaw = toNum(row0['Store Credit Used']);
+    const returnHandlingModeRaw = toStr(row0['Return Handling Mode']).toLowerCase();
     const taxRateRaw = toNum(row0['Tax Rate']);
     const taxRate = Number.isFinite(taxRateRaw) ? taxRateRaw : 0;
     const taxLabel = toStr(row0['Tax Label']) || undefined;
@@ -636,6 +714,13 @@ export const importTransactionsFromFile = async (
     if (!['sale', 'return', 'payment'].includes(type)) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Type', message: 'Type must be sale, return, or payment' });
     if (!['Cash', 'Credit', 'Online'].includes(paymentMethod)) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Payment Method', message: 'Payment Method is invalid' });
     if (paymentMethod === 'Credit' && !customer) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Customer', message: 'Credit transactions require an existing customer (Customer ID preferred, else phone/name match)' });
+    if (Number.isFinite(saleCashPaidRaw) && saleCashPaidRaw < 0) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Sale Cash Paid', message: 'Sale Cash Paid cannot be negative' });
+    if (Number.isFinite(saleOnlinePaidRaw) && saleOnlinePaidRaw < 0) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Sale Online Paid', message: 'Sale Online Paid cannot be negative' });
+    if (Number.isFinite(saleCreditDueRaw) && saleCreditDueRaw < 0) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Sale Credit Due', message: 'Sale Credit Due cannot be negative' });
+    if (Number.isFinite(storeCreditUsedRaw) && storeCreditUsedRaw < 0) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Store Credit Used', message: 'Store Credit Used cannot be negative' });
+    if (returnHandlingModeRaw && !isValidReturnHandlingMode(returnHandlingModeRaw)) {
+      errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Return Handling Mode', message: 'Return Handling Mode is invalid' });
+    }
 
     if (type === 'payment') {
       const amount = Number.isFinite(toNum(row0['Amount'])) ? toNum(row0['Amount']) : toNum(row0['Total']);
@@ -771,6 +856,24 @@ export const importTransactionsFromFile = async (
       total: computedTotal,
       notes: toStr(row0['Notes']) || undefined,
     };
+    if (computedTx.type === 'sale') {
+      const storeCreditUsed = Number.isFinite(storeCreditUsedRaw) ? Math.max(0, storeCreditUsedRaw) : 0;
+      const canonicalSettlement = buildCanonicalImportedSaleSettlement(
+        paymentMethod as Transaction['paymentMethod'],
+        computedTotal,
+        storeCreditUsed,
+        saleCashPaidRaw,
+        saleOnlinePaidRaw,
+        saleCreditDueRaw
+      );
+      computedTx.storeCreditUsed = Number(storeCreditUsed.toFixed(2));
+      computedTx.saleSettlement = canonicalSettlement;
+    } else if (computedTx.type === 'return') {
+      computedTx.returnHandlingMode = resolveImportedReturnHandlingMode(
+        paymentMethod as Transaction['paymentMethod'],
+        returnHandlingModeRaw
+      );
+    }
     if (existingTx) {
       const existingComparable = JSON.stringify({
         type: existingTx.type,

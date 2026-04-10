@@ -34,6 +34,8 @@ export interface Product {
     previousStock: number;
     previousBuyPrice: number;
     nextBuyPrice: number;
+    notes?: string;
+    reference?: string;
   }>;
 }
 
@@ -426,11 +428,26 @@ export interface DeletedTransactionImpactSnapshot {
   estimatedCashFromActiveTransactions: number;
 }
 
+export interface DeleteCompensationRecord {
+  id: string;
+  transactionId: string;
+  customerId?: string;
+  customerName?: string;
+  amount: number;
+  mode: 'cash_refund';
+  reason?: string;
+  createdAt: string;
+}
+
 export interface DeletedTransactionRecord {
   id: string;
   originalTransactionId: string;
   originalTransaction: Transaction;
   deletedAt: string;
+  deleteReason?: string;
+  deleteReasonNote?: string;
+  deleteCompensationMode?: 'cash_refund' | 'store_credit';
+  deleteCompensationAmount?: number;
   deletedBy?: string;
   deletedByRole?: string;
   type: Transaction['type'];
@@ -447,6 +464,7 @@ export interface AppState {
   products: Product[];
   transactions: Transaction[];
   deletedTransactions?: DeletedTransactionRecord[];
+  deleteCompensations?: DeleteCompensationRecord[];
   categories: string[];
   customers: Customer[];
   profile: StoreProfile;

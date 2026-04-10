@@ -4,6 +4,7 @@ import autoTable from 'jspdf-autotable';
 import { Transaction, Customer } from '../types';
 import { loadData } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
+import { formatMoneyPrecise, formatMoneyWhole } from './numberFormat';
 
 type ReceiptPaymentDetails = {
     cashReceived?: number;
@@ -88,9 +89,9 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
         `${item.name} - ${item.selectedVariant || NO_VARIANT} - ${item.selectedColor || NO_COLOR}`,
         item.hsn || "-",
         item.quantity,
-        `Rs. ${item.sellPrice.toFixed(2)}`,
-        `Rs. ${item.discountAmount?.toFixed(2) || "0.00"}`,
-        `Rs. ${(item.sellPrice * item.quantity - (item.discountAmount || 0)).toFixed(2)}`
+        `Rs. ${formatMoneyPrecise(item.sellPrice)}`,
+        `Rs. ${formatMoneyPrecise(item.discountAmount || 0)}`,
+        `Rs. ${formatMoneyPrecise(item.sellPrice * item.quantity - (item.discountAmount || 0))}`
     ]);
 
     autoTable(doc, {
@@ -127,21 +128,21 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     let summaryY = finalY;
     doc.setFontSize(9);
     doc.text("Sub Total", totalsX - 45, summaryY);
-    doc.text(`Rs. ${transaction.subtotal?.toFixed(2)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`Rs. ${formatMoneyPrecise(transaction.subtotal || 0)}`, totalsX, summaryY, { align: "right" });
     
     summaryY += 6;
     doc.text("Discount", totalsX - 45, summaryY);
-    doc.text(`Rs. ${transaction.discount?.toFixed(2)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`Rs. ${formatMoneyPrecise(transaction.discount || 0)}`, totalsX, summaryY, { align: "right" });
     
     if (transaction.tax && transaction.tax > 0) {
         summaryY += 6;
         doc.text(transaction.taxLabel || "Tax", totalsX - 45, summaryY);
-        doc.text(`Rs. ${transaction.tax.toFixed(2)}`, totalsX, summaryY, { align: "right" });
+        doc.text(`Rs. ${formatMoneyPrecise(transaction.tax)}`, totalsX, summaryY, { align: "right" });
     }
 
     summaryY += 6;
     doc.text("Round off", totalsX - 45, summaryY);
-    doc.text(`${roundOff >= 0 ? "+" : "-"} Rs. ${Math.abs(roundOff).toFixed(2)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`${roundOff >= 0 ? "+" : "-"} Rs. ${formatMoneyPrecise(Math.abs(roundOff))}`, totalsX, summaryY, { align: "right" });
 
     summaryY += 5;
     doc.setFillColor(93, 58, 43);
@@ -149,7 +150,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
     doc.text("Total", totalsX - 45, summaryY + 5.5);
-    doc.text(`Rs. ${Math.round(transaction.total).toFixed(2)}`, totalsX, summaryY + 5.5, { align: "right" });
+    doc.text(`Rs. ${formatMoneyWhole(transaction.total)}`, totalsX, summaryY + 5.5, { align: "right" });
     doc.setTextColor(0, 0, 0);
 
     summaryY += 13;
@@ -162,18 +163,18 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
         : 0;
 
     doc.text("Received", totalsX - 45, summaryY);
-    doc.text(`Rs. ${receivedAmount.toFixed(2)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`Rs. ${formatMoneyPrecise(receivedAmount)}`, totalsX, summaryY, { align: "right" });
     
     summaryY += 6;
     doc.text(hasCashDetails ? "Change Returned" : "Balance", totalsX - 45, summaryY);
-    doc.text(`Rs. ${changeAmount.toFixed(2)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`Rs. ${formatMoneyPrecise(changeAmount)}`, totalsX, summaryY, { align: "right" });
 
     const youSaved = transaction.discount || 0;
     if (youSaved > 0) {
         summaryY += 6;
         doc.setFont("helvetica", "bold");
         doc.text("You Saved", totalsX - 45, summaryY);
-        doc.text(`Rs. ${youSaved.toFixed(2)}`, totalsX, summaryY, { align: "right" });
+        doc.text(`Rs. ${formatMoneyPrecise(youSaved)}`, totalsX, summaryY, { align: "right" });
     }
 
     // --- Terms & Bank Details ---
@@ -389,8 +390,8 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
             ${item.hsn ? `<br><small>HSN: ${item.hsn}</small>` : ''}
           </td>
           <td>${item.quantity}</td>
-          <td>${item.sellPrice.toFixed(0)}</td>
-          <td class="amount">${(item.sellPrice * item.quantity - (item.discountAmount || 0)).toFixed(0)}</td>
+          <td>${formatMoneyWhole(item.sellPrice)}</td>
+          <td class="amount">${formatMoneyWhole(item.sellPrice * item.quantity - (item.discountAmount || 0))}</td>
         </tr>
       `).join('')}
     </tbody>
@@ -407,27 +408,27 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
     <div class="totals">
       <div class="row">
         <span>Sub Total</span>
-        <span>₹${(transaction.subtotal || transaction.total).toFixed(0)}</span>
+        <span>₹${formatMoneyWhole(transaction.subtotal || transaction.total)}</span>
       </div>
       <div class="row total">
         <span>Total</span>
-        <span>₹${transaction.total.toFixed(0)}</span>
+        <span>₹${formatMoneyWhole(transaction.total)}</span>
       </div>
       <div class="row">
         <span>Received</span>
-        <span>₹${(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? paymentDetails.cashReceived : transaction.total).toFixed(0)}</span>
+        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? paymentDetails.cashReceived : transaction.total)}</span>
       </div>
       <div class="row">
         <span>${transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? 'Change Returned' : 'Balance'}</span>
-        <span>₹${(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? Math.max(0, paymentDetails.changeReturned ?? (paymentDetails.cashReceived - transaction.total)) : 0).toFixed(0)}</span>
+        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' && typeof paymentDetails?.cashReceived === 'number' ? Math.max(0, paymentDetails.changeReturned ?? (paymentDetails.cashReceived - transaction.total)) : 0)}</span>
       </div>
       <div class="row">
         <span>Prev Bal</span>
-        <span>₹${customer?.totalDue ? (customer.totalDue + (transaction.paymentMethod === 'Credit' ? -transaction.total : 0)).toFixed(0) : '0'}</span>
+        <span>₹${customer?.totalDue ? formatMoneyWhole(customer.totalDue + (transaction.paymentMethod === 'Credit' ? -transaction.total : 0)) : '0'}</span>
       </div>
       <div class="row">
         <span>Curr Bal</span>
-        <span>₹${customer?.totalDue?.toFixed(0) || '0'}</span>
+        <span>₹${customer?.totalDue ? formatMoneyWhole(customer.totalDue) : '0'}</span>
       </div>
     </div>
   </div>

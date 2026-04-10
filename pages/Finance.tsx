@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { getReturnCashRefundAmount, loadData, saveData, processTransaction, getResolvedReturnHandlingMode, getSaleSettlementBreakdown } from '../services/storage';
+import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
-import { AppState, CashSession, Customer, ExpenseActivity, Transaction } from '../types';
+import { AppState, CashSession, Customer, DeleteCompensationRecord, ExpenseActivity, Transaction } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
+import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
 
 type Expense = {
   id: string;
@@ -16,7 +17,7 @@ type Expense = {
   createdAt: string;
 };
 
-type FinanceTabKey = 'cash' | 'expense' | 'credit' | 'profit';
+type FinanceTabKey = 'dashboard' | 'cash' | 'expense' | 'credit' | 'profit';
 type ExpenseDatePreset = 'today' | '7d' | '15d' | 'month' | 'custom';
 
 const dateKeyFromDate = (date: Date) => {
@@ -38,7 +39,8 @@ const monthKeyOf = (iso: string) => {
   return `${yyyy}-${mm}`;
 };
 
-const formatINR = (value: number) => `₹${value.toFixed(2)}`;
+const formatINR = (value: number) => formatINRPrecise(value);
+const formatINRSummary = (value: number) => formatINRWhole(value);
 
 const FINANCE_DIAGNOSTIC_DEBUG_ENABLED = String((import.meta as any).env?.VITE_FINANCE_DIAGNOSTIC_DEBUG || '').toLowerCase() === 'true';
 const financeShiftDiag = (tag: string, payload: Record<string, unknown>) => {
@@ -152,7 +154,124 @@ const aggregateSaleSettlementContributions = (sales: Transaction[]) => sales.red
   return acc;
 }, { cashPaid: 0, onlinePaid: 0, creditDue: 0, totalSales: 0 });
 
-const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], sessionStartIso: string, sessionEndIso?: string, sessionId?: string) => {
+const accumulateCanonicalReturnEffects = (transactionsAsc: Transaction[], scopedReturnIds: Set<string>) => {
+  let runningDue = 0;
+  let runningStoreCredit = 0;
+  return transactionsAsc.reduce((acc, tx, index) => {
+    const amount = Math.abs(tx.total || 0);
+    const historical = transactionsAsc.slice(0, index);
+    if (tx.type === 'sale') {
+      const settlement = getSaleSettlementBreakdown(tx);
+      const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+      runningDue = Math.max(0, runningDue + settlement.creditDue);
+      runningStoreCredit = Math.max(0, runningStoreCredit - storeCreditUsed);
+      return acc;
+    }
+    if (tx.type === 'payment') {
+      const paymentToDue = Math.min(runningDue, amount);
+      runningDue = Math.max(0, runningDue - paymentToDue);
+      runningStoreCredit = Math.max(0, runningStoreCredit + Math.max(0, amount - paymentToDue));
+      return acc;
+    }
+
+    const allocation = getCanonicalReturnAllocation(tx, historical, runningDue);
+    runningDue = Math.max(0, runningDue - allocation.dueReduction);
+    runningStoreCredit = Math.max(0, runningStoreCredit + allocation.storeCreditIncrease);
+
+    if (scopedReturnIds.has(tx.id)) {
+      acc.cashRefunds += allocation.cashRefund;
+      acc.onlineRefunds += allocation.onlineRefund;
+      acc.dueReductionFromReturns += allocation.dueReduction;
+      acc.storeCreditCreatedFromReturns += allocation.storeCreditIncrease;
+    }
+    return acc;
+  }, {
+    cashRefunds: 0,
+    onlineRefunds: 0,
+    dueReductionFromReturns: 0,
+    storeCreditCreatedFromReturns: 0,
+  });
+};
+
+const buildCanonicalFinanceBreakdown = (
+  transactions: Transaction[],
+  expenses: Expense[],
+  deleteCompensations: DeleteCompensationRecord[],
+  windowStart: number,
+  windowEnd: number
+) => {
+  const scopedTransactions = transactions.filter(transaction => {
+    const txTime = resolveTransactionTimeForSession(transaction);
+    return Number.isFinite(txTime) && txTime >= windowStart && txTime <= windowEnd;
+  });
+  const sales = scopedTransactions.filter(t => t.type === 'sale');
+  const returns = scopedTransactions.filter(t => t.type === 'return');
+  const sortedTransactionsAsc = [...transactions]
+    .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
+  const saleSettlementTotals = aggregateSaleSettlementContributions(sales);
+  const saleCashReceipts = saleSettlementTotals.cashPaid;
+  const cashCollections = scopedTransactions
+    .filter(t => t.type === 'payment' && t.paymentMethod === 'Cash')
+    .reduce((s, t) => s + Math.abs(t.total), 0);
+  const onlineCollections = scopedTransactions
+    .filter(t => t.type === 'payment' && t.paymentMethod === 'Online')
+    .reduce((s, t) => s + Math.abs(t.total), 0);
+  const creditSales = saleSettlementTotals.creditDue;
+  const onlineSales = saleSettlementTotals.onlinePaid;
+  const salesReturns = returns.reduce((s, t) => s + Math.abs(t.total), 0);
+  const scopedReturnIds = new Set<string>(returns.map(t => t.id));
+  const returnEffects = accumulateCanonicalReturnEffects(sortedTransactionsAsc, scopedReturnIds);
+  const grossSales = saleSettlementTotals.totalSales;
+  const cogsFromSales = sales.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const cogsReversalFromReturns = returns.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
+  const netSales = grossSales - salesReturns;
+  const cogs = cogsFromSales - cogsReversalFromReturns;
+  const grossProfit = netSales - cogs;
+  const scopedExpenses = expenses.filter(e => {
+    const expenseTime = new Date(e.createdAt).getTime();
+    return Number.isFinite(expenseTime) && expenseTime >= windowStart && expenseTime <= windowEnd;
+  });
+  const scopedDeleteCompensationOutflow = (deleteCompensations || [])
+    .filter(record => {
+      const eventTime = new Date(record.createdAt).getTime();
+      return Number.isFinite(eventTime) && eventTime >= windowStart && eventTime <= windowEnd;
+    })
+    .reduce((sum, record) => sum + Math.max(0, Number(record.amount) || 0), 0);
+  const todayExpenses = scopedExpenses.reduce((s, e) => s + e.amount, 0);
+  const netProfit = grossProfit - todayExpenses;
+  const cashInflowOperational = saleCashReceipts + cashCollections;
+  const cashMovementAfterExpenses = cashInflowOperational - returnEffects.cashRefunds - scopedDeleteCompensationOutflow - todayExpenses;
+  return {
+    grossSales,
+    salesReturns,
+    netSales,
+    creditSalesCreated: creditSales,
+    onlineSalesAtSale: onlineSales,
+    cogs,
+    grossProfit,
+    netProfit,
+    saleCashReceipts,
+    cashCollections,
+    onlineCollections,
+    cashRefunds: returnEffects.cashRefunds + scopedDeleteCompensationOutflow,
+    onlineRefunds: returnEffects.onlineRefunds,
+    dueReductionFromReturns: returnEffects.dueReductionFromReturns,
+    storeCreditCreatedFromReturns: returnEffects.storeCreditCreatedFromReturns,
+    cashMovementAfterExpenses,
+    todayExpenses,
+    txCount: scopedTransactions.length,
+    expenseCount: scopedExpenses.length,
+  };
+};
+
+const getSessionCashTotals = (
+  transactions: Transaction[],
+  expenses: Expense[],
+  deleteCompensations: DeleteCompensationRecord[],
+  sessionStartIso: string,
+  sessionEndIso?: string,
+  sessionId?: string
+) => {
   const start = new Date(sessionStartIso).getTime();
   const end = sessionEndIso ? new Date(sessionEndIso).getTime() : Number.POSITIVE_INFINITY;
 
@@ -168,18 +287,28 @@ const getSessionCashTotals = (transactions: Transaction[], expenses: Expense[], 
 
   const saleSettlementTotals = aggregateSaleSettlementContributions(scopedTransactions.filter(t => t.type === 'sale'));
   const cashSales = saleSettlementTotals.cashPaid;
-  const cashRefunds = scopedTransactions
-    .filter(t => t.type === 'return' && getResolvedReturnHandlingMode(t) === 'refund_cash')
-    .reduce((sum, t) => {
-      const historical = transactions.filter(candidate => new Date(candidate.date).getTime() < new Date(t.date).getTime());
-      return sum + getReturnCashRefundAmount(t, historical);
-    }, 0);
+  const sortedTransactionsAsc = [...transactions].sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
+  const scopedReturnIds = new Set<string>(scopedTransactions.filter(t => t.type === 'return').map(t => t.id));
+  const returnEffects = accumulateCanonicalReturnEffects(sortedTransactionsAsc, scopedReturnIds);
+  const cashRefunds = returnEffects.cashRefunds;
   const cashCollections = scopedTransactions
     .filter(t => t.type === 'payment' && t.paymentMethod === 'Cash')
     .reduce((sum, t) => sum + Math.abs(t.total), 0);
   const expenseTotal = windowExpenses.reduce((sum, e) => sum + e.amount, 0);
+  const deleteCompensationOutflow = (deleteCompensations || [])
+    .filter(record => {
+      const eventTime = new Date(record.createdAt).getTime();
+      return eventTime >= start && eventTime <= end;
+    })
+    .reduce((sum, record) => sum + Math.max(0, Number(record.amount) || 0), 0);
 
-  const totals = { cashSales, cashRefunds, cashCollections, expenseTotal, systemCashTotal: cashSales + cashCollections - cashRefunds - expenseTotal };
+  const totals = {
+    cashSales,
+    cashRefunds: cashRefunds + deleteCompensationOutflow,
+    cashCollections,
+    expenseTotal,
+    systemCashTotal: cashSales + cashCollections - cashRefunds - deleteCompensationOutflow - expenseTotal
+  };
   financeLog.cash('RESULT', {
     sessionId: sessionId || null,
     windowType: sessionId ? 'session' : 'adhoc_window',
@@ -257,7 +386,7 @@ function MoneyTile({ label, value, tone = 'neutral' }: { label: string; value: s
 export default function Finance() {
   const [data, setData] = useState<AppState>(loadData());
   const [errors, setErrors] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<FinanceTabKey>('cash');
+  const [activeTab, setActiveTab] = useState<FinanceTabKey>('dashboard');
 
   const [openingBalance, setOpeningBalance] = useState('');
   const [openingBalanceAutoFilled, setOpeningBalanceAutoFilled] = useState(false);
@@ -344,7 +473,7 @@ export default function Finance() {
     let over = 0;
 
     closed.forEach(session => {
-      const computedTotals = getSessionCashTotals(data.transactions, expenses, session.startTime, session.endTime, session.id);
+      const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], session.startTime, session.endTime, session.id);
       const systemCashTotal = session.systemCashTotal ?? computedTotals.systemCashTotal;
       const difference = session.difference ?? ((session.closingBalance ?? 0) - (session.openingBalance + systemCashTotal));
       if (difference === 0) matched += 1;
@@ -522,12 +651,12 @@ export default function Finance() {
     const key = todayISO();
 
     if (isOpenSessionToday && openSession) {
-      return getSessionCashTotals(data.transactions, expenses, openSession.startTime, undefined, openSession.id);
+      return getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], openSession.startTime, undefined, openSession.id);
     }
 
     const startOfTodayIso = `${key}T00:00:00`;
     const endOfTodayIso = `${key}T23:59:59`;
-    return getSessionCashTotals(data.transactions, expenses, startOfTodayIso, endOfTodayIso);
+    return getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], startOfTodayIso, endOfTodayIso);
   }, [data.transactions, expenses, isOpenSessionToday, openSession]);
 
   const closingCountTotal = useMemo(() => {
@@ -545,51 +674,37 @@ export default function Finance() {
     const windowStart = hasActiveShiftWindow ? new Date(openSession!.startTime).getTime() : todayStart;
     const windowEnd = hasActiveShiftWindow ? Date.now() : todayEnd;
 
-    const scopedTransactions = data.transactions.filter(transaction => {
-      const txTime = resolveTransactionTimeForSession(transaction);
-      return Number.isFinite(txTime) && txTime >= windowStart && txTime <= windowEnd;
-    });
-    const sales = scopedTransactions.filter(t => t.type === 'sale');
-    const returns = scopedTransactions.filter(t => t.type === 'return');
-    const saleSettlementTotals = aggregateSaleSettlementContributions(sales);
-    const cashSales = saleSettlementTotals.cashPaid;
-    const cashCollections = scopedTransactions
-      .filter(t => t.type === 'payment' && t.paymentMethod === 'Cash')
-      .reduce((s, t) => s + Math.abs(t.total), 0);
-    const creditSales = saleSettlementTotals.creditDue;
-    const onlineSales = saleSettlementTotals.onlinePaid;
-    const returnTotal = returns.reduce((s, t) => s + Math.abs(t.total), 0);
-    const totalSales = saleSettlementTotals.totalSales;
-    const cogs = sales.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
-    const todayExpenses = expenses.filter(e => {
-      const expenseTime = new Date(e.createdAt).getTime();
-      return Number.isFinite(expenseTime) && expenseTime >= windowStart && expenseTime <= windowEnd;
-    }).reduce((s, e) => s + e.amount, 0);
-    const profit = totalSales - returnTotal - cogs - todayExpenses;
-    const systemCashSale = cashSales + cashCollections;
+    const scoped = buildCanonicalFinanceBreakdown(data.transactions, expenses, data.deleteCompensations || [], windowStart, windowEnd);
 
     financeShiftDiag('[FIN][KPI][WINDOW]', {
       windowType,
       startTime: new Date(windowStart).toISOString(),
       endTime: new Date(windowEnd).toISOString(),
-      txCount: scopedTransactions.length,
-      expenseCount: expenses.filter(e => {
-        const expenseTime = new Date(e.createdAt).getTime();
-        return Number.isFinite(expenseTime) && expenseTime >= windowStart && expenseTime <= windowEnd;
-      }).length,
+      txCount: scoped.txCount,
+      expenseCount: scoped.expenseCount,
     });
     financeShiftDiag('[FIN][KPI][SCOPED_TOTALS]', {
       windowType,
-      cashSales: systemCashSale,
-      creditSales,
-      onlineSales,
-      returns: returnTotal,
-      totalSales,
-      profitBeforeClose: profit,
-      expenses: todayExpenses,
+      grossSales: scoped.grossSales,
+      salesReturns: scoped.salesReturns,
+      netSales: scoped.netSales,
+      creditSalesCreated: scoped.creditSalesCreated,
+      onlineSalesAtSale: scoped.onlineSalesAtSale,
+      cogs: scoped.cogs,
+      grossProfit: scoped.grossProfit,
+      netProfit: scoped.netProfit,
+      saleCashReceipts: scoped.saleCashReceipts,
+      cashCollections: scoped.cashCollections,
+      onlineCollections: scoped.onlineCollections,
+      cashRefunds: scoped.cashRefunds,
+      onlineRefunds: scoped.onlineRefunds,
+      dueReductionFromReturns: scoped.dueReductionFromReturns,
+      storeCreditCreatedFromReturns: scoped.storeCreditCreatedFromReturns,
+      netCashMovementOperational: scoped.cashMovementAfterExpenses,
+      expenses: scoped.todayExpenses,
     });
 
-    return { cashSales: systemCashSale, creditSales, onlineSales, returnTotal, totalSales, todayExpenses, profit };
+    return scoped;
   }, [data.transactions, expenses, openSession]);
 
   const expenseActivities: ExpenseActivity[] = useMemo(() => (Array.isArray(data.expenseActivities) ? data.expenseActivities : []), [data]);
@@ -630,33 +745,50 @@ export default function Finance() {
 
   const creditCustomers = useMemo(() => data.customers.filter(c => c.totalDue > 0).sort((a, b) => b.totalDue - a.totalDue), [data.customers]);
 
-  const dailyProfit = useMemo(() => {
-    const sales = data.transactions.filter(t => t.type === 'sale' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
-    const returns = data.transactions.filter(t => t.type === 'return' && isSameDay(t.date, profitDate)).reduce((sum, t) => sum + t.total, 0);
-    const netSales = sales + returns;
-    const cogs = data.transactions
-      .filter(t => t.type === 'sale' && isSameDay(t.date, profitDate))
-      .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
-    const expenseSum = expenses.filter(e => isSameDay(e.createdAt, profitDate)).reduce((sum, e) => sum + e.amount, 0);
-
-    const summary = { sales: netSales, cogs, expenses: expenseSum, profit: netSales - cogs - expenseSum };
-    financeLog.pnl('DAILY_SUMMARY', { date: profitDate, ...summary });
+  const dailySummary = useMemo(() => {
+    const dayStart = new Date(`${profitDate}T00:00:00`).getTime();
+    const dayEnd = new Date(`${profitDate}T23:59:59.999`).getTime();
+    const summary = buildCanonicalFinanceBreakdown(data.transactions, expenses, data.deleteCompensations || [], dayStart, dayEnd);
+    financeLog.pnl('DAILY_SUMMARY', {
+      date: profitDate,
+      grossSales: summary.grossSales,
+      salesReturns: summary.salesReturns,
+      netSales: summary.netSales,
+      cogs: summary.cogs,
+      grossProfit: summary.grossProfit,
+      expenses: summary.todayExpenses,
+      netProfit: summary.netProfit,
+    });
     return summary;
   }, [data.transactions, expenses, profitDate]);
 
-  const monthlyProfit = useMemo(() => {
-    const sales = data.transactions.filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
-    const returns = data.transactions.filter(t => t.type === 'return' && monthKeyOf(t.date) === profitMonth).reduce((sum, t) => sum + t.total, 0);
-    const netSales = sales + returns;
-    const cogs = data.transactions
-      .filter(t => t.type === 'sale' && monthKeyOf(t.date) === profitMonth)
-      .reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
-    const expenseSum = expenses.filter(e => monthKeyOf(e.createdAt) === profitMonth).reduce((sum, e) => sum + e.amount, 0);
-
-    const summary = { sales: netSales, expenses: expenseSum, profit: netSales - cogs - expenseSum };
-    financeLog.pnl('MONTHLY_SUMMARY', { month: profitMonth, ...summary });
+  const monthlySummary = useMemo(() => {
+    const monthStart = new Date(`${profitMonth}-01T00:00:00`).getTime();
+    const monthEnd = new Date(new Date(monthStart).getFullYear(), new Date(monthStart).getMonth() + 1, 0, 23, 59, 59, 999).getTime();
+    const summary = buildCanonicalFinanceBreakdown(data.transactions, expenses, data.deleteCompensations || [], monthStart, monthEnd);
+    financeLog.pnl('MONTHLY_SUMMARY', {
+      month: profitMonth,
+      grossSales: summary.grossSales,
+      salesReturns: summary.salesReturns,
+      netSales: summary.netSales,
+      cogs: summary.cogs,
+      grossProfit: summary.grossProfit,
+      expenses: summary.todayExpenses,
+      netProfit: summary.netProfit,
+    });
     return summary;
   }, [data.transactions, expenses, profitMonth]);
+
+  const dueStoreCreditSummary = useMemo(() => {
+    const snapshot = getCanonicalCustomerBalanceSnapshot(data.customers, data.transactions);
+    console.info('[FIN][KPI][CURRENT_BALANCE]', {
+      customers: data.customers.length,
+      customersWithLedger: snapshot.customersWithLedger,
+      totalDue: snapshot.totalDue,
+      totalStoreCredit: snapshot.totalStoreCredit,
+    });
+    return { totalDue: snapshot.totalDue, totalStoreCredit: snapshot.totalStoreCredit };
+  }, [data.customers, data.transactions]);
 
   const persistState = async (newState: AppState) => {
     try {
@@ -746,7 +878,7 @@ export default function Finance() {
     if (!Number.isFinite(counted) || counted < 0) return setErrors('Please enter a valid closing cash value.');
 
     const closedAt = new Date().toISOString();
-    const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, freshOpenSession.startTime, closedAt, freshOpenSession.id);
+    const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, fresh.deleteCompensations || [], freshOpenSession.startTime, closedAt, freshOpenSession.id);
     const expectedClosing = freshOpenSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
     financeLog.shift('CLOSE', {
@@ -978,7 +1110,7 @@ export default function Finance() {
     const corrected = (data.cashSessions || []).map(session => {
       if (session.status !== 'closed' || !session.endTime) return session;
 
-      const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, session.startTime, session.endTime, session.id);
+      const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], session.startTime, session.endTime, session.id);
       const expectedClosing = session.openingBalance + systemCashTotal;
       const difference = (session.closingBalance ?? 0) - expectedClosing;
 
@@ -1013,9 +1145,10 @@ export default function Finance() {
     return 'Custom range';
   }, [expensePreset, expenseCustomFrom, expenseCustomTo]);
 
-  const chartMax = Math.max(monthlyProfit.sales, monthlyProfit.expenses, 1);
+  const chartMax = Math.max(monthlySummary.netSales, monthlySummary.todayExpenses, Math.abs(monthlySummary.grossProfit), 1);
 
   const tabs: Array<{ key: FinanceTabKey; label: string; icon: React.ReactNode }> = [
+    { key: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="w-4 h-4" /> },
     { key: 'cash', label: 'Cash Management', icon: <Wallet className="w-4 h-4" /> },
     { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
     { key: 'credit', label: 'Credit Management', icon: <DollarSign className="w-4 h-4" /> },
@@ -1054,6 +1187,102 @@ export default function Finance() {
           })}
         </div>
 
+        {activeTab === 'dashboard' && (
+          <div className="space-y-4">
+            <Card className="border-slate-200 shadow-sm">
+              <CardHeader>
+                <CardTitle>Finance Dashboard (Current Window)</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
+                    <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Margin</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <StatCard label="COGS (net of returns)" value={formatINR(todayFinanceBreakdown.cogs)} />
+                    <StatCard label="Gross Profit" value={formatINR(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Operating</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <StatCard label="Expenses" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Net Profit" value={formatINR(todayFinanceBreakdown.netProfit)} tone={todayFinanceBreakdown.netProfit >= 0 ? 'good' : 'bad'} />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collections & cash movement</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <StatCard label="Cash at Sale" value={formatINR(todayFinanceBreakdown.saleCashReceipts)} />
+                    <StatCard label="Cash Collections" value={formatINR(todayFinanceBreakdown.cashCollections)} />
+                    <StatCard label="Online Collections" value={formatINR(todayFinanceBreakdown.onlineCollections)} />
+                    <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Net Cash Movement" value={formatINR(todayFinanceBreakdown.cashMovementAfterExpenses)} tone={todayFinanceBreakdown.cashMovementAfterExpenses >= 0 ? 'good' : 'bad'} />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Online Refunds" value={formatINR(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Due Reduction" value={formatINR(todayFinanceBreakdown.dueReductionFromReturns)} />
+                    <StatCard label="Store Credit Created" value={formatINR(todayFinanceBreakdown.storeCreditCreatedFromReturns)} />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Due / store credit summary</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <StatCard label="Current Due Total" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Current Store Credit Total" value={formatINR(dueStoreCreditSummary.totalStoreCredit)} tone={dueStoreCreditSummary.totalStoreCredit > 0 ? 'good' : 'neutral'} />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
+                    <span>Daily Summary</span>
+                    <Input type="date" className="w-auto" value={profitDate} onChange={e => setProfitDate(e.target.value)} />
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  <StatCard label="Gross Sales" value={formatINR(dailySummary.grossSales)} />
+                  <StatCard label="Sales Returns" value={formatINR(dailySummary.salesReturns)} tone={dailySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Sales" value={formatINR(dailySummary.netSales)} tone={dailySummary.netSales >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="COGS" value={formatINR(dailySummary.cogs)} />
+                  <StatCard label="Gross Profit" value={formatINR(dailySummary.grossProfit)} tone={dailySummary.grossProfit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Expenses" value={formatINR(dailySummary.todayExpenses)} tone={dailySummary.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Profit" value={formatINR(dailySummary.netProfit)} tone={dailySummary.netProfit >= 0 ? 'good' : 'bad'} />
+                </CardContent>
+              </Card>
+              <Card className="border-slate-200 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
+                    <span>Monthly Summary</span>
+                    <Input type="month" className="w-auto" value={profitMonth} onChange={e => setProfitMonth(e.target.value)} />
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  <StatCard label="Gross Sales" value={formatINR(monthlySummary.grossSales)} />
+                  <StatCard label="Sales Returns" value={formatINR(monthlySummary.salesReturns)} tone={monthlySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Sales" value={formatINRSummary(monthlySummary.netSales)} tone={monthlySummary.netSales >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="COGS" value={formatINR(monthlySummary.cogs)} />
+                  <StatCard label="Gross Profit" value={formatINRSummary(monthlySummary.grossProfit)} tone={monthlySummary.grossProfit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Expenses" value={formatINRSummary(monthlySummary.todayExpenses)} tone={monthlySummary.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Profit" value={formatINR(monthlySummary.netProfit)} tone={monthlySummary.netProfit >= 0 ? 'good' : 'bad'} />
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'cash' && (
           <div className="space-y-4">
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -1070,16 +1299,49 @@ export default function Finance() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    <StatCard label="Cash Inflow (Sales + Collections)" value={formatINR(todayFinanceBreakdown.cashSales)} />
-                    <StatCard label="Credit Sale" value={formatINR(todayFinanceBreakdown.creditSales)} />
-                    <StatCard label="Online Sale" value={formatINR(todayFinanceBreakdown.onlineSales)} />
-                    <StatCard label="Returns / Refunds" value={formatINR(todayFinanceBreakdown.returnTotal)} tone={todayFinanceBreakdown.returnTotal > 0 ? 'bad' : 'neutral'} />
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
+                      <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
+                      <StatCard label="Credit Due Created" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
+                      <StatCard label="Online Sales (at sale)" value={formatINR(todayFinanceBreakdown.onlineSalesAtSale)} />
+                    </div>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <StatCard label="Total Sales" value={formatINR(todayFinanceBreakdown.totalSales)} />
-                    <StatCard label="Expense" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Profit (before close)" value={formatINR(todayFinanceBreakdown.profit)} tone={todayFinanceBreakdown.profit >= 0 ? 'good' : 'bad'} />
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Margin</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <StatCard label="COGS (net of returns)" value={formatINR(todayFinanceBreakdown.cogs)} />
+                      <StatCard label="Gross Profit" value={formatINR(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Operating</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <StatCard label="Expenses" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Profit" value={formatINR(todayFinanceBreakdown.netProfit)} tone={todayFinanceBreakdown.netProfit >= 0 ? 'good' : 'bad'} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collections & cash movement (operational)</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <StatCard label="Cash at Sale" value={formatINR(todayFinanceBreakdown.saleCashReceipts)} />
+                      <StatCard label="Cash Collections (payments)" value={formatINR(todayFinanceBreakdown.cashCollections)} />
+                      <StatCard label="Online Collections (payments)" value={formatINR(todayFinanceBreakdown.onlineCollections)} />
+                      <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Expense (cash outflow)" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Net Cash Movement (after expenses)" value={formatINR(todayFinanceBreakdown.cashMovementAfterExpenses)} tone={todayFinanceBreakdown.cashMovementAfterExpenses >= 0 ? 'good' : 'bad'} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects by handling mode (operational)</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Online Refunds" value={formatINR(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Due Reduction (returns)" value={formatINR(todayFinanceBreakdown.dueReductionFromReturns)} />
+                      <StatCard label="Store Credit Created" value={formatINR(todayFinanceBreakdown.storeCreditCreatedFromReturns)} />
+                    </div>
                   </div>
                   <div className="rounded-2xl border bg-muted/20 p-4">
                     <div className="flex items-start justify-between gap-3">
@@ -1255,7 +1517,7 @@ export default function Finance() {
               </CardHeader>
               <CardContent className="space-y-3 pt-5">
                 {filteredCashHistory.map(session => {
-                  const computedTotals = getSessionCashTotals(data.transactions, expenses, session.startTime, session.endTime);
+                  const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], session.startTime, session.endTime);
                   const systemCashTotal = session.systemCashTotal ?? computedTotals.systemCashTotal;
                   const sessionExpenseTotal = session.sessionExpenseTotal ?? computedTotals.expenseTotal;
                   const difference = session.difference ?? ((session.closingBalance ?? 0) - (session.openingBalance + systemCashTotal));
@@ -1309,7 +1571,7 @@ export default function Finance() {
             </Card>
 
             {activeHistorySession && (() => {
-              const computedTotals = getSessionCashTotals(data.transactions, expenses, activeHistorySession.startTime, activeHistorySession.endTime);
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, data.deleteCompensations || [], activeHistorySession.startTime, activeHistorySession.endTime);
               const systemCashTotal = activeHistorySession.systemCashTotal ?? computedTotals.systemCashTotal;
               const sessionExpenseTotal = activeHistorySession.sessionExpenseTotal ?? computedTotals.expenseTotal;
               const difference = activeHistorySession.difference ?? ((activeHistorySession.closingBalance ?? 0) - (activeHistorySession.openingBalance + systemCashTotal));
@@ -1704,10 +1966,13 @@ export default function Finance() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3">
-                  <StatCard label="Sales" value={formatINR(dailyProfit.sales)} />
-                  <StatCard label="COGS" value={formatINR(dailyProfit.cogs)} />
-                  <StatCard label="Expenses" value={formatINR(dailyProfit.expenses)} />
-                  <StatCard label="Profit" value={formatINR(dailyProfit.profit)} tone={dailyProfit.profit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Gross Sales" value={formatINR(dailySummary.grossSales)} />
+                  <StatCard label="Sales Returns" value={formatINR(dailySummary.salesReturns)} tone={dailySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Sales" value={formatINR(dailySummary.netSales)} tone={dailySummary.netSales >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="COGS" value={formatINR(dailySummary.cogs)} />
+                  <StatCard label="Gross Profit" value={formatINR(dailySummary.grossProfit)} tone={dailySummary.grossProfit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Expenses" value={formatINR(dailySummary.todayExpenses)} />
+                  <StatCard label="Net Profit" value={formatINR(dailySummary.netProfit)} tone={dailySummary.netProfit >= 0 ? 'good' : 'bad'} />
                 </CardContent>
               </Card>
 
@@ -1719,9 +1984,13 @@ export default function Finance() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3">
-                  <StatCard label="Sales" value={formatINR(monthlyProfit.sales)} />
-                  <StatCard label="Expenses" value={formatINR(monthlyProfit.expenses)} />
-                  <StatCard label="Profit" value={formatINR(monthlyProfit.profit)} tone={monthlyProfit.profit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Gross Sales" value={formatINR(monthlySummary.grossSales)} />
+                  <StatCard label="Sales Returns" value={formatINR(monthlySummary.salesReturns)} tone={monthlySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Sales" value={formatINRSummary(monthlySummary.netSales)} tone={monthlySummary.netSales >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="COGS" value={formatINR(monthlySummary.cogs)} />
+                  <StatCard label="Gross Profit" value={formatINRSummary(monthlySummary.grossProfit)} tone={monthlySummary.grossProfit >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Expenses" value={formatINRSummary(monthlySummary.todayExpenses)} />
+                  <StatCard label="Net Profit" value={formatINR(monthlySummary.netProfit)} tone={monthlySummary.netProfit >= 0 ? 'good' : 'bad'} />
                 </CardContent>
               </Card>
             </div>
@@ -1731,12 +2000,16 @@ export default function Finance() {
                 <CardHeader><CardTitle>Sales vs Expense Chart</CardTitle></CardHeader>
                 <CardContent className="space-y-3">
                   <div>
-                    <div className="flex justify-between text-sm"><span>Sales</span><span>{formatINR(monthlyProfit.sales)}</span></div>
-                    <div className="h-3 bg-muted rounded"><div className="h-3 bg-green-500 rounded" style={{ width: `${(monthlyProfit.sales / chartMax) * 100}%` }} /></div>
+                    <div className="flex justify-between text-sm"><span>Net Sales</span><span>{formatINRSummary(monthlySummary.netSales)}</span></div>
+                    <div className="h-3 bg-muted rounded"><div className="h-3 bg-green-500 rounded" style={{ width: `${(monthlySummary.netSales / chartMax) * 100}%` }} /></div>
                   </div>
                   <div>
-                    <div className="flex justify-between text-sm"><span>Expenses</span><span>{formatINR(monthlyProfit.expenses)}</span></div>
-                    <div className="h-3 bg-muted rounded"><div className="h-3 bg-red-500 rounded" style={{ width: `${(monthlyProfit.expenses / chartMax) * 100}%` }} /></div>
+                    <div className="flex justify-between text-sm"><span>Expenses</span><span>{formatINRSummary(monthlySummary.todayExpenses)}</span></div>
+                    <div className="h-3 bg-muted rounded"><div className="h-3 bg-red-500 rounded" style={{ width: `${(monthlySummary.todayExpenses / chartMax) * 100}%` }} /></div>
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-sm"><span>Gross Profit</span><span>{formatINRSummary(monthlySummary.grossProfit)}</span></div>
+                    <div className="h-3 bg-muted rounded"><div className="h-3 bg-blue-500 rounded" style={{ width: `${(Math.abs(monthlySummary.grossProfit) / chartMax) * 100}%` }} /></div>
                   </div>
                 </CardContent>
               </Card>
