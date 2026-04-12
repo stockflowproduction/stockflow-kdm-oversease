@@ -45,6 +45,10 @@ export interface CartItem extends Product {
   discountAmount?: number;
   selectedVariant?: string;
   selectedColor?: string;
+  sourceTransactionId?: string;
+  sourceTransactionDate?: string;
+  sourceLineCompositeKey?: string;
+  sourceUnitPriceSnapshot?: number;
 }
 
 export interface Customer {
@@ -80,6 +84,8 @@ export interface Transaction {
   taxLabel?: string;
   paymentMethod?: 'Cash' | 'Credit' | 'Online';
   notes?: string;
+  sourceTransactionId?: string;
+  sourceTransactionDate?: string;
 }
 
 export interface StoreProfile {

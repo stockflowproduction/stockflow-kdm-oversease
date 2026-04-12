@@ -6,7 +6,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
 import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
-import { loadData, processTransaction, addCustomer, clampCreditDueAmount } from '../services/storage';
+import { loadData, processTransaction, addCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
@@ -135,7 +135,6 @@ export default function Sales() {
 
   const [productSearch, setProductSearch] = useState('');
   const [isReturnMode, setIsReturnMode] = useState(false);
-  const [isTestReturnMode, setIsTestReturnMode] = useState(false);
   const [cartError, setCartError] = useState<string | null>(null);
   const [isTaxModalOpen, setIsTaxModalOpen] = useState(false);
   
@@ -165,11 +164,14 @@ export default function Sales() {
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [selectedTransactionDate, setSelectedTransactionDate] = useState('');
   const [transactionSyncStatus, setTransactionSyncStatus] = useState<{ phase: 'idle' | 'pending' | 'committing' | 'success' | 'error'; message: string }>({ phase: 'idle', message: '' });
-  const [testReturnSearch, setTestReturnSearch] = useState('');
-  const [testReturnDateFilter, setTestReturnDateFilter] = useState<'all' | '30d' | '90d'>('90d');
-  const [testReturnSort, setTestReturnSort] = useState<'newest' | 'oldest'>('newest');
-  const [selectedTestReturnTxId, setSelectedTestReturnTxId] = useState<string | null>(null);
-  const [testReturnQtyByLine, setTestReturnQtyByLine] = useState<Record<string, number>>({});
+  const [returnSearch, setReturnSearch] = useState('');
+  const [returnDateFilter, setReturnDateFilter] = useState<'all' | '30d' | '90d'>('90d');
+  const [returnSort, setReturnSort] = useState<'newest' | 'oldest' | 'amount_high' | 'amount_low'>('newest');
+  const [selectedReturnTxId, setSelectedReturnTxId] = useState<string | null>(null);
+  const [returnQtyByLine, setReturnQtyByLine] = useState<Record<string, number>>({});
+  const [isReturnPopupOpen, setIsReturnPopupOpen] = useState(false);
+  const [returnSubmitError, setReturnSubmitError] = useState<string | null>(null);
+  const [mixedReturnChoice, setMixedReturnChoice] = useState<'refund_paid_method' | 'store_credit'>('refund_paid_method');
 
   const refreshData = () => {
       const data = loadData();
@@ -195,7 +197,7 @@ export default function Sales() {
 
   useEffect(() => {
     const mode = searchParams.get('mode');
-    if (mode === 'return') { setIsReturnMode(true); setIsTestReturnMode(false); setCart([]); }
+    if (mode === 'return') { setIsReturnMode(true); setCart([]); }
     else { setIsReturnMode(false); }
   }, [searchParams]);
 
@@ -636,11 +638,11 @@ export default function Sales() {
     return searchMatch && categoryMatch;
   });
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
-  const testReturnTransactions = useMemo(() => {
+  const returnTransactions = useMemo(() => {
     const now = new Date();
-    const thresholdDays = testReturnDateFilter === '30d' ? 30 : testReturnDateFilter === '90d' ? 90 : null;
+    const thresholdDays = returnDateFilter === '30d' ? 30 : returnDateFilter === '90d' ? 90 : null;
     const threshold = thresholdDays ? new Date(now.getTime() - thresholdDays * 24 * 60 * 60 * 1000).getTime() : null;
-    const query = testReturnSearch.trim().toLowerCase();
+    const query = returnSearch.trim().toLowerCase();
     const base = transactions.filter(tx => tx.type === 'sale');
     const filtered = base.filter((tx) => {
       if (threshold && new Date(tx.date).getTime() < threshold) return false;
@@ -654,23 +656,28 @@ export default function Sales() {
       ].join(' ').toLowerCase();
       return haystack.includes(query);
     });
-    return filtered.sort((a, b) => testReturnSort === 'newest'
-      ? new Date(b.date).getTime() - new Date(a.date).getTime()
-      : new Date(a.date).getTime() - new Date(b.date).getTime());
-  }, [transactions, customers, testReturnDateFilter, testReturnSearch, testReturnSort]);
+    return filtered.sort((a, b) => {
+      if (returnSort === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
+      if (returnSort === 'amount_high') return Math.abs(b.total) - Math.abs(a.total);
+      if (returnSort === 'amount_low') return Math.abs(a.total) - Math.abs(b.total);
+      return new Date(b.date).getTime() - new Date(a.date).getTime();
+    });
+  }, [transactions, customers, returnDateFilter, returnSearch, returnSort]);
 
-  const selectedTestReturnTx = useMemo(
-    () => testReturnTransactions.find(tx => tx.id === selectedTestReturnTxId) || null,
-    [testReturnTransactions, selectedTestReturnTxId]
+  const selectedReturnTx = useMemo(
+    () => returnTransactions.find(tx => tx.id === selectedReturnTxId) || null,
+    [returnTransactions, selectedReturnTxId]
   );
-  const selectedTestReturnCustomer = useMemo(
-    () => customers.find(c => c.id === selectedTestReturnTx?.customerId) || null,
-    [customers, selectedTestReturnTx]
+  const selectedReturnCustomer = useMemo(
+    () => customers.find(c => c.id === selectedReturnTx?.customerId) || null,
+    [customers, selectedReturnTx]
   );
-  const selectedTestReturnLines = useMemo(() => {
-    if (!selectedTestReturnTx) return [] as Array<{
+  const selectedReturnLines = useMemo(() => {
+    if (!selectedReturnTx) return [] as Array<{
       key: string;
+      id: string;
       name: string;
+      image: string;
       variant: string;
       color: string;
       originalQty: number;
@@ -681,7 +688,7 @@ export default function Sales() {
       selectedSubtotal: number;
     }>;
     const rows = new Map<string, { key: string; id: string; name: string; variant: string; color: string; originalQty: number; unitPrice: number }>();
-    (selectedTestReturnTx.items || []).forEach(item => {
+    (selectedReturnTx.items || []).forEach(item => {
       const variant = item.selectedVariant || NO_VARIANT;
       const color = item.selectedColor || NO_COLOR;
       const key = `${item.id}__${variant}__${color}__${item.sellPrice}`;
@@ -690,16 +697,33 @@ export default function Sales() {
       else rows.set(key, { key, id: item.id, name: item.name, variant, color, originalQty: Math.max(0, Number(item.quantity) || 0), unitPrice: Math.max(0, Number(item.sellPrice) || 0) });
     });
     return Array.from(rows.values()).map((row) => {
-      const returnedQty = transactions
-        .filter(tx => tx.type === 'return' && (!selectedTestReturnTx.customerId || tx.customerId === selectedTestReturnTx.customerId))
+      const linkedReturnedQty = transactions
+        .filter(tx => tx.type === 'return')
         .reduce((sum, tx) => sum + (tx.items || [])
-          .filter(item => item.id === row.id && (item.selectedVariant || NO_VARIANT) === row.variant && (item.selectedColor || NO_COLOR) === row.color)
+          .filter(item => item.sourceTransactionId === selectedReturnTx.id && item.sourceLineCompositeKey === row.key)
           .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
+
+      const legacyFallbackReturnedQty = transactions
+        .filter(tx => tx.type === 'return' && (!selectedReturnTx.customerId || tx.customerId === selectedReturnTx.customerId))
+        .reduce((sum, tx) => sum + (tx.items || [])
+          .filter(item =>
+            !item.sourceTransactionId
+            && !item.sourceLineCompositeKey
+            && item.id === row.id
+            && (item.selectedVariant || NO_VARIANT) === row.variant
+            && (item.selectedColor || NO_COLOR) === row.color
+          )
+          .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
+
+      const returnedQty = linkedReturnedQty > 0 ? linkedReturnedQty : legacyFallbackReturnedQty;
       const returnableQty = Math.max(0, row.originalQty - returnedQty);
-      const selectedQty = Math.max(0, Math.min(returnableQty, Number(testReturnQtyByLine[row.key] || 0)));
+      const selectedQty = Math.max(0, Math.min(returnableQty, Number(returnQtyByLine[row.key] || 0)));
+      const productRef = products.find(p => p.id === row.id);
       return {
         key: row.key,
+        id: row.id,
         name: row.name,
+        image: productRef?.image || '',
         variant: row.variant,
         color: row.color,
         originalQty: row.originalQty,
@@ -710,39 +734,211 @@ export default function Sales() {
         selectedSubtotal: selectedQty * row.unitPrice,
       };
     });
-  }, [selectedTestReturnTx, transactions, testReturnQtyByLine]);
-  const testReturnSubtotal = selectedTestReturnLines.reduce((sum, line) => sum + line.selectedSubtotal, 0);
-  const testDueBefore = Math.max(0, Number(selectedTestReturnCustomer?.totalDue || 0));
-  const testCreditBefore = Math.max(0, Number(selectedTestReturnCustomer?.storeCredit || 0));
-  const testDueReduction = Math.min(testDueBefore, testReturnSubtotal);
-  const testRefundRemainder = Math.max(0, testReturnSubtotal - testDueReduction);
-  const selectedSettlement = selectedTestReturnTx?.saleSettlement || { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
-  const settlementDenominator = Math.max(0.0001, Math.abs(Number(selectedTestReturnTx?.total || 0)));
-  const testCashRefund = testRefundRemainder * (Math.max(0, selectedSettlement.cashPaid) / settlementDenominator);
-  const testOnlineRefund = testRefundRemainder * (Math.max(0, selectedSettlement.onlinePaid) / settlementDenominator);
-  const testCreditCreate = Math.max(0, testRefundRemainder - testCashRefund - testOnlineRefund);
+  }, [selectedReturnTx, transactions, returnQtyByLine, products]);
+  const selectedSettlement = selectedReturnTx?.saleSettlement || { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
+  const originalPaidMethodKind: 'cash' | 'online' = Number(selectedSettlement.onlinePaid || 0) > 0 && Number(selectedSettlement.cashPaid || 0) <= 0 ? 'online' : 'cash';
+  const selectedReturnQty = selectedReturnLines.reduce((sum, line) => sum + line.selectedQty, 0);
+  const selectedReturnSoldQty = selectedReturnLines.reduce((sum, line) => sum + line.originalQty, 0);
+  const selectedReturnItems = useMemo(() => {
+    if (!selectedReturnTx) return [] as CartItem[];
+    return selectedReturnLines
+      .filter(line => line.selectedQty > 0)
+      .map(line => {
+        const sourceLine = (selectedReturnTx.items || []).find(item =>
+          item.id === line.id
+          && (item.selectedVariant || NO_VARIANT) === line.variant
+          && (item.selectedColor || NO_COLOR) === line.color
+          && Math.abs(Number(item.sellPrice) - line.unitPrice) < 0.0001
+        );
+        const productRef = products.find(p => p.id === line.id);
+        return {
+          ...(sourceLine || productRef || {
+            id: line.id,
+            name: line.name,
+            barcode: '',
+            description: '',
+            buyPrice: 0,
+            sellPrice: line.unitPrice,
+            stock: 0,
+            image: line.image || '',
+            category: '',
+          } as Product),
+          sellPrice: line.unitPrice,
+          quantity: line.selectedQty,
+          selectedVariant: line.variant,
+          selectedColor: line.color,
+          discountAmount: 0,
+          discountPercent: 0,
+          sourceTransactionId: selectedReturnTx.id,
+          sourceTransactionDate: selectedReturnTx.date,
+          sourceLineCompositeKey: line.key,
+          sourceUnitPriceSnapshot: line.unitPrice,
+        };
+      });
+  }, [selectedReturnLines, selectedReturnTx, products]);
+  const dueFirstDraftTransaction = useMemo<Transaction | null>(() => {
+    if (!selectedReturnTx) return null;
+    const returnSubtotal = selectedReturnItems.reduce((sum, item) => sum + ((Number(item.quantity) || 0) * (Number(item.sellPrice) || 0)), 0);
+    return {
+      id: `return-preview-${selectedReturnTx.id}`,
+      items: selectedReturnItems,
+      total: -returnSubtotal,
+      subtotal: returnSubtotal,
+      discount: 0,
+      tax: 0,
+      taxRate: 0,
+      taxLabel: '0%',
+      date: new Date().toISOString(),
+      type: 'return',
+      customerId: selectedReturnTx.customerId,
+      customerName: selectedReturnTx.customerName,
+      paymentMethod: 'Credit',
+      returnHandlingMode: 'reduce_due',
+      sourceTransactionId: selectedReturnTx.id,
+      sourceTransactionDate: selectedReturnTx.date,
+      notes: `Return against sale bill ${selectedReturnTx.id}`,
+    };
+  }, [selectedReturnItems, selectedReturnTx]);
+  const dueFirstPreview = useMemo(
+    () => dueFirstDraftTransaction
+      ? getCanonicalReturnPreviewForDraft(dueFirstDraftTransaction, customers, transactions)
+      : null,
+    [dueFirstDraftTransaction, customers, transactions]
+  );
+  const refundableAfterDue = Math.max(0, Number((dueFirstPreview?.total || 0) - (dueFirstPreview?.dueReduction || 0)));
+  const isMixedPaidCreditSale = Number(selectedSettlement.creditDue || 0) > 0 && (Number(selectedSettlement.cashPaid || 0) > 0 || Number(selectedSettlement.onlinePaid || 0) > 0);
+  const requiresMixedChoice = isMixedPaidCreditSale && Number(dueFirstPreview?.dueReduction || 0) > 0 && refundableAfterDue > 0;
+  const resolvedReturnMode = useMemo<ReturnHandlingMode>(() => {
+    if (requiresMixedChoice) {
+      if (mixedReturnChoice === 'store_credit') return 'reduce_due';
+      return originalPaidMethodKind === 'online' ? 'refund_online' : 'refund_cash';
+    }
+    if (Number(selectedSettlement.creditDue || 0) > 0) return 'reduce_due';
+    if (Number(selectedSettlement.onlinePaid || 0) > 0 && Number(selectedSettlement.cashPaid || 0) <= 0) return 'refund_online';
+    if (Number(selectedSettlement.cashPaid || 0) > 0 && Number(selectedSettlement.onlinePaid || 0) <= 0) return 'refund_cash';
+    if ((selectedReturnCustomer?.totalDue || 0) > 0) return 'reduce_due';
+    return originalPaidMethodKind === 'online' ? 'refund_online' : 'refund_cash';
+  }, [requiresMixedChoice, mixedReturnChoice, originalPaidMethodKind, selectedSettlement, selectedReturnCustomer]);
+  const returnDraftTransaction = useMemo<Transaction | null>(() => {
+    if (!dueFirstDraftTransaction) return null;
+    return {
+      ...dueFirstDraftTransaction,
+      paymentMethod: resolvedReturnMode === 'refund_online' ? 'Online' : resolvedReturnMode === 'reduce_due' || resolvedReturnMode === 'store_credit' ? 'Credit' : 'Cash',
+      returnHandlingMode: resolvedReturnMode,
+    };
+  }, [dueFirstDraftTransaction, resolvedReturnMode]);
+  const returnPreview = useMemo(
+    () => returnDraftTransaction
+      ? getCanonicalReturnPreviewForDraft(returnDraftTransaction, customers, transactions)
+      : {
+          mode: 'refund_cash' as ReturnHandlingMode,
+          subtotal: 0,
+          total: 0,
+          dueBefore: 0,
+          dueAfter: 0,
+          storeCreditBefore: 0,
+          storeCreditAfter: 0,
+          dueReduction: 0,
+          cashRefund: 0,
+          onlineRefund: 0,
+          storeCreditCreated: 0,
+        },
+    [returnDraftTransaction, customers, transactions]
+  );
+  const openReturnPopup = (txId: string) => {
+    setSelectedReturnTxId(txId);
+    setReturnQtyByLine({});
+    setReturnSubmitError(null);
+    setMixedReturnChoice('refund_paid_method');
+    setIsReturnPopupOpen(true);
+  };
+
+  const createReturnFromSelectedTransaction = () => {
+    if (!selectedReturnTx || !returnDraftTransaction || returnPreview.total <= 0 || selectedReturnQty <= 0) {
+      setReturnSubmitError('Unable to create return safely. Use preview details and adjust quantities.');
+      return;
+    }
+    const tx: Transaction = {
+      ...returnDraftTransaction,
+      id: Date.now().toString(),
+      total: -returnPreview.total,
+      subtotal: returnPreview.subtotal,
+      discount: 0,
+      tax: 0,
+      taxRate: 0,
+      taxLabel: '0%',
+      date: new Date().toISOString(),
+      type: 'return',
+      customerId: selectedReturnTx.customerId,
+      customerName: selectedReturnTx.customerName,
+      paymentMethod: resolvedReturnMode === 'refund_online' ? 'Online' : resolvedReturnMode === 'reduce_due' || resolvedReturnMode === 'store_credit' ? 'Credit' : 'Cash',
+      returnHandlingMode: resolvedReturnMode,
+      sourceTransactionId: selectedReturnTx.id,
+      sourceTransactionDate: selectedReturnTx.date,
+      notes: `Return against sale bill ${selectedReturnTx.id}`,
+    };
+    console.info('[FIN][RETURN][CHOICE_ENFORCEMENT]', {
+      txId: tx.id,
+      sourceTransactionId: selectedReturnTx.id,
+      operatorChoice: mixedReturnChoice,
+      finalReturnHandlingMode: tx.returnHandlingMode,
+      finalPaymentMethod: tx.paymentMethod,
+      dueReduction: returnPreview.dueReduction,
+      refundableRemainder: Math.max(0, returnPreview.total - returnPreview.dueReduction),
+      cashRefund: returnPreview.cashRefund,
+      onlineRefund: returnPreview.onlineRefund,
+      storeCreditCreated: returnPreview.storeCreditCreated,
+    });
+    try {
+      const newState = processTransaction(tx);
+      setProducts(newState.products);
+      setCustomers(newState.customers);
+      setTransactions(newState.transactions);
+      setIsReturnPopupOpen(false);
+      setReturnQtyByLine({});
+      setSelectedReturnTxId(null);
+      setReturnSubmitError(null);
+    } catch (error) {
+      setReturnSubmitError(error instanceof Error ? error.message : 'Failed to create return transaction.');
+    }
+  };
 
   return (
-    <div className={`h-full rounded-xl border p-3 md:p-4 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_390px] gap-3 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
+    <div className={`h-full rounded-xl border p-3 md:p-4 grid grid-cols-1 ${isReturnMode ? 'lg:grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_390px]'} gap-3 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
       <div className="min-w-0 flex flex-col gap-3">
         <div className="bg-card border rounded-xl p-3 space-y-3">
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px] items-center">
+          <div className={`grid gap-3 items-center ${isReturnMode ? 'md:grid-cols-[minmax(0,1fr)_420px]' : 'md:grid-cols-[minmax(0,1fr)_220px]'}`}>
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
-                value={isTestReturnMode ? testReturnSearch : productSearch}
-                onChange={e => isTestReturnMode ? setTestReturnSearch(e.target.value) : setProductSearch(e.target.value)}
-                className="pl-9 h-9"
-                placeholder={isTestReturnMode ? 'Search customer, phone, bill, product' : 'Search product, barcode, variant'}
+                value={isReturnMode ? returnSearch : productSearch}
+                onChange={e => isReturnMode ? setReturnSearch(e.target.value) : setProductSearch(e.target.value)}
+                className={`pl-9 h-9 ${isReturnMode ? 'md:max-w-[80%]' : ''}`}
+                placeholder={isReturnMode ? 'Search customer, phone, bill no, product, code' : 'Search product, barcode, variant'}
               />
             </div>
-            <div className="grid grid-cols-3 gap-2">
-              <Button variant={!isReturnMode && !isTestReturnMode ? 'default' : 'outline'} className={!isReturnMode && !isTestReturnMode ? '' : 'text-foreground'} onClick={() => { setIsReturnMode(false); setIsTestReturnMode(false); setReturnHandlingMode('refund_cash'); setCart([]); }}>Sale</Button>
-              <Button variant={isReturnMode && !isTestReturnMode ? 'default' : 'outline'} className={isReturnMode && !isTestReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setIsTestReturnMode(false); setReturnHandlingMode('refund_cash'); setCart([]); }}>Return</Button>
-              <Button variant={isTestReturnMode ? 'default' : 'outline'} className={isTestReturnMode ? 'bg-indigo-600 hover:bg-indigo-700' : ''} onClick={() => { setIsReturnMode(false); setIsTestReturnMode(true); setReturnHandlingMode('refund_cash'); setCart([]); }}>Test Return</Button>
+            <div className={`grid gap-2 ${isReturnMode ? 'grid-cols-4' : 'grid-cols-2'}`}>
+              {!isReturnMode && <Button variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setCart([]); }}>Sale</Button>}
+              <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setCart([]); }}>Return</Button>
+              {isReturnMode && (
+                <>
+                  <select className="h-9 rounded-md border border-input bg-background pl-3 pr-9 text-sm" value={returnDateFilter} onChange={e => setReturnDateFilter(e.target.value as 'all' | '30d' | '90d')}>
+                    <option value="90d">Last 90 days</option>
+                    <option value="30d">Last 30 days</option>
+                    <option value="all">All dates</option>
+                  </select>
+                  <select className="h-9 rounded-md border border-input bg-background pl-3 pr-9 text-sm" value={returnSort} onChange={e => setReturnSort(e.target.value as 'newest' | 'oldest' | 'amount_high' | 'amount_low')}>
+                    <option value="newest">Newest</option>
+                    <option value="oldest">Oldest</option>
+                    <option value="amount_high">Amount High</option>
+                    <option value="amount_low">Amount Low</option>
+                  </select>
+                  <div className="h-9 rounded-md border border-dashed px-3 text-sm flex items-center text-muted-foreground">Sales: {returnTransactions.length}</div>
+                </>
+              )}
             </div>
           </div>
-          {!isTestReturnMode && (
+          {!isReturnMode && (
           <div className="flex gap-2 overflow-x-auto pb-1">
             {categories.map((category) => (
               <Button key={category} variant={selectedCategory === category ? 'default' : 'outline'} size="sm" className={`h-8 shrink-0 ${selectedCategory === category && isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''}`} onClick={() => setSelectedCategory(category)}>
@@ -753,78 +949,32 @@ export default function Sales() {
           )}
         </div>
 
-        <div className="flex-1 min-h-0 overflow-y-auto pr-1">
-          {isTestReturnMode ? (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          {isReturnMode ? (
             <div className="space-y-3">
-              <div className="grid gap-2 md:grid-cols-3">
-                <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={testReturnDateFilter} onChange={e => setTestReturnDateFilter(e.target.value as 'all' | '30d' | '90d')}>
-                  <option value="90d">Last 90 days</option>
-                  <option value="30d">Last 30 days</option>
-                  <option value="all">All dates</option>
-                </select>
-                <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={testReturnSort} onChange={e => setTestReturnSort(e.target.value as 'newest' | 'oldest')}>
-                  <option value="newest">Sort: Newest</option>
-                  <option value="oldest">Sort: Oldest</option>
-                </select>
-                <div className="h-9 rounded-md border border-dashed px-3 text-sm flex items-center text-muted-foreground">Sales found: {testReturnTransactions.length}</div>
-              </div>
-
-              <div className="grid gap-3 xl:grid-cols-[320px_minmax(0,1fr)]">
-                <Card>
-                  <CardHeader className="py-3"><CardTitle className="text-sm">Transaction Results</CardTitle></CardHeader>
-                  <CardContent className="space-y-2 max-h-[52vh] overflow-y-auto">
-                    {testReturnTransactions.map((tx) => (
-                      <div key={tx.id} className={`rounded-lg border p-3 text-xs space-y-1.5 ${selectedTestReturnTxId === tx.id ? 'border-indigo-500 bg-indigo-50/40' : ''}`}>
-                        <div className="flex items-center justify-between"><div className="font-semibold truncate">{tx.customerName || 'Walk-in customer'}</div><div className="text-muted-foreground">{new Date(tx.date).toLocaleDateString()}</div></div>
-                        <div className="text-muted-foreground">Bill: {tx.id}</div>
-                        <div className="text-muted-foreground">Items: {(tx.items || []).length} • Total: ₹{formatMoneyWhole(Math.abs(tx.total))}</div>
-                        <Button size="sm" variant={selectedTestReturnTxId === tx.id ? 'default' : 'outline'} onClick={() => { setSelectedTestReturnTxId(tx.id); setTestReturnQtyByLine({}); }}>
-                          {selectedTestReturnTxId === tx.id ? 'Selected' : 'Open Return'}
-                        </Button>
-                      </div>
-                    ))}
-                    {!testReturnTransactions.length && <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No sale transactions found.</div>}
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="py-3"><CardTitle className="text-sm">Selected Transaction & Purchased Lines</CardTitle></CardHeader>
-                  <CardContent className="space-y-3 max-h-[52vh] overflow-y-auto">
-                    {!selectedTestReturnTx ? (
-                      <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">Select a transaction to start Test Return flow.</div>
-                    ) : (
-                      <>
-                        <div className="rounded-lg border p-3 text-xs grid md:grid-cols-2 gap-2 bg-muted/10">
-                          <div><span className="text-muted-foreground">Bill:</span> <span className="font-semibold">{selectedTestReturnTx.id}</span></div>
-                          <div><span className="text-muted-foreground">Date:</span> <span className="font-semibold">{new Date(selectedTestReturnTx.date).toLocaleString()}</span></div>
-                          <div><span className="text-muted-foreground">Customer:</span> <span className="font-semibold">{selectedTestReturnTx.customerName || 'Walk-in customer'}</span></div>
-                          <div><span className="text-muted-foreground">Phone:</span> <span className="font-semibold">{selectedTestReturnCustomer?.phone || '—'}</span></div>
-                          <div><span className="text-muted-foreground">Settlement:</span> <span className="font-semibold">Cash ₹{formatMoneyPrecise(Number(selectedSettlement.cashPaid || 0))}, Online ₹{formatMoneyPrecise(Number(selectedSettlement.onlinePaid || 0))}, Credit ₹{formatMoneyPrecise(Number(selectedSettlement.creditDue || 0))}</span></div>
-                        </div>
-                        {selectedTestReturnLines.map((line) => (
-                          <div key={line.key} className="rounded-lg border p-3 text-xs space-y-2">
-                            <div className="font-semibold">{line.name}</div>
-                            <div className="text-muted-foreground">Variant: {line.variant === NO_VARIANT ? 'Default' : line.variant} • Color: {line.color === NO_COLOR ? 'Default' : line.color}</div>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                              <div className="rounded border p-2 bg-muted/10"><div className="text-[10px] text-muted-foreground">Original Qty</div><div className="font-semibold">{line.originalQty}</div></div>
-                              <div className="rounded border p-2 bg-muted/10"><div className="text-[10px] text-muted-foreground">Returned*</div><div className="font-semibold">{line.returnedQty}</div></div>
-                              <div className="rounded border p-2 bg-muted/10"><div className="text-[10px] text-muted-foreground">Returnable</div><div className="font-semibold">{line.returnableQty}</div></div>
-                              <div className="rounded border p-2 bg-muted/10"><div className="text-[10px] text-muted-foreground">Orig Price</div><div className="font-semibold">₹{formatMoneyPrecise(line.unitPrice)}</div></div>
-                            </div>
-                            <div className="grid grid-cols-[140px_minmax(0,1fr)] gap-2 items-center">
-                              <Input type="number" min="0" max={line.returnableQty} step="1" value={line.selectedQty} onChange={(e) => {
-                                const next = Math.min(line.returnableQty, Math.max(0, Math.floor(Number(e.target.value || 0))));
-                                setTestReturnQtyByLine(prev => ({ ...prev, [line.key]: next }));
-                              }} />
-                              <div className="font-semibold">Line Return: ₹{formatMoneyPrecise(line.selectedSubtotal)}</div>
-                            </div>
-                          </div>
-                        ))}
-                        <p className="text-[11px] text-muted-foreground">*Returned qty is currently inferred from aggregate history for scaffold preview.</p>
-                      </>
-                    )}
-                  </CardContent>
-                </Card>
+              <div className="space-y-2">
+                <div className="hidden md:grid md:grid-cols-[130px_180px_minmax(0,1fr)_92px_120px_132px] px-3 text-xs font-semibold text-muted-foreground">
+                  <div>Date</div>
+                  <div>Invoice Number</div>
+                  <div>Customer Name</div>
+                  <div>Quantity</div>
+                  <div>Price</div>
+                  <div />
+                </div>
+                {returnTransactions.map((tx) => {
+                  const totalQty = (tx.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+                  return (
+                    <div key={tx.id} className="w-full rounded-xl border bg-card p-3 grid gap-2 md:grid-cols-[130px_180px_minmax(0,1fr)_92px_120px_132px] items-center box-border">
+                      <div className="text-xs text-muted-foreground">{new Date(tx.date).toLocaleDateString()}</div>
+                      <div className="text-xs font-semibold truncate">#{tx.id}</div>
+                      <div className="font-semibold text-sm truncate">{tx.customerName || 'Walk-in customer'}</div>
+                      <div className="text-sm font-semibold">Qty {totalQty}</div>
+                      <div className="text-sm font-semibold">₹{formatMoneyWhole(Math.abs(tx.total))}</div>
+                      <Button size="sm" className="bg-orange-600 hover:bg-orange-700" onClick={() => openReturnPopup(tx.id)}>Make Return</Button>
+                    </div>
+                  );
+                })}
+                {!returnTransactions.length && <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No sale transactions found for return workflow.</div>}
               </div>
             </div>
           ) : (
@@ -849,7 +999,7 @@ export default function Sales() {
       </div>
 
 
-      {!isTestReturnMode && variantPicker.open && variantPicker.product && (
+      {!isReturnMode && variantPicker.open && variantPicker.product && (
         <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-4" onClick={() => setVariantPicker({ open: false, product: null, rows: [] })}>
           <Card className="w-full max-w-2xl" onClick={e => e.stopPropagation()}>
             <CardHeader className="border-b">
@@ -886,34 +1036,36 @@ export default function Sales() {
         </div>
       )}
 
+      {!isReturnMode && (
       <div className="min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden">
         <div className="px-4 py-3 border-b flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold">{isTestReturnMode ? 'Test Return Summary' : (isReturnMode ? 'Return Cart' : 'Cart')}</h2>
-            <p className="text-xs text-muted-foreground">{isTestReturnMode ? 'Preview-only scaffold' : `${cart.length} items`}</p>
+            <h2 className="text-sm font-semibold">{isReturnMode ? 'Return Guidance' : 'Cart'}</h2>
+            <p className="text-xs text-muted-foreground">{isReturnMode ? 'Select bill → Make Return → review popup' : `${cart.length} items`}</p>
           </div>
-          {!isTestReturnMode && cart.length > 0 && (
+          {!isReturnMode && cart.length > 0 && (
             <Button variant="outline" size="sm" onClick={() => setCart([])}>Clear</Button>
           )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
-          {isTestReturnMode ? (
+          {isReturnMode ? (
             <div className="space-y-3">
-              <div className="rounded-lg border p-3 bg-indigo-50/40 space-y-2 text-xs">
-                <div className="font-semibold text-sm">Financial Preview</div>
-                <div className="grid grid-cols-1 gap-2">
-                  <div className="rounded border bg-white p-2 flex justify-between"><span>Selected Return Subtotal</span><span className="font-semibold">₹{formatMoneyPrecise(testReturnSubtotal)}</span></div>
-                  <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Due Reduction</span><span className="font-semibold">₹{formatMoneyPrecise(testDueReduction)}</span></div>
-                  <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Cash Refund</span><span className="font-semibold">₹{formatMoneyPrecise(testCashRefund)}</span></div>
-                  <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Online Refund</span><span className="font-semibold">₹{formatMoneyPrecise(testOnlineRefund)}</span></div>
-                  <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Store Credit Create</span><span className="font-semibold">₹{formatMoneyPrecise(testCreditCreate)}</span></div>
-                  <div className="rounded border bg-white p-2"><div>Customer Due Before → After</div><div className="font-semibold">₹{formatMoneyPrecise(testDueBefore)} → ₹{formatMoneyPrecise(Math.max(0, testDueBefore - testDueReduction))}</div></div>
-                  <div className="rounded border bg-white p-2"><div>Store Credit Before → After</div><div className="font-semibold">₹{formatMoneyPrecise(testCreditBefore)} → ₹{formatMoneyPrecise(testCreditBefore + testCreditCreate)}</div></div>
-                </div>
+              <div className="rounded-lg border p-3 bg-orange-50/40 space-y-2 text-xs">
+                <div className="font-semibold text-sm">Transaction-based Return Flow</div>
+                <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
+                  <li>Search and filter sale bills from the left panel.</li>
+                  <li>Click <span className="font-semibold text-foreground">Make Return</span> on the exact original bill.</li>
+                  <li>Adjust line quantities and review settlement-aware preview.</li>
+                  <li>Confirm return when the preview is safe and mode-resolvable.</li>
+                </ul>
               </div>
-              <Button className="w-full bg-indigo-600 hover:bg-indigo-700" disabled={testReturnSubtotal <= 0}>Generate Return Preview</Button>
-              <Button variant="outline" className="w-full" disabled title="Step 1 scaffold only">Create Return (Locked)</Button>
+              {transactionSyncStatus.phase !== 'idle' && (
+                <div className={`text-xs p-2 rounded flex items-center gap-2 border ${transactionSyncStatus.phase === 'error' ? 'bg-destructive/10 text-destructive border-destructive/30' : transactionSyncStatus.phase === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
+                  <AlertCircle className="w-3 h-3" />
+                  {transactionSyncStatus.message}
+                </div>
+              )}
             </div>
           ) : cart.length === 0 ? (
             <div className="border border-dashed rounded-xl p-6 text-center text-sm text-muted-foreground">Cart is empty</div>
@@ -945,7 +1097,7 @@ export default function Sales() {
         </div>
 
         <div className="border-t p-4 space-y-3">
-          {!isTestReturnMode && (
+          {!isReturnMode && (
           <>
           {cartError && <div className="text-xs bg-destructive/10 text-destructive p-2 rounded flex items-center gap-2"><AlertCircle className="w-3 h-3" /> {cartError}</div>}
           {transactionSyncStatus.phase !== 'idle' && (
@@ -969,6 +1121,121 @@ export default function Sales() {
           )}
         </div>
       </div>
+      )}
+
+      {isReturnMode && isReturnPopupOpen && selectedReturnTx && (
+        <div className="fixed inset-0 bg-black/70 z-[90] flex items-center justify-center p-4" onClick={() => setIsReturnPopupOpen(false)}>
+          <Card className="w-full max-w-5xl max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <CardHeader className="border-b py-3 flex flex-row items-center justify-between gap-2">
+              <CardTitle className="text-[17px] font-semibold min-w-0">
+                #{selectedReturnTx.id} | {new Date(selectedReturnTx.date).toLocaleString()} | {selectedReturnTx.customerName || 'Walk-in customer'}
+              </CardTitle>
+              <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={() => setIsReturnPopupOpen(false)}><X className="w-4 h-4" /></Button>
+            </CardHeader>
+            <CardContent className="p-3 space-y-3 overflow-y-auto max-h-[calc(90vh-138px)]">
+              <div className="space-y-1.5 text-[13px] rounded-lg border p-2.5 bg-muted/10">
+                <div className="grid gap-1.5 md:grid-cols-5">
+                <div><span className="text-muted-foreground">Phone:</span> <span className="font-semibold">{selectedReturnCustomer?.phone || '—'}</span></div>
+                <div><span className="text-muted-foreground">Due:</span> <span className="font-semibold">₹{formatMoneyPrecise(returnPreview.dueBefore)}</span></div>
+                <div><span className="text-muted-foreground">Store Credit:</span> <span className="font-semibold">₹{formatMoneyPrecise(returnPreview.storeCreditBefore)}</span></div>
+                <div><span className="text-muted-foreground">Original Total:</span> <span className="font-semibold">₹{formatMoneyPrecise(Math.abs(selectedReturnTx.total || 0))}</span></div>
+                <div><span className="text-muted-foreground">Total Qty:</span> <span className="font-semibold">{selectedReturnSoldQty}</span></div>
+                </div>
+                <div className="grid md:grid-cols-1 items-center">
+                  <div><span className="text-muted-foreground">Settlement:</span> <span className="font-semibold">Cash ₹{formatMoneyPrecise(Number(selectedSettlement.cashPaid || 0))} • Online ₹{formatMoneyPrecise(Number(selectedSettlement.onlinePaid || 0))} • Credit ₹{formatMoneyPrecise(Number(selectedSettlement.creditDue || 0))}</span></div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+                <div className="space-y-1.5">
+                  <div className="text-[13px] font-semibold text-muted-foreground px-1">Products in this transaction</div>
+                  {selectedReturnLines.map((line) => {
+                    const variantParts = [
+                      line.variant && line.variant !== NO_VARIANT ? line.variant : '',
+                      line.color && line.color !== NO_COLOR ? line.color : '',
+                    ].filter(Boolean).join(' • ');
+                    return (
+                    <div key={line.key} className="rounded-md border px-2 py-1.5">
+                      <div className="grid grid-cols-[30px_minmax(0,1.7fr)_64px_52px_58px_70px] md:grid-cols-[34px_minmax(0,2fr)_84px_70px_72px_84px] items-center gap-1.5 md:gap-2 text-[13px]">
+                        <div className="h-8 w-8 rounded border bg-muted overflow-hidden shrink-0">{line.image ? <img src={line.image} alt={line.name} className="h-full w-full object-contain" /> : <Package className="w-full h-full p-1.5 opacity-30" />}</div>
+                        <div className="min-w-0 font-medium leading-tight">
+                          <div className="truncate">{line.name}</div>
+                          {variantParts && <div className="text-[11px] text-muted-foreground truncate">{variantParts}</div>}
+                        </div>
+                        <div className="text-right font-semibold">₹{formatMoneyPrecise(line.unitPrice)}</div>
+                        <div className="text-right text-muted-foreground">Sold: {line.originalQty}<span className="block text-[10px]">Ret: {line.returnedQty} • Left: {line.returnableQty}</span></div>
+                        <div>
+                          <Input
+                            type="number"
+                            min="0"
+                            max={line.returnableQty}
+                            step="1"
+                            className="h-8 px-2 text-right text-[13px]"
+                            value={line.selectedQty}
+                            onChange={(e) => {
+                              const next = Math.min(line.returnableQty, line.originalQty, Math.max(0, Math.floor(Number(e.target.value || 0))));
+                              setReturnQtyByLine(prev => ({ ...prev, [line.key]: next }));
+                            }}
+                          />
+                        </div>
+                        <div className="text-right font-semibold">₹{formatMoneyPrecise(line.selectedSubtotal)}</div>
+                      </div>
+                    </div>
+                  )})}
+                </div>
+
+                <div className="space-y-2">
+                  {requiresMixedChoice && (
+                    <div className="rounded-md border p-2.5 bg-amber-50/50 space-y-2 text-[13px]">
+                      <div className="font-semibold text-[14px]">Refund Choice Needed</div>
+                      <p className="text-muted-foreground">
+                        After reducing due, ₹{formatMoneyPrecise(refundableAfterDue)} remains refundable. Choose what to do with this amount.
+                      </p>
+                      <div className="grid grid-cols-1 gap-2">
+                        <Button
+                          variant={mixedReturnChoice === 'refund_paid_method' ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => setMixedReturnChoice('refund_paid_method')}
+                        >
+                          Refund to {originalPaidMethodKind === 'online' ? 'Online' : 'Cash'} ₹{formatMoneyPrecise(refundableAfterDue)}
+                        </Button>
+                        <Button
+                          variant={mixedReturnChoice === 'store_credit' ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => setMixedReturnChoice('store_credit')}
+                        >
+                          Save as Store Credit ₹{formatMoneyPrecise(refundableAfterDue)}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="rounded-md border p-2.5 bg-orange-50/40 space-y-1.5 text-[13px]">
+                    <div className="font-semibold text-[14px]">Return Preview Summary</div>
+                    <div className="space-y-1.5">
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Due Before → After</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.dueBefore)} → ₹{formatMoneyPrecise(returnPreview.dueAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit Before → After</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.storeCreditBefore)} → ₹{formatMoneyPrecise(returnPreview.storeCreditAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Due Reduction</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.dueReduction)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Cash Refund</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.cashRefund)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Online Refund</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.onlineRefund)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Store Credit Create</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.storeCreditCreated)}</span></div>
+                    </div>
+                  </div>
+                  <div className="rounded-md border p-2.5 text-[14px] space-y-1.5">
+                    <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.subtotal)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Grand Total</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.total)}</span></div>
+                  </div>
+                </div>
+              </div>
+              {returnSubmitError && <p className="text-destructive font-medium text-[13px]">{returnSubmitError}</p>}
+            </CardContent>
+            <div className="border-t p-3 grid grid-cols-3 gap-2">
+              <Button variant="outline" onClick={() => setIsReturnPopupOpen(false)}>Cancel</Button>
+              <Button variant="outline" onClick={() => setReturnSubmitError(null)}>Generate Return Preview</Button>
+              <Button className="bg-orange-600 hover:bg-orange-700" disabled={returnPreview.total <= 0 || selectedReturnQty <= 0} onClick={createReturnFromSelectedTransaction}>Create Return</Button>
+            </div>
+          </Card>
+        </div>
+      )}
 
       {/* Tax Selection Modal */}
       {isTaxModalOpen && (
