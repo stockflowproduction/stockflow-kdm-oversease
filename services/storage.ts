@@ -17,6 +17,7 @@ import {
   PurchaseParty,
   DeletedTransactionRecord,
   DeleteCompensationRecord,
+  UpdatedTransactionRecord,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
@@ -402,6 +403,12 @@ const getMatchingQuantityForBucket = (transaction: Transaction, productId: strin
     .filter(bucket => bucket.productId === productId && bucket.variant === targetVariant && bucket.color === targetColor)
     .reduce((sum, bucket) => sum + bucket.quantity, 0);
 };
+const getSourceLineCompositeKeyForItem = (item: Pick<CartItem, 'id' | 'selectedVariant' | 'selectedColor' | 'sellPrice'>) => {
+  const variant = normalizeStockBucketVariant(item.selectedVariant);
+  const color = normalizeStockBucketColor(item.selectedColor);
+  const sellPrice = toFiniteNonNegative(item.sellPrice);
+  return `${item.id}__${variant}__${color}__${sellPrice}`;
+};
 const getCustomerReturnCaps = (transaction: Transaction, historicalTransactions: Transaction[]): {
   maxReturnValue: number;
   maxCashRefund: number;
@@ -519,6 +526,7 @@ const getReturnReconciliationAmounts = (
     };
   const validReturnValue = roundCurrency(Math.min(requestedValue, caps.maxReturnValue));
   const mode = getResolvedReturnHandlingMode(transaction);
+  const mixedPaidCreditReturn = caps.maxDueReduction > 0 && (caps.maxCashRefund > 0 || caps.maxOnlineRefund > 0);
 
   if (mode === 'store_credit') {
     return { validReturnValue, cashRefund: 0, onlineRefund: 0, dueReduction: 0, storeCreditIncrease: validReturnValue };
@@ -531,11 +539,24 @@ const getReturnReconciliationAmounts = (
   }
 
   if (mode === 'refund_online') {
+    if (mixedPaidCreditReturn) {
+      const dueReduction = roundCurrency(Math.min(toFiniteNonNegative(dueBefore), caps.maxDueReduction, validReturnValue));
+      const afterDue = roundCurrency(Math.max(0, validReturnValue - dueReduction));
+      const onlineRefund = afterDue;
+      return { validReturnValue, cashRefund: 0, onlineRefund, dueReduction, storeCreditIncrease: 0 };
+    }
     const onlineRefund = roundCurrency(Math.min(validReturnValue, caps.maxOnlineRefund));
     const afterOnline = roundCurrency(Math.max(0, validReturnValue - onlineRefund));
     const dueReduction = roundCurrency(Math.min(toFiniteNonNegative(dueBefore), caps.maxDueReduction, afterOnline));
     const remainder = roundCurrency(Math.max(0, afterOnline - dueReduction));
     return { validReturnValue, cashRefund: 0, onlineRefund, dueReduction, storeCreditIncrease: remainder };
+  }
+
+  if (mixedPaidCreditReturn) {
+    const dueReduction = roundCurrency(Math.min(toFiniteNonNegative(dueBefore), caps.maxDueReduction, validReturnValue));
+    const afterDue = roundCurrency(Math.max(0, validReturnValue - dueReduction));
+    const cashRefund = afterDue;
+    return { validReturnValue, cashRefund, onlineRefund: 0, dueReduction, storeCreditIncrease: 0 };
   }
 
   const cashRefund = roundCurrency(Math.min(validReturnValue, caps.maxCashRefund));
@@ -561,6 +582,46 @@ export const getCanonicalReturnAllocation = (
   return {
     mode,
     ...reconciliation,
+  };
+};
+export const getCanonicalReturnPreviewForDraft = (
+  transaction: Transaction,
+  customers: Customer[],
+  historicalTransactions: Transaction[]
+) => {
+  if (transaction.type !== 'return') {
+    return {
+      mode: 'refund_cash' as ReturnHandlingMode,
+      subtotal: 0,
+      total: 0,
+      dueBefore: 0,
+      dueAfter: 0,
+      storeCreditBefore: 0,
+      storeCreditAfter: 0,
+      dueReduction: 0,
+      cashRefund: 0,
+      onlineRefund: 0,
+      storeCreditCreated: 0,
+    };
+  }
+  const customer = transaction.customerId ? customers.find(c => c.id === transaction.customerId) : null;
+  const dueBefore = toFiniteNonNegative(customer?.totalDue);
+  const storeCreditBefore = toFiniteNonNegative(customer?.storeCredit);
+  const allocation = getCanonicalReturnAllocation(transaction, historicalTransactions, dueBefore);
+  const dueAfter = roundCurrency(Math.max(0, dueBefore - allocation.dueReduction));
+  const storeCreditAfter = roundCurrency(storeCreditBefore + allocation.storeCreditIncrease);
+  return {
+    mode: allocation.mode,
+    subtotal: roundCurrency(Math.abs(toFiniteNumber(transaction.total, 0))),
+    total: roundCurrency(allocation.validReturnValue),
+    dueBefore: roundCurrency(dueBefore),
+    dueAfter,
+    storeCreditBefore: roundCurrency(storeCreditBefore),
+    storeCreditAfter,
+    dueReduction: roundCurrency(allocation.dueReduction),
+    cashRefund: roundCurrency(allocation.cashRefund),
+    onlineRefund: roundCurrency(allocation.onlineRefund),
+    storeCreditCreated: roundCurrency(allocation.storeCreditIncrease),
   };
 };
 const getClampedStoreCreditUsed = (transaction: Transaction, customer: Customer) => {
@@ -656,6 +717,295 @@ const normalizeCustomerBalance = (totalDue: unknown, storeCredit: unknown): { to
   const net = due - credit;
   if (net >= 0) return { totalDue: net, storeCredit: 0 };
   return { totalDue: 0, storeCredit: Math.abs(net) };
+};
+
+const getTransactionAuditEffectSummary = (
+  transaction: Transaction,
+  historicalTransactions: Transaction[],
+  dueBeforeHint: number
+) => {
+  const amount = logMoney(Math.abs(toFiniteNumber(transaction.total, 0)));
+  const cogs = logMoney((transaction.items || []).reduce((sum, item) => sum + ((item.buyPrice || 0) * (item.quantity || 0)), 0));
+  if (transaction.type === 'sale') {
+    const settlement = getSaleSettlementBreakdown(transaction);
+    return {
+      txId: transaction.id,
+      txType: transaction.type,
+      amount,
+      settlement: {
+        cashPaid: logMoney(settlement.cashPaid),
+        onlinePaid: logMoney(settlement.onlinePaid),
+        creditDue: logMoney(settlement.creditDue),
+        storeCreditUsed: logMoney(getRequestedStoreCreditUsed(transaction)),
+      },
+      cogs,
+      grossProfitEffect: logMoney(amount - cogs),
+    };
+  }
+  if (transaction.type === 'payment') {
+    return {
+      txId: transaction.id,
+      txType: transaction.type,
+      amount,
+      paymentMethod: transaction.paymentMethod || 'Cash',
+      cashIn: transaction.paymentMethod === 'Online' ? 0 : amount,
+      onlineIn: transaction.paymentMethod === 'Online' ? amount : 0,
+    };
+  }
+  const allocation = getCanonicalReturnAllocation(transaction, historicalTransactions, dueBeforeHint);
+  return {
+    txId: transaction.id,
+    txType: transaction.type,
+    amount,
+    returnMode: allocation.mode,
+    cashRefund: logMoney(allocation.cashRefund),
+    onlineRefund: logMoney(allocation.onlineRefund),
+    dueReduction: logMoney(allocation.dueReduction),
+    storeCreditCreated: logMoney(allocation.storeCreditIncrease),
+    cogs,
+    grossProfitEffect: logMoney(-amount + cogs),
+  };
+};
+
+type CashbookEffectDeltaSnapshot = {
+  grossSales: number;
+  salesReturn: number;
+  netSales: number;
+  creditDueCreated: number;
+  onlineSale: number;
+  currentDueEffect: number;
+  currentStoreCreditEffect: number;
+  cashIn: number;
+  cashOut: number;
+  onlineIn: number;
+  onlineOut: number;
+  netCashEffect: number;
+  cogsEffect: number;
+  grossProfitEffect: number;
+  expense: number;
+  netProfitEffect: number;
+};
+
+const getZeroCashbookEffectDeltaSnapshot = (): CashbookEffectDeltaSnapshot => ({
+  grossSales: 0,
+  salesReturn: 0,
+  netSales: 0,
+  creditDueCreated: 0,
+  onlineSale: 0,
+  currentDueEffect: 0,
+  currentStoreCreditEffect: 0,
+  cashIn: 0,
+  cashOut: 0,
+  onlineIn: 0,
+  onlineOut: 0,
+  netCashEffect: 0,
+  cogsEffect: 0,
+  grossProfitEffect: 0,
+  expense: 0,
+  netProfitEffect: 0,
+});
+
+const getTransactionCashbookEffectSnapshot = (
+  transaction: Transaction,
+  historicalTransactions: Transaction[],
+  dueBeforeHint: number
+): CashbookEffectDeltaSnapshot => {
+  const amount = roundCurrency(Math.abs(toFiniteNumber(transaction.total, 0)));
+  const cogsAmount = roundCurrency((transaction.items || []).reduce((sum, item) => sum + ((item.buyPrice || 0) * (item.quantity || 0)), 0));
+  if (transaction.type === 'sale') {
+    const settlement = getSaleSettlementBreakdown(transaction);
+    const storeCreditUsed = roundCurrency(getRequestedStoreCreditUsed(transaction));
+    return {
+      grossSales: amount,
+      salesReturn: 0,
+      netSales: amount,
+      creditDueCreated: roundCurrency(settlement.creditDue),
+      onlineSale: roundCurrency(settlement.onlinePaid),
+      currentDueEffect: roundCurrency(settlement.creditDue),
+      currentStoreCreditEffect: roundCurrency(-storeCreditUsed),
+      cashIn: roundCurrency(settlement.cashPaid),
+      cashOut: 0,
+      onlineIn: roundCurrency(settlement.onlinePaid),
+      onlineOut: 0,
+      netCashEffect: roundCurrency(settlement.cashPaid),
+      cogsEffect: cogsAmount,
+      grossProfitEffect: roundCurrency(amount - cogsAmount),
+      expense: 0,
+      netProfitEffect: roundCurrency(amount - cogsAmount),
+    };
+  }
+  if (transaction.type === 'payment') {
+    const paymentToDue = roundCurrency(Math.min(toFiniteNonNegative(dueBeforeHint), amount));
+    const storeCreditIncrease = roundCurrency(Math.max(0, amount - paymentToDue));
+    const cashIn = transaction.paymentMethod === 'Online' ? 0 : amount;
+    const onlineIn = transaction.paymentMethod === 'Online' ? amount : 0;
+    return {
+      ...getZeroCashbookEffectDeltaSnapshot(),
+      currentDueEffect: roundCurrency(-paymentToDue),
+      currentStoreCreditEffect: storeCreditIncrease,
+      cashIn: roundCurrency(cashIn),
+      onlineIn: roundCurrency(onlineIn),
+      netCashEffect: roundCurrency(cashIn),
+    };
+  }
+  const allocation = getCanonicalReturnAllocation(transaction, historicalTransactions, dueBeforeHint);
+  return {
+    grossSales: 0,
+    salesReturn: amount,
+    netSales: roundCurrency(-amount),
+    creditDueCreated: 0,
+    onlineSale: 0,
+    currentDueEffect: roundCurrency(-allocation.dueReduction),
+    currentStoreCreditEffect: roundCurrency(allocation.storeCreditIncrease),
+    cashIn: 0,
+    cashOut: roundCurrency(allocation.cashRefund),
+    onlineIn: 0,
+    onlineOut: roundCurrency(allocation.onlineRefund),
+    netCashEffect: roundCurrency(-allocation.cashRefund),
+    cogsEffect: roundCurrency(-cogsAmount),
+    grossProfitEffect: roundCurrency(-amount + cogsAmount),
+    expense: 0,
+    netProfitEffect: roundCurrency(-amount + cogsAmount),
+  };
+};
+
+const getCashbookEffectDelta = (
+  updated: CashbookEffectDeltaSnapshot,
+  original: CashbookEffectDeltaSnapshot
+): CashbookEffectDeltaSnapshot => ({
+  grossSales: roundCurrency(updated.grossSales - original.grossSales),
+  salesReturn: roundCurrency(updated.salesReturn - original.salesReturn),
+  netSales: roundCurrency(updated.netSales - original.netSales),
+  creditDueCreated: roundCurrency(updated.creditDueCreated - original.creditDueCreated),
+  onlineSale: roundCurrency(updated.onlineSale - original.onlineSale),
+  currentDueEffect: roundCurrency(updated.currentDueEffect - original.currentDueEffect),
+  currentStoreCreditEffect: roundCurrency(updated.currentStoreCreditEffect - original.currentStoreCreditEffect),
+  cashIn: roundCurrency(updated.cashIn - original.cashIn),
+  cashOut: roundCurrency(updated.cashOut - original.cashOut),
+  onlineIn: roundCurrency(updated.onlineIn - original.onlineIn),
+  onlineOut: roundCurrency(updated.onlineOut - original.onlineOut),
+  netCashEffect: roundCurrency(updated.netCashEffect - original.netCashEffect),
+  cogsEffect: roundCurrency(updated.cogsEffect - original.cogsEffect),
+  grossProfitEffect: roundCurrency(updated.grossProfitEffect - original.grossProfitEffect),
+  expense: 0,
+  netProfitEffect: roundCurrency(updated.netProfitEffect - original.netProfitEffect),
+});
+
+const areItemsEqualForAudit = (originalItems: CartItem[] = [], updatedItems: CartItem[] = []) => {
+  if (originalItems.length !== updatedItems.length) return false;
+  return originalItems.every((item, idx) => {
+    const other = updatedItems[idx];
+    if (!other) return false;
+    return (
+      item.id === other.id
+      && normalizeStockBucketVariant(item.selectedVariant) === normalizeStockBucketVariant(other.selectedVariant)
+      && normalizeStockBucketColor(item.selectedColor) === normalizeStockBucketColor(other.selectedColor)
+      && roundCurrency(toFiniteNonNegative(item.quantity)) === roundCurrency(toFiniteNonNegative(other.quantity))
+      && roundCurrency(toFiniteNonNegative(item.sellPrice)) === roundCurrency(toFiniteNonNegative(other.sellPrice))
+    );
+  });
+};
+
+const getTransactionChangeAuditMeta = (originalTransaction: Transaction, updatedTransaction: Transaction): { changeTags: string[]; changeSummary: string } => {
+  const changeTags: string[] = [];
+  if (!areItemsEqualForAudit(originalTransaction.items || [], updatedTransaction.items || [])) {
+    const qtyChanged = (originalTransaction.items || []).some((item, idx) => roundCurrency(toFiniteNonNegative(item.quantity)) !== roundCurrency(toFiniteNonNegative(updatedTransaction.items?.[idx]?.quantity)));
+    const priceChanged = (originalTransaction.items || []).some((item, idx) => roundCurrency(toFiniteNonNegative(item.sellPrice)) !== roundCurrency(toFiniteNonNegative(updatedTransaction.items?.[idx]?.sellPrice)));
+    if (qtyChanged) changeTags.push('qty_changed');
+    if (priceChanged) changeTags.push('price_changed');
+    if (!qtyChanged && !priceChanged) changeTags.push('lines_changed');
+  }
+  if (JSON.stringify(getSaleSettlementBreakdown(originalTransaction)) !== JSON.stringify(getSaleSettlementBreakdown(updatedTransaction))) {
+    changeTags.push('settlement_changed');
+  }
+  if ((originalTransaction.customerId || '') !== (updatedTransaction.customerId || '')) changeTags.push('customer_changed');
+  if ((originalTransaction.paymentMethod || '') !== (updatedTransaction.paymentMethod || '')) changeTags.push('payment_method_changed');
+  if (roundCurrency(Math.abs(toFiniteNumber(originalTransaction.total, 0))) !== roundCurrency(Math.abs(toFiniteNumber(updatedTransaction.total, 0)))) changeTags.push('amount_changed');
+  if ((originalTransaction.date || '') !== (updatedTransaction.date || '')) changeTags.push('date_changed');
+  if ((originalTransaction.notes || '').trim() !== (updatedTransaction.notes || '').trim()) changeTags.push('notes_changed');
+  if ((originalTransaction.returnHandlingMode || '') !== (updatedTransaction.returnHandlingMode || '')) changeTags.push('return_mode_changed');
+  const uniqueTags = Array.from(new Set(changeTags));
+  const labelMap: Record<string, string> = {
+    qty_changed: 'qty',
+    price_changed: 'price',
+    lines_changed: 'lines',
+    settlement_changed: 'settlement',
+    customer_changed: 'customer',
+    payment_method_changed: 'payment method',
+    amount_changed: 'amount',
+    date_changed: 'date',
+    notes_changed: 'notes',
+    return_mode_changed: 'return mode',
+  };
+  const summarySuffix = uniqueTags.length ? uniqueTags.map(tag => labelMap[tag] || tag).join(', ') : 'no field changes';
+  return {
+    changeTags: uniqueTags,
+    changeSummary: `Updated ${updatedTransaction.type} correction — ${summarySuffix}`,
+  };
+};
+
+const buildUpdatedTransactionRecord = ({
+  originalTransaction,
+  updatedTransaction,
+  originalEffectSummary,
+  updatedEffectSummary,
+  cashbookDelta,
+  changeSummary,
+  changeTags,
+}: {
+  originalTransaction: Transaction;
+  updatedTransaction: Transaction;
+  originalEffectSummary: unknown;
+  updatedEffectSummary: unknown;
+  cashbookDelta: CashbookEffectDeltaSnapshot;
+  changeSummary: string;
+  changeTags: string[];
+}): UpdatedTransactionRecord => ({
+  id: `update_evt_${updatedTransaction.id}_${Date.now()}`,
+  updatedAt: new Date().toISOString(),
+  originalTransactionId: originalTransaction.id,
+  updatedTransactionId: updatedTransaction.id,
+  originalTransaction,
+  updatedTransaction,
+  customerId: updatedTransaction.customerId || originalTransaction.customerId,
+  customerName: updatedTransaction.customerName || originalTransaction.customerName,
+  effectSummaryBefore: JSON.stringify(originalEffectSummary),
+  effectSummaryAfter: JSON.stringify(updatedEffectSummary),
+  changeSummary,
+  changeTags,
+  cashbookDelta,
+});
+
+export const getTransactionUpdateAuditPreview = (
+  originalTransaction: Transaction,
+  updatedTransaction: Transaction,
+  state: Pick<AppState, 'transactions' | 'customers' | 'products'>
+) => {
+  const stateWithoutOriginal = reconcileStateAfterDeleteTransaction(
+    { ...initialData, ...state },
+    originalTransaction
+  );
+  const originalHistorical = state.transactions
+    .filter(tx => tx.id !== originalTransaction.id)
+    .sort((a, b) => getTransactionTimeHint(a) - getTransactionTimeHint(b));
+  const updatedHistorical = stateWithoutOriginal.transactions
+    .filter(tx => tx.id !== updatedTransaction.id)
+    .sort((a, b) => getTransactionTimeHint(a) - getTransactionTimeHint(b));
+  const originalDueHint = toFiniteNonNegative(state.customers.find(c => c.id === originalTransaction.customerId)?.totalDue);
+  const updatedDueHint = toFiniteNonNegative(stateWithoutOriginal.customers.find(c => c.id === updatedTransaction.customerId)?.totalDue);
+  const originalEffectSummary = getTransactionAuditEffectSummary(originalTransaction, originalHistorical, originalDueHint);
+  const updatedEffectSummary = getTransactionAuditEffectSummary(updatedTransaction, updatedHistorical, updatedDueHint);
+  const originalCashbookEffect = getTransactionCashbookEffectSnapshot(originalTransaction, originalHistorical, originalDueHint);
+  const updatedCashbookEffect = getTransactionCashbookEffectSnapshot(updatedTransaction, updatedHistorical, updatedDueHint);
+  const cashbookDelta = getCashbookEffectDelta(updatedCashbookEffect, originalCashbookEffect);
+  const { changeSummary, changeTags } = getTransactionChangeAuditMeta(originalTransaction, updatedTransaction);
+  return {
+    cashbookDelta,
+    originalEffectSummary,
+    updatedEffectSummary,
+    changeSummary,
+    changeTags,
+  };
 };
 
 const reconcileCustomerAfterDelete = (customer: Customer, transaction: Transaction, activeTransactions: Transaction[]): Customer => {
@@ -1216,6 +1566,7 @@ const initialData: AppState = {
   transactions: [],
   deletedTransactions: [],
   deleteCompensations: [],
+  updatedTransactionEvents: [],
   categories: [],
   customers: [],
   profile: defaultProfile,
@@ -1278,35 +1629,35 @@ const buildKpiSnapshotPayload = (state: AppState, windowType: 'init' | 'after_tx
   const returnTransactions = state.transactions.filter(tx => tx.type === 'return');
   const saleSettlementTotals = saleTransactions.reduce((acc, tx) => {
     const settlement = getSaleSettlementBreakdown(tx);
-    acc.cashPaid += settlement.cashPaid;
-    acc.onlinePaid += settlement.onlinePaid;
-    acc.creditDue += settlement.creditDue;
-    acc.totalSales += Math.abs(tx.total);
+    acc.cashPaid = roundCurrency(acc.cashPaid + settlement.cashPaid);
+    acc.onlinePaid = roundCurrency(acc.onlinePaid + settlement.onlinePaid);
+    acc.creditDue = roundCurrency(acc.creditDue + settlement.creditDue);
+    acc.totalSales = roundCurrency(acc.totalSales + Math.abs(tx.total));
     return acc;
   }, { cashPaid: 0, onlinePaid: 0, creditDue: 0, totalSales: 0 });
   const cashCollections = paymentTransactions
     .filter(tx => tx.paymentMethod === 'Cash')
-    .reduce((sum, tx) => sum + Math.abs(tx.total), 0);
+    .reduce((sum, tx) => roundCurrency(sum + Math.abs(tx.total)), 0);
   const cashRefunds = returnTransactions.reduce((sum, tx, index, arr) => {
     const historical = arr.slice(index + 1).concat(paymentTransactions, saleTransactions);
-    return sum + getReturnCashRefundAmount(tx, historical);
+    return roundCurrency(sum + getReturnCashRefundAmount(tx, historical));
   }, 0);
   const onlineCollections = paymentTransactions
     .filter(tx => tx.paymentMethod === 'Online')
-    .reduce((sum, tx) => sum + Math.abs(tx.total), 0);
-  const returns = returnTransactions.reduce((sum, tx) => sum + Math.abs(tx.total), 0);
-  const expenses = (state.expenses || []).reduce((sum, expense) => sum + (expense.amount || 0), 0);
-  const saleCogs = saleTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
-  const returnCogs = returnTransactions.reduce((sum, tx) => sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
-  const cogs = saleCogs - returnCogs;
-  const grossSales = saleSettlementTotals.totalSales;
-  const salesReturns = returns;
-  const netSales = grossSales - salesReturns;
-  const grossProfit = netSales - cogs;
-  const netProfit = grossProfit - expenses;
-  const currentDueTotal = state.customers.reduce((sum, customer) => sum + toFiniteNonNegative(customer.totalDue), 0);
-  const currentStoreCreditTotal = state.customers.reduce((sum, customer) => sum + toFiniteNonNegative(customer.storeCredit), 0);
-  const sessionCashTotal = saleSettlementTotals.cashPaid + cashCollections - cashRefunds - expenses;
+    .reduce((sum, tx) => roundCurrency(sum + Math.abs(tx.total)), 0);
+  const returns = returnTransactions.reduce((sum, tx) => roundCurrency(sum + Math.abs(tx.total)), 0);
+  const expenses = (state.expenses || []).reduce((sum, expense) => roundCurrency(sum + (expense.amount || 0)), 0);
+  const saleCogs = saleTransactions.reduce((sum, tx) => roundCurrency(sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0)), 0);
+  const returnCogs = returnTransactions.reduce((sum, tx) => roundCurrency(sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0)), 0);
+  const cogs = roundCurrency(saleCogs - returnCogs);
+  const grossSales = roundCurrency(saleSettlementTotals.totalSales);
+  const salesReturns = roundCurrency(returns);
+  const netSales = roundCurrency(grossSales - salesReturns);
+  const grossProfit = roundCurrency(netSales - cogs);
+  const netProfit = roundCurrency(grossProfit - expenses);
+  const currentDueTotal = state.customers.reduce((sum, customer) => roundCurrency(sum + toFiniteNonNegative(customer.totalDue)), 0);
+  const currentStoreCreditTotal = state.customers.reduce((sum, customer) => roundCurrency(sum + toFiniteNonNegative(customer.storeCredit)), 0);
+  const sessionCashTotal = roundCurrency(saleSettlementTotals.cashPaid + cashCollections - cashRefunds - expenses);
   const profitBeforeClose = netProfit;
 
   return {
@@ -1519,6 +1870,7 @@ const syncFromCloud = async () => {
                     products: hydratedProducts,
                     transactions: hydratedTransactions,
                     deletedTransactions: subcollectionDeletedTransactions,
+                    updatedTransactionEvents: cloudData.updatedTransactionEvents || [],
                     categories: cloudData.categories || [],
                     customers: hydratedCustomers,
                     upfrontOrders: cloudData.upfrontOrders || [],
@@ -2600,6 +2952,57 @@ const assertTransactionFinancials = (transaction: Transaction) => {
 
 const assertTransactionInventoryRules = (transaction: Transaction, products: Product[], historicalTransactions: Transaction[]) => {
   if (transaction.type === 'payment') return;
+  if (transaction.type === 'return') {
+    const linkedSourceGroups = (transaction.items || []).reduce((acc, item) => {
+      if (!item.sourceTransactionId || !item.sourceLineCompositeKey) return acc;
+      const key = `${item.sourceTransactionId}::${item.sourceLineCompositeKey}`;
+      acc.set(key, {
+        sourceTransactionId: item.sourceTransactionId,
+        sourceLineCompositeKey: item.sourceLineCompositeKey,
+        requestedQty: (acc.get(key)?.requestedQty || 0) + Math.max(0, Number(item.quantity) || 0),
+      });
+      return acc;
+    }, new Map<string, { sourceTransactionId: string; sourceLineCompositeKey: string; requestedQty: number }>());
+
+    linkedSourceGroups.forEach((group) => {
+      const sourceSaleTx = historicalTransactions.find(t => t.id === group.sourceTransactionId && t.type === 'sale');
+      if (!sourceSaleTx) {
+        failValidation('RETURN_SOURCE_TRANSACTION_NOT_FOUND', 'Selected source sale transaction for return line was not found.', {
+          sourceTransactionId: group.sourceTransactionId,
+          sourceLineCompositeKey: group.sourceLineCompositeKey,
+        });
+      }
+
+      const originalSourceLineQty = (sourceSaleTx.items || [])
+        .filter(item => getSourceLineCompositeKeyForItem(item) === group.sourceLineCompositeKey)
+        .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+
+      if (originalSourceLineQty <= 0) {
+        failValidation('RETURN_SOURCE_LINE_NOT_FOUND', 'Selected source sale line for return was not found.', {
+          sourceTransactionId: group.sourceTransactionId,
+          sourceLineCompositeKey: group.sourceLineCompositeKey,
+        });
+      }
+
+      const alreadyReturnedQtyForSourceLine = historicalTransactions
+        .filter(t => t.type === 'return')
+        .reduce((sum, tx) => sum + (tx.items || [])
+          .filter(item => item.sourceTransactionId === group.sourceTransactionId && item.sourceLineCompositeKey === group.sourceLineCompositeKey)
+          .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
+
+      const remainingQtyForSourceLine = Math.max(0, originalSourceLineQty - alreadyReturnedQtyForSourceLine);
+      if (group.requestedQty > (remainingQtyForSourceLine + MONEY_EPSILON)) {
+        failValidation('RETURN_EXCEEDS_SOURCE_LINE_REMAINING', 'Return quantity exceeds remaining returnable quantity for the selected bill line.', {
+          sourceTransactionId: group.sourceTransactionId,
+          sourceLineCompositeKey: group.sourceLineCompositeKey,
+          requestedQty: group.requestedQty,
+          originalSourceLineQty,
+          alreadyReturnedQtyForSourceLine,
+          remainingQtyForSourceLine,
+        });
+      }
+    });
+  }
   if (transaction.type === 'return' && transaction.customerId) {
     const caps = getCustomerReturnCaps(transaction, historicalTransactions);
     const requestedValue = Math.abs(toFiniteNumber(transaction.total, 0));
@@ -3484,6 +3887,18 @@ export const processTransaction = (transaction: Transaction): AppState => {
             storeCreditImpact: logMoney(reconciliation.storeCreditIncrease),
             scenarioClass: `return_${returnEffects.mode}`,
           });
+          console.info('[FIN][RETURN][CHOICE_ENFORCEMENT]', {
+            txId: effectiveTransaction.id,
+            sourceTransactionId: effectiveTransaction.sourceTransactionId || null,
+            operatorChoice: returnEffects.mode,
+            dueReduction: logMoney(reconciliation.dueReduction),
+            refundableRemainder: logMoney(Math.max(0, reconciliation.validReturnValue - reconciliation.dueReduction)),
+            finalReturnHandlingMode: returnEffects.mode,
+            finalPaymentMethod: effectiveTransaction.paymentMethod || null,
+            cashRefund: logMoney(reconciliation.cashRefund),
+            onlineRefund: logMoney(reconciliation.onlineRefund),
+            storeCreditCreated: logMoney(reconciliation.storeCreditIncrease),
+          });
           if (returnEffects.affectsCash) {
             financeLog.cash('OUTFLOW', { txId: effectiveTransaction.id, amount: cashRefundAmount, reason: 'cash return refunded', paymentMode: 'Cash', source: 'return_refund' });
           }
@@ -3826,6 +4241,33 @@ export const deleteTransaction = (
     deleteCompensationMode: compensationAmount > 0 ? compensationMode : undefined,
     deleteCompensationAmount: compensationAmount > 0 ? compensationAmount : undefined,
   });
+  const deleteHistoricalTransactions = data.transactions
+    .filter(tx => tx.id !== target.id)
+    .sort((a, b) => getTransactionTimeHint(a) - getTransactionTimeHint(b));
+  const deleteAuditEffectSummary = getTransactionAuditEffectSummary(
+    target,
+    deleteHistoricalTransactions,
+    toFiniteNonNegative(customerBefore?.totalDue)
+  );
+  const inventoryLinesAffected = target.type === 'payment'
+    ? 0
+    : aggregateCartItemsByStockBucket(target.items || []).length;
+  console.info('[FIN][AUDIT][DELETE_RECONCILE]', {
+    actionType: 'delete_reconcile',
+    txId: target.id,
+    txType: target.type,
+    reason: options?.reason || null,
+    reasonNote: options?.reasonNote || null,
+    compensationMode: compensationAmount > 0 ? compensationMode : null,
+    compensationAmount: compensationAmount > 0 ? logMoney(compensationAmount) : 0,
+    customerId: target.customerId || null,
+    oldEffectSummary: deleteAuditEffectSummary,
+    resultingDue: logMoney(deletedRecord.afterImpact.customerDue),
+    resultingStoreCredit: logMoney(deletedRecord.afterImpact.customerStoreCredit),
+    resultingNet: logMoney(deletedRecord.afterImpact.customerDue - deletedRecord.afterImpact.customerStoreCredit),
+    inventoryLinesAffected,
+    cashbookCompensationRecorded: Boolean(compensationAmount > 0 && compensationMode === 'cash_refund'),
+  });
   if (FINANCE_RECON_TRACE_ENABLED) {
     console.info('[FIN][RECONCILE][DELETE]', {
       txId: transactionId,
@@ -3956,12 +4398,74 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
     };
   });
 
+  const updateAffectedProductCount = Array.from(new Set([
+    ...(originalTransaction.type !== 'payment' ? originalTransaction.items.map(item => item.id) : []),
+    ...(effectiveUpdatedTransaction.type !== 'payment' ? effectiveUpdatedTransaction.items.map(item => item.id) : []),
+  ])).length;
+  const updateAffectedCustomerIds = new Set<string>();
+  if (originalTransaction.customerId) updateAffectedCustomerIds.add(originalTransaction.customerId);
+  if (effectiveUpdatedTransaction.customerId) updateAffectedCustomerIds.add(effectiveUpdatedTransaction.customerId);
+  const updateDueBefore = Array.from(updateAffectedCustomerIds).reduce((sum, customerId) => {
+    const customer = data.customers.find(c => c.id === customerId);
+    return sum + toFiniteNonNegative(customer?.totalDue);
+  }, 0);
+  const updateStoreCreditBefore = Array.from(updateAffectedCustomerIds).reduce((sum, customerId) => {
+    const customer = data.customers.find(c => c.id === customerId);
+    return sum + toFiniteNonNegative(customer?.storeCredit);
+  }, 0);
+  const updateDueAfter = Array.from(updateAffectedCustomerIds).reduce((sum, customerId) => {
+    const customer = nextCustomers.find(c => c.id === customerId);
+    return sum + toFiniteNonNegative(customer?.totalDue);
+  }, 0);
+  const updateStoreCreditAfter = Array.from(updateAffectedCustomerIds).reduce((sum, customerId) => {
+    const customer = nextCustomers.find(c => c.id === customerId);
+    return sum + toFiniteNonNegative(customer?.storeCredit);
+  }, 0);
+  const auditPreview = getTransactionUpdateAuditPreview(originalTransaction, effectiveUpdatedTransaction, {
+    transactions: data.transactions,
+    customers: data.customers,
+    products: data.products,
+  });
+  const newEffectSummary = auditPreview.updatedEffectSummary;
+  const cashbookDelta = auditPreview.cashbookDelta;
+  const updatedEventRecord = buildUpdatedTransactionRecord({
+    originalTransaction,
+    updatedTransaction: effectiveUpdatedTransaction,
+    originalEffectSummary: auditPreview.originalEffectSummary,
+    updatedEffectSummary: newEffectSummary,
+    cashbookDelta,
+    changeSummary: auditPreview.changeSummary,
+    changeTags: auditPreview.changeTags,
+  });
+  const updatedTransactionEvents = [updatedEventRecord, ...(data.updatedTransactionEvents || [])]
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   const reconciledState: AppState = {
     ...stateWithoutOriginal,
     transactions: nextTransactions,
     products: nextProducts,
     customers: nextCustomers,
+    updatedTransactionEvents,
   };
+  console.info('[FIN][AUDIT][UPDATE_RECONCILE]', {
+    actionType: 'update_reconcile',
+    originalTxId: originalTransaction.id,
+    updatedTxId: effectiveUpdatedTransaction.id,
+    originalType: originalTransaction.type,
+    updatedType: effectiveUpdatedTransaction.type,
+    customerId: effectiveUpdatedTransaction.customerId || originalTransaction.customerId || null,
+    settlementChanged: JSON.stringify(originalTransaction.saleSettlement || null) !== JSON.stringify(effectiveUpdatedTransaction.saleSettlement || null),
+    customerChanged: originalTransaction.customerId !== effectiveUpdatedTransaction.customerId,
+    oldEffectSummary: auditPreview.originalEffectSummary,
+    newEffectSummary,
+    deltaSummary: {
+      dueDelta: logMoney(updateDueAfter - updateDueBefore),
+      storeCreditDelta: logMoney(updateStoreCreditAfter - updateStoreCreditBefore),
+      netDelta: logMoney((updateDueAfter - updateStoreCreditAfter) - (updateDueBefore - updateStoreCreditBefore)),
+    },
+    resultingDue: logMoney(updateDueAfter),
+    resultingStoreCredit: logMoney(updateStoreCreditAfter),
+    inventoryLinesAffected: updateAffectedProductCount,
+  });
 
   if (!db) {
     await saveData(reconciledState, { throwOnError: true, reason: 'updateTransaction_local_reconcile', auditOperation: 'UPDATE' });
@@ -4043,6 +4547,7 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
     transactions: reconciledState.transactions,
     products: reconciledState.products,
     customers: reconciledState.customers,
+    updatedTransactionEvents: reconciledState.updatedTransactionEvents || [],
   };
   emitLocalStorageUpdate();
 
@@ -4074,6 +4579,9 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
       dueAfter: logMoney(dueAfter),
       storeCreditBefore: logMoney(storeCreditBefore),
       storeCreditAfter: logMoney(storeCreditAfter),
+      oldEffectSummary: auditPreview.originalEffectSummary,
+      newEffectSummary,
+      inventoryLinesAffected: affectedProductIds.size,
     });
   }
   affectedCustomerIds.forEach((customerId) => {

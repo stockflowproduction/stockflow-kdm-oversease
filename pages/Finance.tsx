@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
+import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
-import { AppState, CashSession, Customer, DeleteCompensationRecord, ExpenseActivity, Transaction } from '../types';
+import { AppState, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, Transaction, UpdatedTransactionRecord } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
@@ -17,8 +18,61 @@ type Expense = {
   createdAt: string;
 };
 
-type FinanceTabKey = 'dashboard' | 'cash' | 'expense' | 'credit' | 'profit';
+type FinanceTabKey = 'dashboard' | 'cashbook' | 'cash' | 'expense' | 'credit' | 'profit';
 type ExpenseDatePreset = 'today' | '7d' | '15d' | 'month' | 'custom';
+
+type CashbookRow = {
+  id: string;
+  date: string;
+  billNo: string;
+  type: 'sale' | 'payment' | 'return' | 'expense' | 'delete_reversal' | 'delete_compensation' | 'update_correction';
+  eventType?: 'transaction' | 'delete_reversal' | 'delete_compensation' | 'update_correction';
+  isSynthetic?: boolean;
+  sourceTxId?: string;
+  customer: string;
+  notes: string;
+  grossSales: number;
+  salesReturn: number;
+  netSales: number;
+  creditDueCreated: number;
+  onlineSale: number;
+  currentDueEffect: number;
+  currentStoreCreditEffect: number;
+  cashIn: number;
+  cashOut: number;
+  onlineIn: number;
+  onlineOut: number;
+  netCashEffect: number;
+  cogsEffect: number;
+  grossProfitEffect: number;
+  expense: number;
+  netProfitEffect: number;
+  effectSummary: string;
+  auditFlags?: string[];
+  riskLevel?: 'low' | 'medium' | 'high';
+  layerType?: 'operational' | 'adjustment';
+  isCorrectionImpact?: boolean;
+  isRealActivity?: boolean;
+};
+const normalizeCashbookRowMoney = (row: CashbookRow): CashbookRow => ({
+  ...row,
+  grossSales: roundMoney(row.grossSales),
+  salesReturn: roundMoney(row.salesReturn),
+  netSales: roundMoney(row.netSales),
+  creditDueCreated: roundMoney(row.creditDueCreated),
+  onlineSale: roundMoney(row.onlineSale),
+  currentDueEffect: roundMoney(row.currentDueEffect),
+  currentStoreCreditEffect: roundMoney(row.currentStoreCreditEffect),
+  cashIn: roundMoney(row.cashIn),
+  cashOut: roundMoney(row.cashOut),
+  onlineIn: roundMoney(row.onlineIn),
+  onlineOut: roundMoney(row.onlineOut),
+  netCashEffect: roundMoney(row.netCashEffect),
+  cogsEffect: roundMoney(row.cogsEffect),
+  grossProfitEffect: roundMoney(row.grossProfitEffect),
+  expense: roundMoney(row.expense),
+  netProfitEffect: roundMoney(row.netProfitEffect),
+});
 
 const dateKeyFromDate = (date: Date) => {
   const yyyy = date.getFullYear();
@@ -41,6 +95,41 @@ const monthKeyOf = (iso: string) => {
 
 const formatINR = (value: number) => formatINRPrecise(value);
 const formatINRSummary = (value: number) => formatINRWhole(value);
+const toFiniteMoney = (value: unknown) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+};
+const roundMoney = (value: unknown) => Math.round((toFiniteMoney(value) + Number.EPSILON) * 100) / 100;
+const isCorrectionRowType = (type: CashbookRow['type']) => type === 'delete_reversal' || type === 'delete_compensation' || type === 'update_correction';
+const getCashbookAuditSignals = (
+  row: CashbookRow,
+  context: { avgReturnValue: number; avgBalanceMovement: number }
+): { flags: string[]; riskLevel: 'low' | 'medium' | 'high' } => {
+  const flags: string[] = [];
+  const absBalanceMovement = Math.abs(row.currentDueEffect) + Math.abs(row.currentStoreCreditEffect);
+  const returnTouchCount = [row.cashOut > 0.01, row.onlineOut > 0.01, Math.abs(row.currentDueEffect) > 0.01, row.currentStoreCreditEffect > 0.01].filter(Boolean).length;
+  const touchesRevenue = Math.abs(row.grossSales) > 0.01 || Math.abs(row.salesReturn) > 0.01 || Math.abs(row.netSales) > 0.01;
+  const touchesBalance = absBalanceMovement > 0.01;
+  const touchesCashbook = Math.abs(row.cashIn) > 0.01 || Math.abs(row.cashOut) > 0.01 || Math.abs(row.onlineIn) > 0.01 || Math.abs(row.onlineOut) > 0.01;
+  const touchesPnL = Math.abs(row.grossProfitEffect) > 0.01 || Math.abs(row.netProfitEffect) > 0.01 || Math.abs(row.cogsEffect) > 0.01;
+  const mechanismCount = [touchesRevenue, touchesBalance, touchesCashbook, touchesPnL].filter(Boolean).length;
+
+  if (isCorrectionRowType(row.type)) flags.push('Manual correction event');
+  if (row.type === 'return' && row.salesReturn >= Math.max(1000, context.avgReturnValue * 1.5)) flags.push('High return value');
+  if (row.type === 'return' && returnTouchCount >= 3) flags.push('Complex return allocation');
+  if (row.type === 'return' && row.currentStoreCreditEffect > 0.01) flags.push('Store credit created');
+  if (row.type === 'return' && row.cashOut > 0.01 && Math.abs(row.currentDueEffect) > 0.01) flags.push('Mixed refund and due adjustment');
+  if ((row.type === 'sale' && row.grossProfitEffect <= 0) || (row.type !== 'return' && row.grossProfitEffect < -1000)) flags.push('Check profit impact');
+  if (absBalanceMovement >= Math.max(2000, context.avgBalanceMovement * 2)) flags.push('Large balance movement');
+  if (mechanismCount >= 3) flags.push('Multi-effect transaction');
+
+  const highPriorityFlags = ['Manual correction event', 'Mixed refund and due adjustment', 'Large balance movement', 'High return value'];
+  const hasHighPriority = flags.some(flag => highPriorityFlags.includes(flag));
+  if (flags.length === 0) return { flags, riskLevel: 'low' };
+  if (hasHighPriority && flags.length >= 2) return { flags, riskLevel: 'high' };
+  if (flags.length >= 3) return { flags, riskLevel: 'high' };
+  return { flags, riskLevel: 'medium' };
+};
 
 const FINANCE_DIAGNOSTIC_DEBUG_ENABLED = String((import.meta as any).env?.VITE_FINANCE_DIAGNOSTIC_DEBUG || '').toLowerCase() === 'true';
 const financeShiftDiag = (tag: string, payload: Record<string, unknown>) => {
@@ -147,10 +236,10 @@ const getSaleSettlementContribution = (transaction: Transaction) => {
 
 const aggregateSaleSettlementContributions = (sales: Transaction[]) => sales.reduce((acc, tx) => {
   const contribution = getSaleSettlementContribution(tx);
-  acc.cashPaid += contribution.cashPaid;
-  acc.onlinePaid += contribution.onlinePaid;
-  acc.creditDue += contribution.creditDue;
-  acc.totalSales += contribution.totalSales;
+  acc.cashPaid = roundMoney(acc.cashPaid + contribution.cashPaid);
+  acc.onlinePaid = roundMoney(acc.onlinePaid + contribution.onlinePaid);
+  acc.creditDue = roundMoney(acc.creditDue + contribution.creditDue);
+  acc.totalSales = roundMoney(acc.totalSales + contribution.totalSales);
   return acc;
 }, { cashPaid: 0, onlinePaid: 0, creditDue: 0, totalSales: 0 });
 
@@ -179,10 +268,10 @@ const accumulateCanonicalReturnEffects = (transactionsAsc: Transaction[], scoped
     runningStoreCredit = Math.max(0, runningStoreCredit + allocation.storeCreditIncrease);
 
     if (scopedReturnIds.has(tx.id)) {
-      acc.cashRefunds += allocation.cashRefund;
-      acc.onlineRefunds += allocation.onlineRefund;
-      acc.dueReductionFromReturns += allocation.dueReduction;
-      acc.storeCreditCreatedFromReturns += allocation.storeCreditIncrease;
+      acc.cashRefunds = roundMoney(acc.cashRefunds + allocation.cashRefund);
+      acc.onlineRefunds = roundMoney(acc.onlineRefunds + allocation.onlineRefund);
+      acc.dueReductionFromReturns = roundMoney(acc.dueReductionFromReturns + allocation.dueReduction);
+      acc.storeCreditCreatedFromReturns = roundMoney(acc.storeCreditCreatedFromReturns + allocation.storeCreditIncrease);
     }
     return acc;
   }, {
@@ -209,24 +298,25 @@ const buildCanonicalFinanceBreakdown = (
   const sortedTransactionsAsc = [...transactions]
     .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
   const saleSettlementTotals = aggregateSaleSettlementContributions(sales);
-  const saleCashReceipts = saleSettlementTotals.cashPaid;
+  const saleCashReceipts = roundMoney(saleSettlementTotals.cashPaid);
   const cashCollections = scopedTransactions
     .filter(t => t.type === 'payment' && t.paymentMethod === 'Cash')
-    .reduce((s, t) => s + Math.abs(t.total), 0);
+    .reduce((s, t) => roundMoney(s + Math.abs(t.total)), 0);
   const onlineCollections = scopedTransactions
     .filter(t => t.type === 'payment' && t.paymentMethod === 'Online')
-    .reduce((s, t) => s + Math.abs(t.total), 0);
-  const creditSales = saleSettlementTotals.creditDue;
-  const onlineSales = saleSettlementTotals.onlinePaid;
-  const salesReturns = returns.reduce((s, t) => s + Math.abs(t.total), 0);
+    .reduce((s, t) => roundMoney(s + Math.abs(t.total)), 0);
+  const creditSales = roundMoney(saleSettlementTotals.creditDue);
+  const onlineSales = roundMoney(saleSettlementTotals.onlinePaid);
+  const salesReturns = returns.reduce((s, t) => roundMoney(s + Math.abs(t.total)), 0);
   const scopedReturnIds = new Set<string>(returns.map(t => t.id));
   const returnEffects = accumulateCanonicalReturnEffects(sortedTransactionsAsc, scopedReturnIds);
-  const grossSales = saleSettlementTotals.totalSales;
-  const cogsFromSales = sales.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
-  const cogsReversalFromReturns = returns.reduce((sum, t) => sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0), 0);
-  const netSales = grossSales - salesReturns;
-  const cogs = cogsFromSales - cogsReversalFromReturns;
-  const grossProfit = netSales - cogs;
+  const grossSales = roundMoney(saleSettlementTotals.totalSales);
+  const cogsFromSales = sales.reduce((sum, t) => roundMoney(sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0)), 0);
+  const cogsReversalFromReturns = returns.reduce((sum, t) => roundMoney(sum + t.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0)), 0);
+  const salesReturnsNormalized = roundMoney(salesReturns);
+  const netSales = roundMoney(grossSales - salesReturnsNormalized);
+  const cogs = roundMoney(cogsFromSales - cogsReversalFromReturns);
+  const grossProfit = roundMoney(netSales - cogs);
   const scopedExpenses = expenses.filter(e => {
     const expenseTime = new Date(e.createdAt).getTime();
     return Number.isFinite(expenseTime) && expenseTime >= windowStart && expenseTime <= windowEnd;
@@ -236,14 +326,14 @@ const buildCanonicalFinanceBreakdown = (
       const eventTime = new Date(record.createdAt).getTime();
       return Number.isFinite(eventTime) && eventTime >= windowStart && eventTime <= windowEnd;
     })
-    .reduce((sum, record) => sum + Math.max(0, Number(record.amount) || 0), 0);
-  const todayExpenses = scopedExpenses.reduce((s, e) => s + e.amount, 0);
-  const netProfit = grossProfit - todayExpenses;
-  const cashInflowOperational = saleCashReceipts + cashCollections;
-  const cashMovementAfterExpenses = cashInflowOperational - returnEffects.cashRefunds - scopedDeleteCompensationOutflow - todayExpenses;
+    .reduce((sum, record) => roundMoney(sum + Math.max(0, Number(record.amount) || 0)), 0);
+  const todayExpenses = scopedExpenses.reduce((s, e) => roundMoney(s + e.amount), 0);
+  const netProfit = roundMoney(grossProfit - todayExpenses);
+  const cashInflowOperational = roundMoney(saleCashReceipts + cashCollections);
+  const cashMovementAfterExpenses = roundMoney(cashInflowOperational - returnEffects.cashRefunds - scopedDeleteCompensationOutflow - todayExpenses);
   return {
     grossSales,
-    salesReturns,
+    salesReturns: salesReturnsNormalized,
     netSales,
     creditSalesCreated: creditSales,
     onlineSalesAtSale: onlineSales,
@@ -253,10 +343,10 @@ const buildCanonicalFinanceBreakdown = (
     saleCashReceipts,
     cashCollections,
     onlineCollections,
-    cashRefunds: returnEffects.cashRefunds + scopedDeleteCompensationOutflow,
-    onlineRefunds: returnEffects.onlineRefunds,
-    dueReductionFromReturns: returnEffects.dueReductionFromReturns,
-    storeCreditCreatedFromReturns: returnEffects.storeCreditCreatedFromReturns,
+    cashRefunds: roundMoney(returnEffects.cashRefunds + scopedDeleteCompensationOutflow),
+    onlineRefunds: roundMoney(returnEffects.onlineRefunds),
+    dueReductionFromReturns: roundMoney(returnEffects.dueReductionFromReturns),
+    storeCreditCreatedFromReturns: roundMoney(returnEffects.storeCreditCreatedFromReturns),
     cashMovementAfterExpenses,
     todayExpenses,
     txCount: scopedTransactions.length,
@@ -416,6 +506,15 @@ export default function Finance() {
 
   const [profitDate, setProfitDate] = useState(todayISO());
   const [profitMonth, setProfitMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [reportingLayerMode, setReportingLayerMode] = useState<'operational' | 'adjustment' | 'final'>('operational');
+  const [cashbookFromDate, setCashbookFromDate] = useState('');
+  const [cashbookToDate, setCashbookToDate] = useState('');
+  const [cashbookTypeFilter, setCashbookTypeFilter] = useState<'all' | 'sale' | 'payment' | 'return' | 'expense' | 'delete_reversal' | 'delete_compensation' | 'update_correction'>('all');
+  const [cashbookAuditFilter, setCashbookAuditFilter] = useState<'all' | 'needs_review' | 'corrections_only'>('all');
+  const [cashbookCustomerQuery, setCashbookCustomerQuery] = useState('');
+  const [showReturnEffectDetails, setShowReturnEffectDetails] = useState(false);
+  const [showCashbookDiagnostics, setShowCashbookDiagnostics] = useState(false);
+  const [showFullCashbookColumns, setShowFullCashbookColumns] = useState(false);
 
   const refreshData = () => setData(loadData());
 
@@ -665,47 +764,44 @@ export default function Finance() {
 
   const expectedClosingForOpenSession = openSession ? (openSession.openingBalance + dailyCashTotals.systemCashTotal) : 0;
   const closingVariance = openSession ? (closingCountTotal - expectedClosingForOpenSession) : 0;
-
-  const todayFinanceBreakdown = useMemo(() => {
-    const todayStart = new Date(`${todayISO()}T00:00:00`).getTime();
-    const todayEnd = new Date(`${todayISO()}T23:59:59.999`).getTime();
-    const hasActiveShiftWindow = Boolean(openSession && Number.isFinite(new Date(openSession.startTime).getTime()));
-    const windowType = hasActiveShiftWindow ? 'active_shift' : 'today';
-    const windowStart = hasActiveShiftWindow ? new Date(openSession!.startTime).getTime() : todayStart;
-    const windowEnd = hasActiveShiftWindow ? Date.now() : todayEnd;
-
-    const scoped = buildCanonicalFinanceBreakdown(data.transactions, expenses, data.deleteCompensations || [], windowStart, windowEnd);
-
-    financeShiftDiag('[FIN][KPI][WINDOW]', {
-      windowType,
-      startTime: new Date(windowStart).toISOString(),
-      endTime: new Date(windowEnd).toISOString(),
-      txCount: scoped.txCount,
-      expenseCount: scoped.expenseCount,
-    });
-    financeShiftDiag('[FIN][KPI][SCOPED_TOTALS]', {
-      windowType,
-      grossSales: scoped.grossSales,
-      salesReturns: scoped.salesReturns,
-      netSales: scoped.netSales,
-      creditSalesCreated: scoped.creditSalesCreated,
-      onlineSalesAtSale: scoped.onlineSalesAtSale,
-      cogs: scoped.cogs,
-      grossProfit: scoped.grossProfit,
-      netProfit: scoped.netProfit,
-      saleCashReceipts: scoped.saleCashReceipts,
-      cashCollections: scoped.cashCollections,
-      onlineCollections: scoped.onlineCollections,
-      cashRefunds: scoped.cashRefunds,
-      onlineRefunds: scoped.onlineRefunds,
-      dueReductionFromReturns: scoped.dueReductionFromReturns,
-      storeCreditCreatedFromReturns: scoped.storeCreditCreatedFromReturns,
-      netCashMovementOperational: scoped.cashMovementAfterExpenses,
-      expenses: scoped.todayExpenses,
-    });
-
-    return scoped;
-  }, [data.transactions, expenses, openSession]);
+  const buildLayerFinanceBreakdown = (rows: CashbookRow[]) => {
+    const grossSales = roundMoney(rows.reduce((sum, row) => sum + row.grossSales, 0));
+    const salesReturns = roundMoney(rows.reduce((sum, row) => sum + row.salesReturn, 0));
+    const netSales = roundMoney(rows.reduce((sum, row) => sum + row.netSales, 0));
+    const creditSalesCreated = roundMoney(rows.reduce((sum, row) => sum + row.creditDueCreated, 0));
+    const onlineSalesAtSale = roundMoney(rows.reduce((sum, row) => sum + row.onlineSale, 0));
+    const cogs = roundMoney(rows.reduce((sum, row) => sum + row.cogsEffect, 0));
+    const grossProfit = roundMoney(rows.reduce((sum, row) => sum + row.grossProfitEffect, 0));
+    const todayExpenses = roundMoney(rows.reduce((sum, row) => sum + row.expense, 0));
+    const netProfit = roundMoney(rows.reduce((sum, row) => sum + row.netProfitEffect, 0));
+    const saleCashReceipts = roundMoney(rows.filter(row => row.type === 'sale').reduce((sum, row) => sum + row.cashIn, 0));
+    const cashCollections = roundMoney(rows.filter(row => row.type === 'payment').reduce((sum, row) => sum + row.cashIn, 0));
+    const onlineCollections = roundMoney(rows.filter(row => row.type === 'payment').reduce((sum, row) => sum + row.onlineIn, 0));
+    const cashRefunds = roundMoney(rows.filter(row => row.type === 'return').reduce((sum, row) => sum + row.cashOut, 0));
+    const onlineRefunds = roundMoney(rows.filter(row => row.type === 'return').reduce((sum, row) => sum + row.onlineOut, 0));
+    const dueReductionFromReturns = roundMoney(rows.filter(row => row.type === 'return').reduce((sum, row) => sum + Math.max(0, -row.currentDueEffect), 0));
+    const storeCreditCreatedFromReturns = roundMoney(rows.filter(row => row.type === 'return').reduce((sum, row) => sum + Math.max(0, row.currentStoreCreditEffect), 0));
+    const cashMovementAfterExpenses = roundMoney(rows.reduce((sum, row) => sum + row.netCashEffect, 0));
+    return {
+      grossSales,
+      salesReturns,
+      netSales,
+      creditSalesCreated,
+      onlineSalesAtSale,
+      cogs,
+      grossProfit,
+      todayExpenses,
+      netProfit,
+      saleCashReceipts,
+      cashCollections,
+      onlineCollections,
+      cashRefunds,
+      onlineRefunds,
+      dueReductionFromReturns,
+      storeCreditCreatedFromReturns,
+      cashMovementAfterExpenses,
+    };
+  };
 
   const expenseActivities: ExpenseActivity[] = useMemo(() => (Array.isArray(data.expenseActivities) ? data.expenseActivities : []), [data]);
 
@@ -745,40 +841,6 @@ export default function Finance() {
 
   const creditCustomers = useMemo(() => data.customers.filter(c => c.totalDue > 0).sort((a, b) => b.totalDue - a.totalDue), [data.customers]);
 
-  const dailySummary = useMemo(() => {
-    const dayStart = new Date(`${profitDate}T00:00:00`).getTime();
-    const dayEnd = new Date(`${profitDate}T23:59:59.999`).getTime();
-    const summary = buildCanonicalFinanceBreakdown(data.transactions, expenses, data.deleteCompensations || [], dayStart, dayEnd);
-    financeLog.pnl('DAILY_SUMMARY', {
-      date: profitDate,
-      grossSales: summary.grossSales,
-      salesReturns: summary.salesReturns,
-      netSales: summary.netSales,
-      cogs: summary.cogs,
-      grossProfit: summary.grossProfit,
-      expenses: summary.todayExpenses,
-      netProfit: summary.netProfit,
-    });
-    return summary;
-  }, [data.transactions, expenses, profitDate]);
-
-  const monthlySummary = useMemo(() => {
-    const monthStart = new Date(`${profitMonth}-01T00:00:00`).getTime();
-    const monthEnd = new Date(new Date(monthStart).getFullYear(), new Date(monthStart).getMonth() + 1, 0, 23, 59, 59, 999).getTime();
-    const summary = buildCanonicalFinanceBreakdown(data.transactions, expenses, data.deleteCompensations || [], monthStart, monthEnd);
-    financeLog.pnl('MONTHLY_SUMMARY', {
-      month: profitMonth,
-      grossSales: summary.grossSales,
-      salesReturns: summary.salesReturns,
-      netSales: summary.netSales,
-      cogs: summary.cogs,
-      grossProfit: summary.grossProfit,
-      expenses: summary.todayExpenses,
-      netProfit: summary.netProfit,
-    });
-    return summary;
-  }, [data.transactions, expenses, profitMonth]);
-
   const dueStoreCreditSummary = useMemo(() => {
     const snapshot = getCanonicalCustomerBalanceSnapshot(data.customers, data.transactions);
     console.info('[FIN][KPI][CURRENT_BALANCE]', {
@@ -789,6 +851,611 @@ export default function Finance() {
     });
     return { totalDue: snapshot.totalDue, totalStoreCredit: snapshot.totalStoreCredit };
   }, [data.customers, data.transactions]);
+
+  const cashbookRows = useMemo(() => {
+    const parseTime = (iso: string) => {
+      const parsed = new Date(iso).getTime();
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const events: Array<{ date: string; kind: 'tx' | 'expense' | 'deleted' | 'delete_compensation' | 'updated'; tx?: Transaction; expense?: Expense; deleted?: DeletedTransactionRecord; compensation?: DeleteCompensationRecord; updated?: UpdatedTransactionRecord }> = [
+      ...data.transactions.map(tx => ({ date: tx.date, kind: 'tx' as const, tx })),
+      ...expenses.map(expense => ({ date: expense.createdAt, kind: 'expense' as const, expense })),
+      ...((data.deletedTransactions || []).map(deleted => ({ date: deleted.deletedAt, kind: 'deleted' as const, deleted }))),
+      ...((data.deleteCompensations || []).map(compensation => ({ date: compensation.createdAt, kind: 'delete_compensation' as const, compensation }))),
+      ...((data.updatedTransactionEvents || []).map(updated => ({ date: updated.updatedAt, kind: 'updated' as const, updated }))),
+    ].sort((a, b) => parseTime(a.date) - parseTime(b.date));
+
+    let runningDue = 0;
+    const rows: CashbookRow[] = [];
+
+    events.forEach((event) => {
+      if (event.kind === 'delete_compensation' && event.compensation) {
+        const compensation = event.compensation;
+        rows.push({
+          id: `delete-compensation-${compensation.id}`,
+          date: compensation.createdAt,
+          billNo: compensation.transactionId,
+          type: 'delete_compensation',
+          eventType: 'delete_compensation',
+          isSynthetic: true,
+          sourceTxId: compensation.transactionId,
+          customer: compensation.customerName || '—',
+          notes: `Mode: ${compensation.mode} • Reason: ${compensation.reason || 'Delete compensation'}`,
+          grossSales: 0,
+          salesReturn: 0,
+          netSales: 0,
+          creditDueCreated: 0,
+          onlineSale: 0,
+          currentDueEffect: 0,
+          currentStoreCreditEffect: 0,
+          cashIn: 0,
+          cashOut: compensation.amount,
+          onlineIn: 0,
+          onlineOut: 0,
+          netCashEffect: -compensation.amount,
+          cogsEffect: 0,
+          grossProfitEffect: 0,
+          expense: 0,
+          netProfitEffect: 0,
+          effectSummary: compensation.mode === 'cash_refund' ? 'Delete compensation cash out' : 'Delete compensation',
+        });
+        return;
+      }
+      if (event.kind === 'updated' && event.updated) {
+        const updatedEvent = event.updated;
+        const delta = updatedEvent.cashbookDelta || {
+          grossSales: 0,
+          salesReturn: 0,
+          netSales: 0,
+          creditDueCreated: 0,
+          onlineSale: 0,
+          currentDueEffect: 0,
+          currentStoreCreditEffect: 0,
+          cashIn: 0,
+          cashOut: 0,
+          onlineIn: 0,
+          onlineOut: 0,
+          netCashEffect: 0,
+          cogsEffect: 0,
+          grossProfitEffect: 0,
+          expense: 0,
+          netProfitEffect: 0,
+        };
+        const updatedType = updatedEvent.updatedTransaction?.type || 'sale';
+        const effectSummary = updatedEvent.changeSummary || (updatedType === 'return'
+          ? 'Updated return correction'
+          : updatedType === 'payment'
+            ? 'Updated payment correction'
+            : 'Updated sale correction');
+        const changeTagsLabel = (updatedEvent.changeTags || []).length > 0
+          ? ` • Changes: ${(updatedEvent.changeTags || []).join(', ')}`
+          : '';
+        rows.push({
+          id: `update-correction-${updatedEvent.id}`,
+          date: updatedEvent.updatedAt,
+          billNo: updatedEvent.updatedTransactionId,
+          type: 'update_correction',
+          eventType: 'update_correction',
+          isSynthetic: true,
+          sourceTxId: updatedEvent.updatedTransactionId,
+          customer: updatedEvent.customerName || updatedEvent.updatedTransaction?.customerName || '—',
+          notes: `Original Tx: ${updatedEvent.originalTransactionId} • Updated Tx: ${updatedEvent.updatedTransactionId}${changeTagsLabel}`,
+          grossSales: delta.grossSales,
+          salesReturn: delta.salesReturn,
+          netSales: delta.netSales,
+          creditDueCreated: delta.creditDueCreated,
+          onlineSale: delta.onlineSale,
+          currentDueEffect: delta.currentDueEffect,
+          currentStoreCreditEffect: delta.currentStoreCreditEffect,
+          cashIn: delta.cashIn,
+          cashOut: delta.cashOut,
+          onlineIn: delta.onlineIn,
+          onlineOut: delta.onlineOut,
+          netCashEffect: delta.netCashEffect,
+          cogsEffect: delta.cogsEffect,
+          grossProfitEffect: delta.grossProfitEffect,
+          expense: delta.expense,
+          netProfitEffect: delta.netProfitEffect,
+          effectSummary,
+        });
+        return;
+      }
+      if (event.kind === 'deleted' && event.deleted) {
+        const deleted = event.deleted;
+        const original = deleted.originalTransaction;
+        const amount = Math.abs(deleted.amount || original.total || 0);
+        const cogsAmount = (original.items || []).reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0);
+        const dueDelta = (deleted.afterImpact?.customerDue || 0) - (deleted.beforeImpact?.customerDue || 0);
+        const storeCreditDelta = (deleted.afterImpact?.customerStoreCredit || 0) - (deleted.beforeImpact?.customerStoreCredit || 0);
+        const settlement = original.type === 'sale' ? getSaleSettlementBreakdown(original) : { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
+        const historicalTransactions = data.transactions
+          .filter(candidate => resolveTransactionTimeForSession(candidate) < resolveTransactionTimeForSession(original)
+            || (resolveTransactionTimeForSession(candidate) === resolveTransactionTimeForSession(original) && candidate.id !== original.id))
+          .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
+        const returnAllocation = original.type === 'return'
+          ? getCanonicalReturnAllocation(original, historicalTransactions, Math.max(0, deleted.beforeImpact?.customerDue || 0))
+          : { cashRefund: 0, onlineRefund: 0 };
+        const deleteCompensationAmount = roundMoney(Math.max(0, Number(deleted.deleteCompensationAmount || 0)));
+        const deleteCompensationMode = deleted.deleteCompensationMode;
+        const storeCreditCompensationDelta = deleteCompensationMode === 'store_credit' ? deleteCompensationAmount : 0;
+        const saleReversal = original.type === 'sale';
+        const returnReversal = original.type === 'return';
+        rows.push({
+          id: `deleted-${deleted.id}`,
+          date: deleted.deletedAt,
+          billNo: deleted.originalTransactionId,
+          type: 'delete_reversal',
+          eventType: 'delete_reversal',
+          isSynthetic: true,
+          sourceTxId: deleted.originalTransactionId,
+          customer: deleted.customerName || '—',
+          notes: `Deleted ${deleted.type} • Reason: ${deleted.deleteReason || '—'}${deleted.deleteReasonNote ? ` • Note: ${deleted.deleteReasonNote}` : ''}${deleteCompensationAmount > 0 ? ` • Compensation: ${deleteCompensationMode || 'cash_refund'} ₹${formatINRPrecise(deleteCompensationAmount)}` : ''}`,
+          grossSales: saleReversal ? -amount : 0,
+          salesReturn: returnReversal ? -amount : 0,
+          netSales: saleReversal ? -amount : returnReversal ? amount : 0,
+          creditDueCreated: saleReversal ? -settlement.creditDue : 0,
+          onlineSale: saleReversal ? -settlement.onlinePaid : 0,
+          currentDueEffect: dueDelta,
+          currentStoreCreditEffect: storeCreditDelta - storeCreditCompensationDelta,
+          cashIn: saleReversal ? -settlement.cashPaid : returnReversal ? returnAllocation.cashRefund : 0,
+          cashOut: returnReversal ? -returnAllocation.cashRefund : 0,
+          onlineIn: saleReversal ? -settlement.onlinePaid : returnReversal ? returnAllocation.onlineRefund : 0,
+          onlineOut: returnReversal ? -returnAllocation.onlineRefund : 0,
+          netCashEffect: saleReversal
+            ? -settlement.cashPaid
+            : returnReversal
+              ? returnAllocation.cashRefund
+              : 0,
+          cogsEffect: saleReversal ? -cogsAmount : returnReversal ? cogsAmount : 0,
+          grossProfitEffect: saleReversal ? (-amount + cogsAmount) : returnReversal ? (amount - cogsAmount) : 0,
+          expense: 0,
+          netProfitEffect: saleReversal ? (-amount + cogsAmount) : returnReversal ? (amount - cogsAmount) : 0,
+          effectSummary: saleReversal ? 'Deleted sale reversal' : returnReversal ? 'Deleted return reversal' : 'Deleted transaction reversal',
+        });
+        if (deleteCompensationMode === 'store_credit' && deleteCompensationAmount > 0) {
+          rows.push({
+            id: `deleted-comp-store-credit-${deleted.id}`,
+            date: deleted.deletedAt,
+            billNo: deleted.originalTransactionId,
+            type: 'delete_compensation',
+            eventType: 'delete_compensation',
+            isSynthetic: true,
+            sourceTxId: deleted.originalTransactionId,
+            customer: deleted.customerName || '—',
+            notes: `Mode: store_credit • Reason: ${deleted.deleteReason || 'Delete compensation'}${deleted.deleteReasonNote ? ` • Note: ${deleted.deleteReasonNote}` : ''}`,
+            grossSales: 0,
+            salesReturn: 0,
+            netSales: 0,
+            creditDueCreated: 0,
+            onlineSale: 0,
+            currentDueEffect: 0,
+            currentStoreCreditEffect: deleteCompensationAmount,
+            cashIn: 0,
+            cashOut: 0,
+            onlineIn: 0,
+            onlineOut: 0,
+            netCashEffect: 0,
+            cogsEffect: 0,
+            grossProfitEffect: 0,
+            expense: 0,
+            netProfitEffect: 0,
+            effectSummary: 'Delete compensation store credit',
+          });
+        }
+        return;
+      }
+      if (event.kind === 'expense' && event.expense) {
+        const expense = event.expense;
+        rows.push({
+          id: `expense-${expense.id}`,
+          date: expense.createdAt,
+          billNo: expense.id,
+          type: 'expense',
+          eventType: 'transaction',
+          isSynthetic: false,
+          customer: '—',
+          notes: `${expense.title} (${expense.category})`,
+          grossSales: 0,
+          salesReturn: 0,
+          netSales: 0,
+          creditDueCreated: 0,
+          onlineSale: 0,
+          currentDueEffect: 0,
+          currentStoreCreditEffect: 0,
+          cashIn: 0,
+          cashOut: expense.amount,
+          onlineIn: 0,
+          onlineOut: 0,
+          netCashEffect: -expense.amount,
+          cogsEffect: 0,
+          grossProfitEffect: 0,
+          expense: expense.amount,
+          netProfitEffect: -expense.amount,
+          effectSummary: 'Expense cash out',
+        });
+        return;
+      }
+      if (!event.tx) return;
+      const tx = event.tx;
+      const txAmount = Math.abs(tx.total || 0);
+      const cogsAmount = tx.items.reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0);
+      if (tx.type === 'sale') {
+        const settlement = getSaleSettlementBreakdown(tx);
+        const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+        runningDue = Math.max(0, runningDue + settlement.creditDue);
+        rows.push({
+          id: `tx-${tx.id}`,
+          date: tx.date,
+          billNo: tx.id,
+          type: 'sale',
+          eventType: 'transaction',
+          isSynthetic: false,
+          sourceTxId: tx.id,
+          customer: tx.customerName || 'Walk-in customer',
+          notes: `Cash ₹${settlement.cashPaid.toFixed(2)} • Online ₹${settlement.onlinePaid.toFixed(2)} • Credit Due ₹${settlement.creditDue.toFixed(2)}`,
+          grossSales: txAmount,
+          salesReturn: 0,
+          netSales: txAmount,
+          creditDueCreated: settlement.creditDue,
+          onlineSale: settlement.onlinePaid,
+          currentDueEffect: settlement.creditDue,
+          currentStoreCreditEffect: -storeCreditUsed,
+          cashIn: settlement.cashPaid,
+          cashOut: 0,
+          onlineIn: settlement.onlinePaid,
+          onlineOut: 0,
+          netCashEffect: settlement.cashPaid,
+          cogsEffect: cogsAmount,
+          grossProfitEffect: txAmount - cogsAmount,
+          expense: 0,
+          netProfitEffect: txAmount - cogsAmount,
+          effectSummary: settlement.creditDue > 0 ? 'Credit sale created due' : (settlement.onlinePaid > 0 ? 'Sale paid online/cash' : 'Cash sale'),
+        });
+        return;
+      }
+      if (tx.type === 'payment') {
+        const paymentToDue = Math.min(runningDue, txAmount);
+        const storeCreditIncrease = Math.max(0, txAmount - paymentToDue);
+        runningDue = Math.max(0, runningDue - paymentToDue);
+        const cashIn = tx.paymentMethod === 'Cash' ? txAmount : 0;
+        const onlineIn = tx.paymentMethod === 'Online' ? txAmount : 0;
+        rows.push({
+          id: `tx-${tx.id}`,
+          date: tx.date,
+          billNo: tx.id,
+          type: 'payment',
+          eventType: 'transaction',
+          isSynthetic: false,
+          sourceTxId: tx.id,
+          customer: tx.customerName || '—',
+          notes: `${tx.paymentMethod || 'Cash'} collection`,
+          grossSales: 0,
+          salesReturn: 0,
+          netSales: 0,
+          creditDueCreated: 0,
+          onlineSale: 0,
+          currentDueEffect: -paymentToDue,
+          currentStoreCreditEffect: storeCreditIncrease,
+          cashIn,
+          cashOut: 0,
+          onlineIn,
+          onlineOut: 0,
+          netCashEffect: cashIn,
+          cogsEffect: 0,
+          grossProfitEffect: 0,
+          expense: 0,
+          netProfitEffect: 0,
+          effectSummary: 'Collection against due',
+        });
+        return;
+      }
+      const historicalTransactions = data.transactions
+        .filter(candidate => resolveTransactionTimeForSession(candidate) < resolveTransactionTimeForSession(tx)
+          || (resolveTransactionTimeForSession(candidate) === resolveTransactionTimeForSession(tx) && candidate.id !== tx.id))
+        .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
+      const allocation = getCanonicalReturnAllocation(tx, historicalTransactions, runningDue);
+      runningDue = Math.max(0, runningDue - allocation.dueReduction);
+      rows.push({
+        id: `tx-${tx.id}`,
+        date: tx.date,
+        billNo: tx.id,
+        type: 'return',
+        eventType: 'transaction',
+        isSynthetic: false,
+        sourceTxId: tx.id,
+        customer: tx.customerName || '—',
+        notes: `Mode: ${allocation.mode}`,
+        grossSales: 0,
+        salesReturn: txAmount,
+        netSales: -txAmount,
+        creditDueCreated: 0,
+        onlineSale: 0,
+        currentDueEffect: -allocation.dueReduction,
+        currentStoreCreditEffect: allocation.storeCreditIncrease,
+        cashIn: 0,
+        cashOut: allocation.cashRefund,
+        onlineIn: 0,
+        onlineOut: allocation.onlineRefund,
+        netCashEffect: -allocation.cashRefund,
+        cogsEffect: -cogsAmount,
+        grossProfitEffect: -txAmount + cogsAmount,
+        expense: 0,
+        netProfitEffect: -txAmount + cogsAmount,
+        effectSummary: allocation.cashRefund > 0
+          ? 'Return cash refund'
+          : allocation.onlineRefund > 0
+            ? 'Return online refund'
+            : allocation.storeCreditIncrease > 0
+              ? 'Return created store credit'
+              : 'Return reduced due',
+      });
+    });
+    return rows.map((row) => {
+      const isCorrectionImpact = isCorrectionRowType(row.type);
+      return normalizeCashbookRowMoney({
+        ...row,
+        layerType: isCorrectionImpact ? 'adjustment' : 'operational',
+        isCorrectionImpact,
+        isRealActivity: !isCorrectionImpact,
+      });
+    });
+  }, [data.transactions, expenses]);
+
+  const cashbookRowsWithSignals = useMemo(() => {
+    const returnRows = cashbookRows.filter(row => row.type === 'return');
+    const avgReturnValue = returnRows.length
+      ? returnRows.reduce((sum, row) => sum + Math.abs(row.salesReturn), 0) / returnRows.length
+      : 0;
+    const avgBalanceMovement = cashbookRows.length
+      ? cashbookRows.reduce((sum, row) => sum + (Math.abs(row.currentDueEffect) + Math.abs(row.currentStoreCreditEffect)), 0) / cashbookRows.length
+      : 0;
+    return cashbookRows.map((row) => {
+      const signals = getCashbookAuditSignals(row, { avgReturnValue, avgBalanceMovement });
+      return { ...row, auditFlags: signals.flags, riskLevel: signals.riskLevel };
+    });
+  }, [cashbookRows]);
+
+  const baseFilteredCashbookRows = useMemo(() => {
+    const fromTime = cashbookFromDate ? new Date(`${cashbookFromDate}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
+    const toTime = cashbookToDate ? new Date(`${cashbookToDate}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
+    const query = cashbookCustomerQuery.trim().toLowerCase();
+    return cashbookRowsWithSignals.filter(row => {
+      const time = new Date(row.date).getTime();
+      if (!Number.isFinite(time) || time < fromTime || time > toTime) return false;
+      if (cashbookTypeFilter !== 'all' && row.type !== cashbookTypeFilter) return false;
+      if (query && !row.customer.toLowerCase().includes(query) && !row.billNo.toLowerCase().includes(query) && !row.notes.toLowerCase().includes(query)) return false;
+      return true;
+    });
+  }, [cashbookRowsWithSignals, cashbookFromDate, cashbookToDate, cashbookTypeFilter, cashbookCustomerQuery]);
+
+  const cashbookIntelligenceSummary = useMemo(() => ({
+    corrections: baseFilteredCashbookRows.filter(row => isCorrectionRowType(row.type)).length,
+    returnsWithStoreCredit: baseFilteredCashbookRows.filter(row => row.type === 'return' && row.auditFlags?.includes('Store credit created')).length,
+    needsReview: baseFilteredCashbookRows.filter(row => row.riskLevel === 'medium' || row.riskLevel === 'high').length,
+    largeBalanceMovements: baseFilteredCashbookRows.filter(row => row.auditFlags?.includes('Large balance movement')).length,
+    mixedRefundEvents: baseFilteredCashbookRows.filter(row => row.auditFlags?.includes('Mixed refund and due adjustment')).length,
+  }), [baseFilteredCashbookRows]);
+
+  const layerScopedCashbookRows = useMemo(() => {
+    if (reportingLayerMode === 'operational') return baseFilteredCashbookRows.filter(row => row.layerType === 'operational');
+    if (reportingLayerMode === 'adjustment') return baseFilteredCashbookRows.filter(row => row.layerType === 'adjustment');
+    return baseFilteredCashbookRows;
+  }, [baseFilteredCashbookRows, reportingLayerMode]);
+
+  const filteredCashbookRows = useMemo(() => {
+    if (cashbookAuditFilter === 'needs_review') {
+      return layerScopedCashbookRows
+        .filter(row => row.riskLevel === 'medium' || row.riskLevel === 'high');
+    }
+    if (cashbookAuditFilter === 'corrections_only') {
+      return layerScopedCashbookRows
+        .filter(row => isCorrectionRowType(row.type));
+    }
+    return layerScopedCashbookRows;
+  }, [layerScopedCashbookRows, cashbookAuditFilter]);
+
+  const cashbookRollups = useMemo(() => {
+    return filteredCashbookRows.reduce((acc, row) => {
+      acc.cashIn = roundMoney(acc.cashIn + row.cashIn);
+      acc.cashOut = roundMoney(acc.cashOut + row.cashOut);
+      acc.onlineIn = roundMoney(acc.onlineIn + row.onlineIn);
+      acc.onlineOut = roundMoney(acc.onlineOut + row.onlineOut);
+      acc.grossSales = roundMoney(acc.grossSales + row.grossSales);
+      acc.salesReturns = roundMoney(acc.salesReturns + row.salesReturn);
+      acc.creditDueCreated = roundMoney(acc.creditDueCreated + row.creditDueCreated);
+      acc.grossProfit = roundMoney(acc.grossProfit + row.grossProfitEffect);
+      acc.netProfit = roundMoney(acc.netProfit + row.netProfitEffect);
+      return acc;
+    }, {
+      cashIn: 0,
+      cashOut: 0,
+      onlineIn: 0,
+      onlineOut: 0,
+      grossSales: 0,
+      salesReturns: 0,
+      creditDueCreated: 0,
+      grossProfit: 0,
+      netProfit: 0,
+    });
+  }, [filteredCashbookRows]);
+  const realActivityRollups = useMemo(() => {
+    const realRows = filteredCashbookRows.filter(row => row.isRealActivity);
+    const correctionRows = filteredCashbookRows.filter(row => row.isCorrectionImpact);
+    return {
+      realSales: roundMoney(realRows.reduce((sum, row) => sum + row.grossSales, 0)),
+      realReturns: roundMoney(realRows.reduce((sum, row) => sum + row.salesReturn, 0)),
+      correctionAdjustments: correctionRows.length,
+      netAdjustmentImpact: roundMoney(correctionRows.reduce((sum, row) => sum + row.netSales, 0)),
+    };
+  }, [filteredCashbookRows]);
+
+  const getRowsByLayer = (rows: CashbookRow[], layer: 'operational' | 'adjustment' | 'final') => {
+    if (layer === 'operational') return rows.filter(row => row.layerType === 'operational');
+    if (layer === 'adjustment') return rows.filter(row => row.layerType === 'adjustment');
+    return rows;
+  };
+
+  const activeWindowRange = useMemo(() => {
+    const todayStart = new Date(`${todayISO()}T00:00:00`).getTime();
+    const todayEnd = new Date(`${todayISO()}T23:59:59.999`).getTime();
+    const hasActiveShiftWindow = Boolean(openSession && Number.isFinite(new Date(openSession.startTime).getTime()));
+    const windowStart = hasActiveShiftWindow ? new Date(openSession!.startTime).getTime() : todayStart;
+    const windowEnd = hasActiveShiftWindow ? Date.now() : todayEnd;
+    return { windowStart, windowEnd };
+  }, [openSession]);
+
+  const currentWindowRows = useMemo(() => (
+    cashbookRowsWithSignals.filter(row => {
+      const rowTime = new Date(row.date).getTime();
+      return Number.isFinite(rowTime) && rowTime >= activeWindowRange.windowStart && rowTime <= activeWindowRange.windowEnd;
+    })
+  ), [cashbookRowsWithSignals, activeWindowRange]);
+
+  const todayLayerBreakdowns = useMemo(() => ({
+    operational: buildLayerFinanceBreakdown(getRowsByLayer(currentWindowRows, 'operational')),
+    adjustment: buildLayerFinanceBreakdown(getRowsByLayer(currentWindowRows, 'adjustment')),
+    final: buildLayerFinanceBreakdown(currentWindowRows),
+  }), [currentWindowRows]);
+
+  const todayFinanceBreakdown = todayLayerBreakdowns[reportingLayerMode];
+
+  const dailySummary = useMemo(() => {
+    const dayStart = new Date(`${profitDate}T00:00:00`).getTime();
+    const dayEnd = new Date(`${profitDate}T23:59:59.999`).getTime();
+    const rows = cashbookRowsWithSignals.filter(row => {
+      const rowTime = new Date(row.date).getTime();
+      return Number.isFinite(rowTime) && rowTime >= dayStart && rowTime <= dayEnd;
+    });
+    return buildLayerFinanceBreakdown(getRowsByLayer(rows, reportingLayerMode));
+  }, [cashbookRowsWithSignals, profitDate, reportingLayerMode]);
+
+  const monthlySummary = useMemo(() => {
+    const monthStart = new Date(`${profitMonth}-01T00:00:00`).getTime();
+    const monthEnd = new Date(new Date(monthStart).getFullYear(), new Date(monthStart).getMonth() + 1, 0, 23, 59, 59, 999).getTime();
+    const rows = cashbookRowsWithSignals.filter(row => {
+      const rowTime = new Date(row.date).getTime();
+      return Number.isFinite(rowTime) && rowTime >= monthStart && rowTime <= monthEnd;
+    });
+    return buildLayerFinanceBreakdown(getRowsByLayer(rows, reportingLayerMode));
+  }, [cashbookRowsWithSignals, profitMonth, reportingLayerMode]);
+
+  const cashbookExportRows = useMemo(() => filteredCashbookRows.map((row) => {
+    const touchesCurrentBalance = Math.abs(row.currentDueEffect) > 0.0001 || Math.abs(row.currentStoreCreditEffect) > 0.0001;
+    const touchesCash = Math.abs(row.cashIn) > 0.0001 || Math.abs(row.cashOut) > 0.0001 || Math.abs(row.onlineIn) > 0.0001 || Math.abs(row.onlineOut) > 0.0001;
+    const touchesProfit = Math.abs(row.grossProfitEffect) > 0.0001 || Math.abs(row.netProfitEffect) > 0.0001 || Math.abs(row.cogsEffect) > 0.0001 || Math.abs(row.expense) > 0.0001;
+    const isHistoricalMetric = row.grossSales > 0 || row.salesReturn > 0 || row.creditDueCreated > 0 || row.onlineSale > 0;
+    const potentialReviewFlag = row.type === 'return' && row.cashOut > 0 && row.currentDueEffect === 0 && row.currentStoreCreditEffect === 0
+      ? 'Check settlement'
+      : row.type === 'sale' && row.netSales > 0 && Math.abs(row.grossProfitEffect) < 0.0001
+        ? 'Check zero-profit row'
+        : '';
+    return {
+      'Date': new Date(row.date).toLocaleString(),
+      'Transaction / Bill No': row.billNo,
+      'Type': row.type.toUpperCase(),
+      'Activity Layer': row.layerType === 'adjustment' ? 'Adjustment' : 'Operational',
+      'Customer': row.customer,
+      'Effect Summary': row.effectSummary,
+      'Risk Level': row.riskLevel || 'low',
+      'Audit Flags': (row.auditFlags || []).join(' | '),
+      'Notes / Settlement Summary': row.notes,
+      'Gross Sales': row.grossSales,
+      'Sales Return': row.salesReturn,
+      'Net Sales': row.netSales,
+      'Credit Due Created': row.creditDueCreated,
+      'Online Sale': row.onlineSale,
+      'Current Due Effect': row.currentDueEffect,
+      'Current Store Credit Effect': row.currentStoreCreditEffect,
+      'Cash In': row.cashIn,
+      'Cash Out': row.cashOut,
+      'Online In': row.onlineIn,
+      'Online Out': row.onlineOut,
+      'Net Cash Effect': row.netCashEffect,
+      'COGS Effect': row.cogsEffect,
+      'Gross Profit Effect': row.grossProfitEffect,
+      'Expense': row.expense,
+      'Net Profit Effect': row.netProfitEffect,
+      'Source Category': row.type,
+      'Is Historical Metric': isHistoricalMetric ? 'Yes' : 'No',
+      'Touches Current Balance': touchesCurrentBalance ? 'Yes' : 'No',
+      'Touches Cash': touchesCash ? 'Yes' : 'No',
+      'Touches Profit': touchesProfit ? 'Yes' : 'No',
+      'Potential Review Flag': potentialReviewFlag,
+    };
+  }), [filteredCashbookRows]);
+
+  const cashbookExportSummaryRows = useMemo(() => ([
+    { Metric: 'Export generated at', Value: new Date().toISOString() },
+    { Metric: 'From date filter', Value: cashbookFromDate || 'All' },
+    { Metric: 'To date filter', Value: cashbookToDate || 'All' },
+    { Metric: 'Type filter', Value: cashbookTypeFilter },
+    { Metric: 'Audit filter', Value: cashbookAuditFilter },
+    { Metric: 'Search filter', Value: cashbookCustomerQuery || 'None' },
+    { Metric: 'Rows exported', Value: String(filteredCashbookRows.length) },
+    { Metric: 'Rows needing review', Value: String(cashbookIntelligenceSummary.needsReview) },
+    { Metric: 'Correction rows', Value: String(cashbookIntelligenceSummary.corrections) },
+    { Metric: 'Store-credit return rows', Value: String(cashbookIntelligenceSummary.returnsWithStoreCredit) },
+    { Metric: 'Large balance movement rows', Value: String(cashbookIntelligenceSummary.largeBalanceMovements) },
+    { Metric: 'Mixed refund events', Value: String(cashbookIntelligenceSummary.mixedRefundEvents) },
+    { Metric: 'Gross Sales', Value: cashbookRollups.grossSales.toFixed(2) },
+    { Metric: 'Returns', Value: cashbookRollups.salesReturns.toFixed(2) },
+    { Metric: 'Credit Due Created', Value: cashbookRollups.creditDueCreated.toFixed(2) },
+    { Metric: 'Current Due', Value: dueStoreCreditSummary.totalDue.toFixed(2) },
+    { Metric: 'Current Store Credit', Value: dueStoreCreditSummary.totalStoreCredit.toFixed(2) },
+    { Metric: 'Cash In', Value: cashbookRollups.cashIn.toFixed(2) },
+    { Metric: 'Cash Out', Value: cashbookRollups.cashOut.toFixed(2) },
+    { Metric: 'Net Cash Movement', Value: (cashbookRollups.cashIn - cashbookRollups.cashOut).toFixed(2) },
+    { Metric: 'Gross Profit', Value: cashbookRollups.grossProfit.toFixed(2) },
+    { Metric: 'Net Profit', Value: cashbookRollups.netProfit.toFixed(2) },
+    { Metric: 'Reporting layer', Value: reportingLayerMode },
+    { Metric: 'Operational Sales', Value: realActivityRollups.realSales.toFixed(2) },
+    { Metric: 'Operational Returns', Value: realActivityRollups.realReturns.toFixed(2) },
+    { Metric: 'Adjustment Rows', Value: String(realActivityRollups.correctionAdjustments) },
+    { Metric: 'Net Adjustment Impact', Value: realActivityRollups.netAdjustmentImpact.toFixed(2) },
+  ]), [cashbookFromDate, cashbookToDate, cashbookTypeFilter, cashbookAuditFilter, reportingLayerMode, cashbookCustomerQuery, filteredCashbookRows.length, cashbookRollups, dueStoreCreditSummary.totalDue, dueStoreCreditSummary.totalStoreCredit, cashbookIntelligenceSummary, realActivityRollups]);
+
+  const downloadTextFile = (content: string, fileName: string) => {
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const escapeCsvValue = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const exportCashbookCsv = (textFriendly = false) => {
+    const headers = Object.keys(cashbookExportRows[0] || { 'Date': '', 'Transaction / Bill No': '' });
+    const summaryBlock = [
+      ['Metric', 'Value'],
+      ...cashbookExportSummaryRows.map(row => [row.Metric, row.Value]),
+      [],
+    ];
+    const detailHeader = [headers];
+    const detailRows = cashbookExportRows.map(row => headers.map(header => row[header as keyof typeof row]));
+    const lines = [...summaryBlock, ...detailHeader, ...detailRows]
+      .map(cols => cols.map(col => escapeCsvValue(col)).join(','))
+      .join('\n');
+    const fileSuffix = textFriendly ? 'text-friendly.csv' : 'csv';
+    downloadTextFile(lines, `Cashbook_Export_${new Date().toISOString().split('T')[0]}.${fileSuffix}`);
+  };
+
+  const exportCashbookWorkbook = (ext: 'xlsx' | 'xls') => {
+    // XLS and XLSX use the same workbook payload; extension controls target compatibility.
+    const workbook = XLSX.utils.book_new();
+    const summarySheet = XLSX.utils.json_to_sheet(cashbookExportSummaryRows);
+    const detailSheet = XLSX.utils.json_to_sheet(cashbookExportRows);
+    summarySheet['!cols'] = [{ wch: 30 }, { wch: 30 }];
+    detailSheet['!cols'] = [
+      { wch: 19 }, { wch: 16 }, { wch: 10 }, { wch: 20 }, { wch: 28 }, { wch: 36 },
+      ...Array.from({ length: 21 }).map(() => ({ wch: 14 })),
+    ];
+    detailSheet['!freeze'] = { xSplit: 0, ySplit: 1 };
+    XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
+    XLSX.utils.book_append_sheet(workbook, detailSheet, 'Cashbook_Detail');
+    XLSX.writeFile(workbook, `Cashbook_Export_${new Date().toISOString().split('T')[0]}.${ext}`);
+  };
 
   const persistState = async (newState: AppState) => {
     try {
@@ -1149,6 +1816,7 @@ export default function Finance() {
 
   const tabs: Array<{ key: FinanceTabKey; label: string; icon: React.ReactNode }> = [
     { key: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="w-4 h-4" /> },
+    { key: 'cashbook', label: 'Cashbook', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
     { key: 'cash', label: 'Cash Management', icon: <Wallet className="w-4 h-4" /> },
     { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
     { key: 'credit', label: 'Credit Management', icon: <DollarSign className="w-4 h-4" /> },
@@ -1160,7 +1828,7 @@ export default function Finance() {
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 space-y-5">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
-          <p className="text-sm text-slate-600">Manage cash sessions, expenses, customer credit, and profit summary.</p>
+          <p className="text-sm text-slate-600">Track sale-time KPIs, live balances, cash movement, profitability, and transaction-level cashbook effects.</p>
         </div>
 
         {errors && (
@@ -1192,53 +1860,69 @@ export default function Finance() {
             <Card className="border-slate-200 shadow-sm">
               <CardHeader>
                 <CardTitle>Finance Dashboard (Current Window)</CardTitle>
+                <p className="text-xs text-muted-foreground">Switch between business activity, correction adjustments, and final accounting truth without changing underlying math.</p>
+                <div className="flex gap-2 pt-2 flex-wrap">
+                  <Button size="sm" variant={reportingLayerMode === 'operational' ? 'default' : 'outline'} onClick={() => setReportingLayerMode('operational')}>Operational View</Button>
+                  <Button size="sm" variant={reportingLayerMode === 'adjustment' ? 'default' : 'outline'} onClick={() => setReportingLayerMode('adjustment')}>Adjustment View</Button>
+                  <Button size="sm" variant={reportingLayerMode === 'final' ? 'default' : 'outline'} onClick={() => setReportingLayerMode('final')}>Final Accounting View</Button>
+                </div>
               </CardHeader>
               <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <StatCard label="Operational Net Sales" value={formatINR(todayLayerBreakdowns.operational.netSales)} />
+                  <StatCard label="Adjustment Net Impact" value={formatINR(todayLayerBreakdowns.adjustment.netSales)} tone={todayLayerBreakdowns.adjustment.netSales >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Final Net Sales" value={formatINR(todayLayerBreakdowns.final.netSales)} />
+                </div>
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue / Sale-time activity</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
                     <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
                     <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
+                    <StatCard label="Due Created (This Period)" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
+                    <StatCard label="Online Sales (at sale)" value={formatINR(todayFinanceBreakdown.onlineSalesAtSale)} />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Margin</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Profitability (P&L)</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <StatCard label="COGS (net of returns)" value={formatINR(todayFinanceBreakdown.cogs)} />
                     <StatCard label="Gross Profit" value={formatINR(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Operating</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <StatCard label="Expenses" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
                     <StatCard label="Net Profit" value={formatINR(todayFinanceBreakdown.netProfit)} tone={todayFinanceBreakdown.netProfit >= 0 ? 'good' : 'bad'} />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collections & cash movement</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Cash Movement / Cashbook (selected layer)</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <StatCard label="Cash at Sale" value={formatINR(todayFinanceBreakdown.saleCashReceipts)} />
                     <StatCard label="Cash Collections" value={formatINR(todayFinanceBreakdown.cashCollections)} />
                     <StatCard label="Online Collections" value={formatINR(todayFinanceBreakdown.onlineCollections)} />
-                    <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Return Cash Outflow" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Expenses (cash outflow)" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
                     <StatCard label="Net Cash Movement" value={formatINR(todayFinanceBreakdown.cashMovementAfterExpenses)} tone={todayFinanceBreakdown.cashMovementAfterExpenses >= 0 ? 'good' : 'bad'} />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Online Refunds" value={formatINR(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Due Reduction" value={formatINR(todayFinanceBreakdown.dueReductionFromReturns)} />
-                    <StatCard label="Store Credit Created" value={formatINR(todayFinanceBreakdown.storeCreditCreatedFromReturns)} />
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects</p>
+                    <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px]" onClick={() => setShowReturnEffectDetails(prev => !prev)}>
+                      {showReturnEffectDetails ? 'Hide details' : 'Show details'}
+                    </Button>
                   </div>
+                  {showReturnEffectDetails && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <StatCard label="Cash Outflow (Returns)" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Online Outflow (Returns)" value={formatINR(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />
+                      <StatCard label="Due Reduction (Returns)" value={formatINR(todayFinanceBreakdown.dueReductionFromReturns)} />
+                      <StatCard label="Store Credit Created (Returns)" value={formatINR(todayFinanceBreakdown.storeCreditCreatedFromReturns)} />
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Due / store credit summary</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Current balances (live state)</p>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <StatCard label="Current Due Total" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
+                    <StatCard label="Due Outstanding" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
                     <StatCard label="Current Store Credit Total" value={formatINR(dueStoreCreditSummary.totalStoreCredit)} tone={dueStoreCreditSummary.totalStoreCredit > 0 ? 'good' : 'neutral'} />
                   </div>
                 </div>
@@ -1248,7 +1932,7 @@ export default function Finance() {
               <Card className="border-slate-200 shadow-sm">
                 <CardHeader>
                   <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
-                    <span>Daily Summary</span>
+                    <span>Daily Summary ({reportingLayerMode === 'operational' ? 'Operational' : reportingLayerMode === 'adjustment' ? 'Adjustment' : 'Final Accounting'})</span>
                     <Input type="date" className="w-auto" value={profitDate} onChange={e => setProfitDate(e.target.value)} />
                   </CardTitle>
                 </CardHeader>
@@ -1265,7 +1949,7 @@ export default function Finance() {
               <Card className="border-slate-200 shadow-sm">
                 <CardHeader>
                   <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
-                    <span>Monthly Summary</span>
+                    <span>Monthly Summary ({reportingLayerMode === 'operational' ? 'Operational' : reportingLayerMode === 'adjustment' ? 'Adjustment' : 'Final Accounting'})</span>
                     <Input type="month" className="w-auto" value={profitMonth} onChange={e => setProfitMonth(e.target.value)} />
                   </CardTitle>
                 </CardHeader>
@@ -1280,6 +1964,199 @@ export default function Finance() {
                 </CardContent>
               </Card>
             </div>
+          </div>
+        )}
+
+        {activeTab === 'cashbook' && (
+          <div className="space-y-4">
+            <Card className="border-slate-200 shadow-sm">
+              <CardHeader>
+                <CardTitle>Cashbook (Accountant Audit View)</CardTitle>
+                <p className="text-xs text-muted-foreground">Invoice/event level effects across revenue, live balances, cash movement, and profitability.</p>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                  <StatCard label="Opening Balance" value={formatINR(openSession?.openingBalance ?? latestCarryForwardSession?.closingBalance ?? 0)} />
+                  <StatCard label="Cash In Total" value={formatINR(cashbookRollups.cashIn)} />
+                  <StatCard label="Cash Out Total" value={formatINR(cashbookRollups.cashOut)} tone={cashbookRollups.cashOut > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Online In Total" value={formatINR(cashbookRollups.onlineIn)} />
+                  <StatCard label="Online Out Total" value={formatINR(cashbookRollups.onlineOut)} tone={cashbookRollups.onlineOut > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Net Cash Effect" value={formatINR(cashbookRollups.cashIn - cashbookRollups.cashOut)} tone={(cashbookRollups.cashIn - cashbookRollups.cashOut) >= 0 ? 'good' : 'bad'} />
+                  <StatCard label="Gross Sales" value={formatINR(cashbookRollups.grossSales)} />
+                  <StatCard label="Returns" value={formatINR(cashbookRollups.salesReturns)} tone={cashbookRollups.salesReturns > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Due Created (This Period)" value={formatINR(cashbookRollups.creditDueCreated)} />
+                  <StatCard label="Due Outstanding" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
+                  <StatCard label="Current Store Credit" value={formatINR(dueStoreCreditSummary.totalStoreCredit)} tone={dueStoreCreditSummary.totalStoreCredit > 0 ? 'good' : 'neutral'} />
+                  <StatCard label="Net Profit Effect" value={formatINR(cashbookRollups.netProfit)} tone={cashbookRollups.netProfit >= 0 ? 'good' : 'bad'} />
+                </div>
+                <div className="rounded-md border p-2.5 bg-muted/10 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Audit diagnostics</div>
+                    <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px]" onClick={() => setShowCashbookDiagnostics(prev => !prev)}>
+                      {showCashbookDiagnostics ? 'Hide audit diagnostics' : 'Show audit diagnostics'}
+                    </Button>
+                  </div>
+                  {showCashbookDiagnostics && (
+                    <>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+                        <StatCard label="Correction Rows" value={String(cashbookIntelligenceSummary.corrections)} tone={cashbookIntelligenceSummary.corrections > 0 ? 'bad' : 'neutral'} />
+                        <StatCard label="Rows Needing Review" value={String(cashbookIntelligenceSummary.needsReview)} tone={cashbookIntelligenceSummary.needsReview > 0 ? 'bad' : 'neutral'} />
+                        <StatCard label="Returns + Store Credit" value={String(cashbookIntelligenceSummary.returnsWithStoreCredit)} tone={cashbookIntelligenceSummary.returnsWithStoreCredit > 0 ? 'bad' : 'neutral'} />
+                        <StatCard label="Large Balance Moves" value={String(cashbookIntelligenceSummary.largeBalanceMovements)} tone={cashbookIntelligenceSummary.largeBalanceMovements > 0 ? 'bad' : 'neutral'} />
+                        <StatCard label="Mixed Refund Events" value={String(cashbookIntelligenceSummary.mixedRefundEvents)} tone={cashbookIntelligenceSummary.mixedRefundEvents > 0 ? 'bad' : 'neutral'} />
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <StatCard label="Operational Activity Sales" value={formatINR(realActivityRollups.realSales)} />
+                        <StatCard label="Operational Activity Returns" value={formatINR(realActivityRollups.realReturns)} tone={realActivityRollups.realReturns > 0 ? 'bad' : 'neutral'} />
+                        <StatCard label="Correction Adjustments" value={String(realActivityRollups.correctionAdjustments)} tone={realActivityRollups.correctionAdjustments > 0 ? 'bad' : 'neutral'} />
+                        <StatCard label="Net Adjustment Impact" value={formatINR(realActivityRollups.netAdjustmentImpact)} tone={realActivityRollups.netAdjustmentImpact >= 0 ? 'good' : 'bad'} />
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
+                  <Input type="date" value={cashbookFromDate} onChange={e => setCashbookFromDate(e.target.value)} />
+                  <Input type="date" value={cashbookToDate} onChange={e => setCashbookToDate(e.target.value)} />
+                  <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={cashbookTypeFilter} onChange={e => setCashbookTypeFilter(e.target.value as 'all' | 'sale' | 'payment' | 'return' | 'expense' | 'delete_reversal' | 'delete_compensation' | 'update_correction')}>
+                    <option value="all">All Types</option>
+                    <option value="sale">Sale</option>
+                    <option value="payment">Payment</option>
+                    <option value="return">Return</option>
+                    <option value="expense">Expense</option>
+                    <option value="delete_reversal">Delete Reversal</option>
+                    <option value="delete_compensation">Delete Compensation</option>
+                    <option value="update_correction">Update Correction</option>
+                  </select>
+                  <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={cashbookAuditFilter} onChange={e => setCashbookAuditFilter(e.target.value as 'all' | 'needs_review' | 'corrections_only')}>
+                    <option value="all">All Rows</option>
+                    <option value="needs_review">Needs Review</option>
+                    <option value="corrections_only">Corrections Only</option>
+                  </select>
+                  <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={reportingLayerMode} onChange={e => setReportingLayerMode(e.target.value as 'operational' | 'adjustment' | 'final')}>
+                    <option value="operational">Operational Activity</option>
+                    <option value="adjustment">Adjustment Activity</option>
+                    <option value="final">Final Accounting</option>
+                  </select>
+                  <Input placeholder="Search customer, bill, or notes" value={cashbookCustomerQuery} onChange={e => setCashbookCustomerQuery(e.target.value)} className="md:col-span-2" />
+                </div>
+                <div className="rounded-md border p-2.5 bg-muted/20">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Cashbook Download Center</div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => exportCashbookCsv(false)}>Download CSV</Button>
+                    <Button size="sm" variant="outline" onClick={() => exportCashbookWorkbook('xls')}>Download Excel</Button>
+                    <Button size="sm" variant="outline" onClick={() => exportCashbookWorkbook('xlsx')}>Download XLSX</Button>
+                    <Button size="sm" variant="outline" onClick={() => exportCashbookCsv(true)}>Download CSV (Text-Friendly)</Button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-2">
+                    Exports use current Cashbook filters and include metadata summary + detailed audit columns for accountant review.
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-slate-200 shadow-sm">
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between gap-2">
+                  <span>Transaction-by-transaction KPI Effect Table</span>
+                  <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px]" onClick={() => setShowFullCashbookColumns(prev => !prev)}>
+                    {showFullCashbookColumns ? 'Show compact columns' : 'Show full accountant columns'}
+                  </Button>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-auto border rounded-lg">
+                  <table className={`${showFullCashbookColumns ? 'min-w-[1900px]' : 'min-w-[1400px]'} w-full text-xs`}>
+                    <thead className="bg-muted/40">
+                      <tr>
+                        <th className="p-2 text-left">Date</th>
+                        <th className="p-2 text-left">Bill No</th>
+                        <th className="p-2 text-left">Type</th>
+                        <th className="p-2 text-left">Layer</th>
+                        <th className="p-2 text-left">Customer</th>
+                        <th className="p-2 text-left">Notes / Settlement</th>
+                        <th className="p-2 text-right">Net Sales</th>
+                        <th className="p-2 text-right">Due Created (Period Flow)</th>
+                        <th className="p-2 text-right">Due Outstanding Effect</th>
+                        <th className="p-2 text-right">Store Credit Effect</th>
+                        <th className="p-2 text-right">Cash In</th>
+                        <th className="p-2 text-right">Cash Out</th>
+                        <th className="p-2 text-right">Net Cash Effect</th>
+                        <th className="p-2 text-right">Net Profit Effect</th>
+                        <th className="p-2 text-left">Effect Summary</th>
+                        <th className="p-2 text-left">Flags / Risk</th>
+                        {showFullCashbookColumns && (
+                          <>
+                            <th className="p-2 text-right">Gross Sales</th>
+                            <th className="p-2 text-right">Sales Return</th>
+                            <th className="p-2 text-right">Online Sale</th>
+                            <th className="p-2 text-right">Online In</th>
+                            <th className="p-2 text-right">Online Out</th>
+                            <th className="p-2 text-right">COGS Effect</th>
+                            <th className="p-2 text-right">Gross Profit Effect</th>
+                            <th className="p-2 text-right">Expense</th>
+                          </>
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredCashbookRows.map(row => (
+                        <tr key={row.id} className="border-t">
+                          <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleString()}</td>
+                          <td className="p-2 font-medium whitespace-nowrap">#{row.billNo}</td>
+                          <td className="p-2 uppercase">{row.type}</td>
+                          <td className="p-2">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded border ${row.layerType === 'adjustment' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-emerald-100 text-emerald-700 border-emerald-200'}`}>
+                              {row.layerType === 'adjustment' ? 'Adjustment' : 'Operational'}
+                            </span>
+                          </td>
+                          <td className="p-2">{row.customer}</td>
+                          <td className="p-2">{row.notes}</td>
+                          <td className="p-2 text-right">{formatINR(row.netSales)}</td>
+                          <td className="p-2 text-right">{formatINR(row.creditDueCreated)}</td>
+                          <td className="p-2 text-right">{formatINR(row.currentDueEffect)}</td>
+                          <td className="p-2 text-right">{formatINR(row.currentStoreCreditEffect)}</td>
+                          <td className="p-2 text-right">{formatINR(row.cashIn)}</td>
+                          <td className="p-2 text-right">{formatINR(row.cashOut)}</td>
+                          <td className="p-2 text-right">{formatINR(row.netCashEffect)}</td>
+                          <td className="p-2 text-right">{formatINR(row.netProfitEffect)}</td>
+                          <td className="p-2">{row.effectSummary}</td>
+                          <td className="p-2">
+                            <div className="flex flex-wrap gap-1 items-center">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded border ${row.riskLevel === 'high' ? 'bg-red-100 text-red-700 border-red-200' : row.riskLevel === 'medium' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-slate-100 text-slate-700 border-slate-200'}`}>
+                                {(row.riskLevel || 'low').toUpperCase()}
+                              </span>
+                              {(row.auditFlags || []).slice(0, 2).map(flag => (
+                                <span key={`${row.id}-${flag}`} className="text-[10px] px-1.5 py-0.5 rounded border bg-muted/60">{flag}</span>
+                              ))}
+                              {(row.auditFlags || []).length > 2 && (
+                                <span className="text-[10px] text-muted-foreground">+{(row.auditFlags || []).length - 2} more</span>
+                              )}
+                            </div>
+                          </td>
+                          {showFullCashbookColumns && (
+                            <>
+                              <td className="p-2 text-right">{formatINR(row.grossSales)}</td>
+                              <td className="p-2 text-right">{formatINR(row.salesReturn)}</td>
+                              <td className="p-2 text-right">{formatINR(row.onlineSale)}</td>
+                              <td className="p-2 text-right">{formatINR(row.onlineIn)}</td>
+                              <td className="p-2 text-right">{formatINR(row.onlineOut)}</td>
+                              <td className="p-2 text-right">{formatINR(row.cogsEffect)}</td>
+                              <td className="p-2 text-right">{formatINR(row.grossProfitEffect)}</td>
+                              <td className="p-2 text-right">{formatINR(row.expense)}</td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                      {!filteredCashbookRows.length && (
+                        <tr>
+                          <td className="p-4 text-center text-muted-foreground" colSpan={showFullCashbookColumns ? 24 : 16}>No cashbook rows for selected filters.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
           </div>
         )}
 
@@ -1305,7 +2182,7 @@ export default function Finance() {
                       <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
                       <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
                       <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
-                      <StatCard label="Credit Due Created" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
+                      <StatCard label="Credit Due Created (at sale)" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
                       <StatCard label="Online Sales (at sale)" value={formatINR(todayFinanceBreakdown.onlineSalesAtSale)} />
                     </div>
                   </div>
@@ -1324,7 +2201,7 @@ export default function Finance() {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collections & cash movement (operational)</p>
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collections & cash movement (selected layer)</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                       <StatCard label="Cash at Sale" value={formatINR(todayFinanceBreakdown.saleCashReceipts)} />
                       <StatCard label="Cash Collections (payments)" value={formatINR(todayFinanceBreakdown.cashCollections)} />
@@ -1335,7 +2212,7 @@ export default function Finance() {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects by handling mode (operational)</p>
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects by handling mode (selected layer)</p>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       <StatCard label="Cash Refunds" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
                       <StatCard label="Online Refunds" value={formatINR(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />

@@ -1092,7 +1092,7 @@ export default function Customers() {
                             autoFocus 
                           />
                         </div>
-                        <p className="text-[10px] text-muted-foreground font-bold">Outstanding due: ₹{formatMoneyPrecise(viewingCustomerCanonical?.totalDue || 0)} (overpayment allowed)</p>
+                        <p className="text-[10px] text-muted-foreground font-bold">Due outstanding: ₹{formatMoneyPrecise(viewingCustomerCanonical?.totalDue || 0)} (overpayment allowed)</p>
                         <p className="text-[10px] text-muted-foreground">Any excess above due will be saved as store credit.</p>
                         {paymentAmountValid && (
                           <div className="rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-[10px]">

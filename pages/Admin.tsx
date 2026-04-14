@@ -1317,8 +1317,9 @@ export default function Admin() {
           </div>
       </div>
 
-      <div className="border rounded-xl overflow-x-auto bg-card">
-        <table className="w-full text-sm">
+      <div className="border rounded-xl bg-card overflow-visible">
+        <div className="overflow-x-auto overflow-y-visible">
+          <table className="w-full text-sm">
           <thead className="bg-muted/40">
             <tr>
               <th className="text-left p-3 w-12">
@@ -1395,7 +1396,8 @@ export default function Admin() {
               </tr>
             )})}
           </tbody>
-        </table>
+          </table>
+        </div>
 
         {filteredProducts.length === 0 && (
           <div className="col-span-full py-20 flex flex-col items-center justify-center text-center border-2 border-dashed border-muted rounded-xl bg-muted/5">

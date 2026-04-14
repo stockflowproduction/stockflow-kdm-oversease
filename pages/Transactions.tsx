@@ -2,9 +2,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Customer, DeletedTransactionRecord } from '../types';
+import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
-import { getDeleteTransactionPreview, getSaleSettlementBreakdown, loadData, deleteTransaction, updateTransaction } from '../services/storage';
+import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
 import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, Trash2 } from 'lucide-react';
@@ -18,6 +18,7 @@ export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [deletedTransactions, setDeletedTransactions] = useState<DeletedTransactionRecord[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [filterType, setFilterType] = useState('today');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
@@ -35,7 +36,15 @@ export default function Transactions() {
   const [editingTxDate, setEditingTxDate] = useState('');
   const [editingTxPaymentMethod, setEditingTxPaymentMethod] = useState<'Cash' | 'Credit' | 'Online'>('Cash');
   const [editingTxNotes, setEditingTxNotes] = useState('');
+  const [editingCustomerId, setEditingCustomerId] = useState('');
+  const [editingItems, setEditingItems] = useState<CartItem[]>([]);
+  const [editingCashPaid, setEditingCashPaid] = useState('');
+  const [editingOnlinePaid, setEditingOnlinePaid] = useState('');
+  const [editingCreditDue, setEditingCreditDue] = useState('');
+  const [editingReturnMode, setEditingReturnMode] = useState<'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit'>('refund_cash');
+  const [newSaleProductId, setNewSaleProductId] = useState('');
   const [editingError, setEditingError] = useState<string | null>(null);
+  const [editingSectionWarning, setEditingSectionWarning] = useState<{ section: 'lines' | 'settlement' | 'customer' | 'general'; message: string } | null>(null);
   const [isSavingTransaction, setIsSavingTransaction] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -78,6 +87,7 @@ export default function Transactions() {
         setTransactions(data.transactions);
         setDeletedTransactions(data.deletedTransactions || []);
         setCustomers(data.customers);
+        setProducts(data.products || []);
         setLoadError(null);
       } catch (error) {
         console.error('[transactions] load failed', error);
@@ -215,14 +225,52 @@ export default function Transactions() {
   const allFilteredTransactionsSelected = filteredTransactions.length > 0 && filteredTransactions.every(tx => selectedTransactionIds.includes(tx.id));
   const isBatchEditing = batchEditTransactionIds.length > 0;
   const remainingBatchTransactions = isBatchEditing ? Math.max(0, batchEditTransactionIds.length - batchEditTransactionIndex - 1) : 0;
+  const toSafeMoney = (value: unknown) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 0;
+    return Math.max(0, num);
+  };
+  const normalizeBucketValue = (value: unknown, fallback: string) => {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    return normalized || fallback;
+  };
+  const getLineCompositeKey = (item: Pick<CartItem, 'id' | 'selectedVariant' | 'selectedColor' | 'sellPrice'>) => {
+    const variant = normalizeBucketValue(item.selectedVariant, NO_VARIANT);
+    const color = normalizeBucketValue(item.selectedColor, NO_COLOR);
+    return `${item.id}__${variant}__${color}__${toSafeMoney(item.sellPrice)}`;
+  };
+  const roundMoney = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+  const getDerivedPaymentMethodForSale = (cashPaid: number, onlinePaid: number, creditDue: number): 'Cash' | 'Credit' | 'Online' => {
+    if (creditDue > 0) return 'Credit';
+    if (onlinePaid > 0 && cashPaid <= 0) return 'Online';
+    return 'Cash';
+  };
+  const getEditedSubtotal = () => roundMoney(editingItems.reduce((sum, item) => sum + (toSafeMoney(item.quantity) * toSafeMoney(item.sellPrice)), 0));
+  const getEditedDiscount = () => roundMoney(editingTx?.discount || 0);
+  const getEditedTaxRate = () => Number.isFinite(Number(editingTx?.taxRate)) ? Number(editingTx?.taxRate || 0) : 0;
+  const getEditedTax = () => roundMoney(Math.max(0, getEditedSubtotal() - getEditedDiscount()) * (getEditedTaxRate() / 100));
+  const getEditedTotal = () => {
+    if (!editingTx) return 0;
+    const unsigned = roundMoney(Math.max(0, getEditedSubtotal() - getEditedDiscount()) + getEditedTax());
+    return editingTx.type === 'return' ? -unsigned : unsigned;
+  };
 
   const openTransactionEditor = (tx: Transaction) => {
+    const settlement = getSaleSettlementBreakdown(tx);
     setEditingTx(tx);
     setEditingAmount(String(Math.abs(tx.total || 0)));
     setEditingTxDate(tx.date ? toLocalDateTimeInputValue(tx.date) : '');
     setEditingTxPaymentMethod((tx.paymentMethod || 'Cash') as 'Cash' | 'Credit' | 'Online');
     setEditingTxNotes(tx.notes || '');
+    setEditingCustomerId(tx.customerId || '');
+    setEditingItems((tx.items || []).map(item => ({ ...item })));
+    setEditingCashPaid(String(settlement.cashPaid || 0));
+    setEditingOnlinePaid(String(settlement.onlinePaid || 0));
+    setEditingCreditDue(String(settlement.creditDue || 0));
+    setEditingReturnMode(tx.returnHandlingMode || 'refund_cash');
+    setNewSaleProductId('');
     setEditingError(null);
+    setEditingSectionWarning(null);
   };
 
   const closeTransactionEditor = () => {
@@ -231,6 +279,13 @@ export default function Transactions() {
     setBatchEditTransactionIndex(0);
     setEditingError(null);
     setIsSavingTransaction(false);
+    setEditingItems([]);
+    setEditingCustomerId('');
+    setEditingCashPaid('');
+    setEditingOnlinePaid('');
+    setEditingCreditDue('');
+    setNewSaleProductId('');
+    setEditingSectionWarning(null);
   };
 
   const handleToggleTransactionSelection = (transactionId: string) => {
@@ -264,6 +319,30 @@ export default function Transactions() {
     });
     setTransactions(nextTransactions);
     setSelectedTransactionIds([]);
+  };
+
+  const updateEditingItem = (index: number, patch: Partial<CartItem>) => {
+    setEditingItems(prev => prev.map((item, i) => i === index ? { ...item, ...patch } : item));
+  };
+
+  const removeEditingItem = (index: number) => {
+    setEditingItems(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const addSaleLine = () => {
+    if (!newSaleProductId || !editingTx || editingTx.type !== 'sale') return;
+    const product = products.find(p => p.id === newSaleProductId);
+    if (!product) return;
+    const line: CartItem = {
+      ...product,
+      quantity: 1,
+      sellPrice: product.sellPrice || 0,
+      buyPrice: product.buyPrice || 0,
+      selectedVariant: product.variants?.[0] || NO_VARIANT,
+      selectedColor: product.colors?.[0] || NO_COLOR,
+    };
+    setEditingItems(prev => [...prev, line]);
+    setNewSaleProductId('');
   };
 
   const deletePreview = useMemo(
@@ -304,22 +383,148 @@ export default function Transactions() {
 
     try {
       setIsSavingTransaction(true);
+      setEditingSectionWarning(null);
       const nextDate = editingTxDate ? new Date(editingTxDate).toISOString() : editingTx.date;
       const nextNotes = editingTxNotes.trim();
-      let nextTransaction: Transaction = {
-        ...editingTx,
-        date: nextDate,
-        paymentMethod: editingTxPaymentMethod,
-        notes: nextNotes,
-      };
+      const selectedCustomer = customers.find(c => c.id === editingCustomerId);
+      const customerId = selectedCustomer?.id;
+      const customerName = selectedCustomer?.name;
+      let nextTransaction: Transaction = { ...editingTx, date: nextDate, notes: nextNotes, customerId, customerName };
 
-      if (editingTx.type === 'payment') {
+      if (editingTx.type === 'sale') {
+        if (!editingItems.length) {
+          setEditingError('Sale must include at least one line item.');
+          return;
+        }
+        if (editingSaleLinkageInfo?.hasLinkedReturns) {
+          const editedQtyByKey = new Map<string, number>();
+          editingItems.forEach(item => {
+            const key = getLineCompositeKey(item);
+            editedQtyByKey.set(key, (editedQtyByKey.get(key) || 0) + Math.max(0, Number(item.quantity) || 0));
+          });
+          for (const [sourceLineKey, returnedQty] of editingSaleLinkageInfo.returnedQtyByKey.entries()) {
+            const editedQty = editedQtyByKey.get(sourceLineKey) || 0;
+            if (editedQty <= 0) {
+              setEditingError('Cannot remove a line that already has linked returns.');
+              setEditingSectionWarning({ section: 'lines', message: 'This sale line already has linked returns, so line removal is blocked for audit safety.' });
+              return;
+            }
+            if ((editedQty + 0.0001) < returnedQty) {
+              setEditingError('This sale line already has linked returns, so quantity cannot go below returned quantity.');
+              setEditingSectionWarning({ section: 'lines', message: 'Returned quantity already exists for this line. Keep edited qty at or above returned qty.' });
+              return;
+            }
+          }
+          const originalByReturnLinkedKey = new Map<string, CartItem>();
+          (editingTx.items || []).forEach(item => {
+            const key = getLineCompositeKey(item);
+            if (editingSaleLinkageInfo.returnedQtyByKey.has(key) && !originalByReturnLinkedKey.has(key)) {
+              originalByReturnLinkedKey.set(key, item);
+            }
+          });
+          for (const [sourceLineKey, originalItem] of originalByReturnLinkedKey.entries()) {
+            const editedCandidate = editingItems.find(item => (
+              item.id === originalItem.id
+              && normalizeBucketValue(item.selectedVariant, NO_VARIANT) === normalizeBucketValue(originalItem.selectedVariant, NO_VARIANT)
+              && normalizeBucketValue(item.selectedColor, NO_COLOR) === normalizeBucketValue(originalItem.selectedColor, NO_COLOR)
+            ));
+            if (!editedCandidate) continue;
+            if (Math.abs(toSafeMoney(editedCandidate.sellPrice) - toSafeMoney(originalItem.sellPrice)) > 0.0001 || getLineCompositeKey(editedCandidate) !== sourceLineKey) {
+              setEditingError('This line already has linked return history, so price cannot be changed without breaking source-linked audit truth.');
+              setEditingSectionWarning({ section: 'lines', message: 'Return-linked sale lines are price-locked for audit safety.' });
+              return;
+            }
+          }
+        }
+        const cashPaid = roundMoney(toSafeMoney(editingCashPaid));
+        const onlinePaid = roundMoney(toSafeMoney(editingOnlinePaid));
+        const creditDue = roundMoney(toSafeMoney(editingCreditDue));
+        const total = Math.abs(getEditedTotal());
+        if (Math.abs((cashPaid + onlinePaid + creditDue) - total) > 0.01) {
+          setEditingError('Cash + Online + Credit Due must match edited sale total.');
+          setEditingSectionWarning({ section: 'settlement', message: 'Settlement split is incomplete. Cash + Online + Credit Due must equal edited total.' });
+          return;
+        }
+        if (creditDue > 0 && !customerId) {
+          setEditingError('Customer is required when credit due is present.');
+          setEditingSectionWarning({ section: 'customer', message: 'Credit due requires a customer ledger. Select a customer or reduce credit due to zero.' });
+          return;
+        }
+        nextTransaction = {
+          ...nextTransaction,
+          items: editingItems.map(item => ({ ...item, quantity: Math.max(1, Number(item.quantity) || 1), sellPrice: toSafeMoney(item.sellPrice) })),
+          subtotal: getEditedSubtotal(),
+          discount: getEditedDiscount(),
+          taxRate: getEditedTaxRate(),
+          tax: getEditedTax(),
+          total,
+          saleSettlement: { cashPaid, onlinePaid, creditDue },
+          paymentMethod: getDerivedPaymentMethodForSale(cashPaid, onlinePaid, creditDue),
+        };
+      } else if (editingTx.type === 'return') {
+        if (!editingItems.length) {
+          setEditingError('Return must include at least one line item.');
+          return;
+        }
+        const originalBySourceKey = new Map<string, CartItem>();
+        (editingTx.items || []).forEach(item => {
+          if (!item.sourceTransactionId || !item.sourceLineCompositeKey) return;
+          originalBySourceKey.set(`${item.sourceTransactionId}::${item.sourceLineCompositeKey}`, item);
+        });
+        for (const line of editingItems) {
+          if (!line.sourceTransactionId || !line.sourceLineCompositeKey) {
+            setEditingError('Return line linkage is missing. Please recreate this return from the source bill.');
+            setEditingSectionWarning({ section: 'lines', message: 'Return line source linkage is required for audit-safe return edits.' });
+            return;
+          }
+          const sourceKey = `${line.sourceTransactionId}::${line.sourceLineCompositeKey}`;
+          if (!originalBySourceKey.has(sourceKey)) {
+            setEditingError('Source line linkage must remain unchanged for return edits.');
+            setEditingSectionWarning({ section: 'lines', message: 'Return edits cannot remap source-linked lines.' });
+            return;
+          }
+          const sourceSale = transactions.find(tx => tx.id === line.sourceTransactionId && tx.type === 'sale');
+          const originalSourceQty = (sourceSale?.items || [])
+            .filter(item => getLineCompositeKey(item) === line.sourceLineCompositeKey)
+            .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+          if (originalSourceQty <= 0) {
+            setEditingError('Selected source sale line was not found for this return.');
+            setEditingSectionWarning({ section: 'lines', message: 'Source bill line could not be resolved for this return edit.' });
+            return;
+          }
+          const returnedExcludingCurrent = transactions
+            .filter(tx => tx.type === 'return' && tx.id !== editingTx.id)
+            .reduce((sum, tx) => sum + (tx.items || [])
+              .filter(item => item.sourceTransactionId === line.sourceTransactionId && item.sourceLineCompositeKey === line.sourceLineCompositeKey)
+              .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
+          const remainingQty = Math.max(0, originalSourceQty - returnedExcludingCurrent);
+          if ((Number(line.quantity) || 0) > (remainingQty + 0.0001)) {
+            setEditingError('Return quantity exceeds remaining returnable quantity for the linked bill line.');
+            setEditingSectionWarning({ section: 'lines', message: 'Reduce returned qty to available returnable quantity for the linked source line.' });
+            return;
+          }
+        }
+        const sanitizedItems = editingItems.map(item => ({ ...item, quantity: Math.max(1, Number(item.quantity) || 1), sellPrice: toSafeMoney(item.sellPrice) }));
+        nextTransaction = {
+          ...nextTransaction,
+          items: sanitizedItems,
+          subtotal: getEditedSubtotal(),
+          discount: getEditedDiscount(),
+          taxRate: getEditedTaxRate(),
+          tax: getEditedTax(),
+          total: -Math.abs(getEditedTotal()),
+          returnHandlingMode: editingReturnMode,
+          paymentMethod: editingReturnMode === 'refund_online' ? 'Online' : editingReturnMode === 'refund_cash' ? 'Cash' : 'Credit',
+          saleSettlement: undefined,
+        };
+      } else if (editingTx.type === 'payment') {
         const amt = Number(editingAmount || 0);
         if (!Number.isFinite(amt) || amt <= 0) {
           setEditingError('Please enter a valid payment amount.');
+          setEditingSectionWarning({ section: 'general', message: 'Payment amount must be greater than zero.' });
           return;
         }
-        nextTransaction = { ...nextTransaction, total: Math.abs(amt) };
+        nextTransaction = { ...nextTransaction, total: Math.abs(amt), paymentMethod: editingTxPaymentMethod };
       }
 
       const nextTransactions = await updateTransaction(nextTransaction);
@@ -342,10 +547,131 @@ export default function Transactions() {
     } catch (error) {
       console.error('[transactions] update failed', error);
       setEditingError(error instanceof Error ? error.message : 'Transaction update failed. Please try again.');
+      setEditingSectionWarning({ section: 'general', message: 'Save failed during reconcile. Review audit impact and try again.' });
     } finally {
       setIsSavingTransaction(false);
     }
   };
+
+  const editingReturnPreview = useMemo(() => {
+    if (!editingTx || editingTx.type !== 'return') return null;
+    const selectedCustomer = customers.find(c => c.id === editingCustomerId);
+    const draft: Transaction = {
+      ...editingTx,
+      items: editingItems,
+      customerId: selectedCustomer?.id,
+      customerName: selectedCustomer?.name,
+      subtotal: getEditedSubtotal(),
+      discount: getEditedDiscount(),
+      taxRate: getEditedTaxRate(),
+      tax: getEditedTax(),
+      total: -Math.abs(getEditedTotal()),
+      returnHandlingMode: editingReturnMode,
+      paymentMethod: editingReturnMode === 'refund_online' ? 'Online' : editingReturnMode === 'refund_cash' ? 'Cash' : 'Credit',
+    };
+    return getCanonicalReturnPreviewForDraft(draft, customers, transactions);
+  }, [editingTx, editingItems, editingCustomerId, editingReturnMode, customers, transactions]);
+  const editingSaleLinkageInfo = useMemo(() => {
+    if (!editingTx || editingTx.type !== 'sale') return null;
+    const returnedQtyByKey = new Map<string, number>();
+    transactions
+      .filter(tx => tx.type === 'return')
+      .forEach(tx => {
+        (tx.items || []).forEach(item => {
+          if (item.sourceTransactionId !== editingTx.id || !item.sourceLineCompositeKey) return;
+          const next = (returnedQtyByKey.get(item.sourceLineCompositeKey) || 0) + (Number(item.quantity) || 0);
+          returnedQtyByKey.set(item.sourceLineCompositeKey, next);
+        });
+      });
+    const linkedPayments = transactions.filter(tx => (
+      tx.type === 'payment'
+      && !!editingTx.customerId
+      && tx.customerId === editingTx.customerId
+      && new Date(tx.date).getTime() >= new Date(editingTx.date).getTime()
+    ));
+    return {
+      returnedQtyByKey,
+      hasLinkedReturns: returnedQtyByKey.size > 0,
+      linkedPaymentsCount: linkedPayments.length,
+    };
+  }, [editingTx, transactions]);
+  const editingDraftTransaction = useMemo(() => {
+    if (!editingTx) return null;
+    const selectedCustomer = customers.find(c => c.id === editingCustomerId);
+    const customerId = selectedCustomer?.id;
+    const customerName = selectedCustomer?.name;
+    const common = {
+      ...editingTx,
+      customerId,
+      customerName,
+      notes: editingTxNotes.trim(),
+      date: editingTxDate ? new Date(editingTxDate).toISOString() : editingTx.date,
+    };
+    if (editingTx.type === 'sale') {
+      const cashPaid = roundMoney(toSafeMoney(editingCashPaid));
+      const onlinePaid = roundMoney(toSafeMoney(editingOnlinePaid));
+      const creditDue = roundMoney(toSafeMoney(editingCreditDue));
+      return {
+        ...common,
+        items: editingItems.map(item => ({ ...item, quantity: Math.max(1, Number(item.quantity) || 1), sellPrice: toSafeMoney(item.sellPrice) })),
+        subtotal: getEditedSubtotal(),
+        discount: getEditedDiscount(),
+        taxRate: getEditedTaxRate(),
+        tax: getEditedTax(),
+        total: Math.abs(getEditedTotal()),
+        saleSettlement: { cashPaid, onlinePaid, creditDue },
+        paymentMethod: getDerivedPaymentMethodForSale(cashPaid, onlinePaid, creditDue),
+      } as Transaction;
+    }
+    if (editingTx.type === 'return') {
+      return {
+        ...common,
+        items: editingItems.map(item => ({ ...item, quantity: Math.max(1, Number(item.quantity) || 1), sellPrice: toSafeMoney(item.sellPrice) })),
+        subtotal: getEditedSubtotal(),
+        discount: getEditedDiscount(),
+        taxRate: getEditedTaxRate(),
+        tax: getEditedTax(),
+        total: -Math.abs(getEditedTotal()),
+        returnHandlingMode: editingReturnMode,
+        paymentMethod: editingReturnMode === 'refund_online' ? 'Online' : editingReturnMode === 'refund_cash' ? 'Cash' : 'Credit',
+        saleSettlement: undefined,
+      } as Transaction;
+    }
+    return {
+      ...common,
+      total: Math.abs(Number(editingAmount || 0)),
+      paymentMethod: editingTxPaymentMethod,
+    } as Transaction;
+  }, [editingTx, customers, editingCustomerId, editingTxNotes, editingTxDate, editingItems, editingCashPaid, editingOnlinePaid, editingCreditDue, editingReturnMode, editingAmount, editingTxPaymentMethod]);
+  const editingAuditPreview = useMemo(() => {
+    if (!editingTx || !editingDraftTransaction) return null;
+    try {
+      return getTransactionUpdateAuditPreview(editingTx, editingDraftTransaction, { transactions, customers, products });
+    } catch {
+      return null;
+    }
+  }, [editingTx, editingDraftTransaction, transactions, customers, products]);
+  const editRiskBanner = useMemo(() => {
+    if (!editingTx) return { tone: 'bg-emerald-50 border-emerald-200 text-emerald-800', title: 'Safe edit', detail: 'No linked-return constraints detected for this edit.' };
+    if (editingTx.type === 'sale' && editingSaleLinkageInfo?.hasLinkedReturns) {
+      const linkedPaymentDetail = (editingSaleLinkageInfo.linkedPaymentsCount || 0) > 0
+        ? ` Also found ${editingSaleLinkageInfo.linkedPaymentsCount} linked payment collection(s); due and store-credit effects will be reconciled on save.`
+        : '';
+      return {
+        tone: 'bg-red-50 border-red-200 text-red-800',
+        title: 'High-risk linked-return edit',
+        detail: `Some sale-line edits are restricted to preserve source-linked return audit truth.${linkedPaymentDetail}`,
+      };
+    }
+    if (editingTx.type === 'sale' && (editingSaleLinkageInfo?.linkedPaymentsCount || 0) > 0) {
+      return {
+        tone: 'bg-amber-50 border-amber-200 text-amber-800',
+        title: 'Linked payments exist',
+        detail: `This sale has ${editingSaleLinkageInfo.linkedPaymentsCount} linked payment collection(s). Reconcile will recalculate due / store-credit effects on save.`,
+      };
+    }
+    return { tone: 'bg-emerald-50 border-emerald-200 text-emerald-800', title: 'Safe edit', detail: 'Edit is allowed with standard reconcile and audit trace.' };
+  }, [editingTx, editingSaleLinkageInfo]);
 
   const stats = useMemo(() => {
       let totalRevenue = 0;
@@ -1352,42 +1678,181 @@ export default function Transactions() {
       />
 
       {editingTx && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-          <Card className="w-full max-w-md">
-            <CardHeader>
-              <CardTitle>
-                {isBatchEditing
-                  ? `Batch Edit Transaction ${batchEditTransactionIndex + 1} of ${batchEditTransactionIds.length}`
-                  : `Edit Transaction #${editingTx.id.slice(-6)}`}
-              </CardTitle>
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-5xl max-h-[90vh] overflow-hidden">
+            <CardHeader className="border-b py-3 flex flex-row items-center justify-between gap-2">
+              <CardTitle>{isBatchEditing ? `Batch Edit ${batchEditTransactionIndex + 1}/${batchEditTransactionIds.length}` : `Edit #${editingTx.id.slice(-6)}`} • {editingTx.type.toUpperCase()}</CardTitle>
+              <div className="text-xs text-muted-foreground">{new Date(editingTx.date).toLocaleString()} • {editingTx.customerName || 'Walk-in customer'}</div>
             </CardHeader>
-            <CardContent className="space-y-3">
-              {editingError && (
-                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{editingError}</div>
-              )}
-              <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Date</label>
-                <Input type="datetime-local" value={editingTxDate} onChange={e => setEditingTxDate(e.target.value)} />
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment Method</label>
-                <Select value={editingTxPaymentMethod} onChange={e => setEditingTxPaymentMethod(e.target.value as 'Cash' | 'Credit' | 'Online')}>
-                  <option value="Cash">Cash</option>
-                  <option value="Credit">Credit</option>
-                  <option value="Online">Online</option>
-                </Select>
-              </div>
-              {editingTx.type === 'payment' && (
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Amount</label>
-                  <Input type="number" value={editingAmount} onChange={e => setEditingAmount(e.target.value)} placeholder="Amount" />
+            <CardContent className="p-3 space-y-3 overflow-y-auto max-h-[calc(90vh-136px)]">
+              {editingError && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{editingError}</div>}
+              <div className="space-y-1.5 text-[13px] rounded-lg border p-2.5 bg-muted/10">
+                <div className="grid gap-1.5 md:grid-cols-4">
+                  <div><span className="text-muted-foreground">Type:</span> <span className="font-semibold uppercase">{editingTx.type}</span></div>
+                  <div><span className="text-muted-foreground">Customer:</span> <span className="font-semibold">{editingTx.customerName || 'Walk-in'}</span></div>
+                  <div><span className="text-muted-foreground">Original Total:</span> <span className="font-semibold">₹{formatMoneyPrecise(Math.abs(editingTx.total || 0))}</span></div>
+                  <div><span className="text-muted-foreground">Edited Total:</span> <span className="font-semibold">₹{formatMoneyPrecise(Math.abs(editingDraftTransaction?.total || 0))}</span></div>
                 </div>
-              )}
-              <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Notes</label>
-                <Input value={editingTxNotes} onChange={e => setEditingTxNotes(e.target.value)} placeholder="Notes" />
               </div>
-              <div className="flex gap-2">
+              <div className={`rounded-md border px-3 py-2 text-[13px] ${editRiskBanner.tone}`}>
+                <div className="font-semibold">{editRiskBanner.title}</div>
+                <div>{editRiskBanner.detail}</div>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+                <div className="space-y-2">
+                  <div className="grid md:grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Date</label>
+                      <Input type="datetime-local" value={editingTxDate} onChange={e => setEditingTxDate(e.target.value)} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Customer</label>
+                      <Select value={editingCustomerId || ''} onChange={e => setEditingCustomerId(e.target.value)}>
+                        <option value="">Walk-in</option>
+                        {customers.map(customer => (
+                          <option key={customer.id} value={customer.id}>{customer.name} ({customer.phone})</option>
+                        ))}
+                      </Select>
+                      {editingSectionWarning?.section === 'customer' && <p className="text-[11px] text-red-700">{editingSectionWarning.message}</p>}
+                    </div>
+                  </div>
+                  {(editingTx.type === 'sale' || editingTx.type === 'return') && (
+                    <div className="space-y-1.5">
+                      <div className="text-[13px] font-semibold text-muted-foreground px-1">{editingTx.type === 'sale' ? 'Sale lines' : 'Return lines'}</div>
+                      {editingItems.map((item, index) => {
+                        const variantParts = [item.selectedVariant && item.selectedVariant !== NO_VARIANT ? item.selectedVariant : '', item.selectedColor && item.selectedColor !== NO_COLOR ? item.selectedColor : ''].filter(Boolean).join(' • ');
+                        const isProtectedReturnLinkedSaleLine = editingTx.type === 'sale' && !!editingSaleLinkageInfo?.returnedQtyByKey.get(getLineCompositeKey(item));
+                        return (
+                          <div key={`${item.id}-${index}`} className="rounded-md border px-2 py-1.5">
+                            <div className="grid grid-cols-[30px_minmax(0,1.7fr)_74px_64px_74px_30px] md:grid-cols-[34px_minmax(0,2fr)_96px_80px_84px_32px] items-center gap-1.5 md:gap-2 text-[13px]">
+                              <div className="h-8 w-8 rounded border bg-muted overflow-hidden shrink-0">{item.image ? <img src={item.image} alt={item.name} className="h-full w-full object-contain" /> : <Package className="w-full h-full p-1.5 opacity-30" />}</div>
+                              <div className="min-w-0">
+                                <div className="truncate font-medium">{item.name}</div>
+                                {variantParts && <div className="text-[11px] text-muted-foreground truncate">{variantParts}</div>}
+                              </div>
+                              <Input type="number" min="1" className="h-8 px-2 text-right text-[13px]" value={item.quantity} onChange={e => updateEditingItem(index, { quantity: Math.max(1, Number(e.target.value || 1)) })} />
+                              <Input type="number" min="0" step="0.01" disabled={editingTx.type === 'return' || isProtectedReturnLinkedSaleLine} className="h-8 px-2 text-right text-[13px]" value={item.sellPrice} onChange={e => updateEditingItem(index, { sellPrice: toSafeMoney(e.target.value) })} />
+                              <div className="text-right font-semibold">₹{formatMoneyPrecise(toSafeMoney(item.quantity) * toSafeMoney(item.sellPrice))}</div>
+                              <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={() => removeEditingItem(index)} disabled={editingTx.type === 'sale' && isProtectedReturnLinkedSaleLine}>✕</Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {editingSectionWarning?.section === 'lines' && <div className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[12px] text-red-700">{editingSectionWarning.message}</div>}
+                  {editingTx.type === 'sale' && (
+                    <div className="grid grid-cols-[minmax(0,1fr)_96px] gap-2">
+                      <Select value={newSaleProductId} onChange={e => setNewSaleProductId(e.target.value)}>
+                        <option value="">Add product…</option>
+                        {products.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}
+                      </Select>
+                      <Button type="button" variant="outline" onClick={addSaleLine}>Add Line</Button>
+                    </div>
+                  )}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Notes</label>
+                    <Input value={editingTxNotes} onChange={e => setEditingTxNotes(e.target.value)} placeholder="Notes" />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {editingTx.type === 'sale' && (
+                    <div className="rounded-md border p-2.5 bg-muted/10 space-y-1.5 text-[13px]">
+                      <div className="font-semibold text-[14px]">Settlement Split</div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <Input type="number" min="0" step="0.01" value={editingCashPaid} onChange={e => setEditingCashPaid(e.target.value)} placeholder="Cash" />
+                        <Input type="number" min="0" step="0.01" value={editingOnlinePaid} onChange={e => setEditingOnlinePaid(e.target.value)} placeholder="Online" />
+                        <Input type="number" min="0" step="0.01" value={editingCreditDue} onChange={e => setEditingCreditDue(e.target.value)} placeholder="Credit due" />
+                      </div>
+                      {editingSectionWarning?.section === 'settlement' && <p className="text-[11px] text-red-700">{editingSectionWarning.message}</p>}
+                    </div>
+                  )}
+                  {editingTx.type === 'return' && (
+                    <div className="rounded-md border p-2.5 bg-orange-50/40 space-y-1.5 text-[13px]">
+                      <div className="font-semibold text-[14px]">Return Handling</div>
+                      <Select value={editingReturnMode} onChange={e => setEditingReturnMode(e.target.value as 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit')}>
+                        <option value="refund_cash">Refund Cash</option>
+                        <option value="refund_online">Refund Online</option>
+                        <option value="reduce_due">Reduce Due</option>
+                        <option value="store_credit">Store Credit</option>
+                      </Select>
+                    </div>
+                  )}
+                  {editingTx.type === 'payment' && (
+                    <div className="rounded-md border p-2.5 bg-muted/10 space-y-1.5 text-[13px]">
+                      <div className="font-semibold text-[14px]">Payment Edit</div>
+                      <Input type="number" value={editingAmount} onChange={e => setEditingAmount(e.target.value)} placeholder="Amount" />
+                      <Select value={editingTxPaymentMethod} onChange={e => setEditingTxPaymentMethod(e.target.value as 'Cash' | 'Credit' | 'Online')}>
+                        <option value="Cash">Cash</option>
+                        <option value="Online">Online</option>
+                      </Select>
+                    </div>
+                  )}
+                  {editingTx.type === 'sale' && (
+                    <div className="rounded-md border p-2.5 space-y-1.5 text-[13px]">
+                      <div className="font-semibold text-[14px]">Sale Edit Summary</div>
+                      <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="font-semibold">₹{formatMoneyPrecise(getEditedSubtotal())}</span></div>
+                      <div className="flex justify-between"><span className="text-muted-foreground">Grand Total</span><span className="font-semibold">₹{formatMoneyPrecise(Math.abs(getEditedTotal()))}</span></div>
+                      <div className="rounded border bg-muted/20 p-2 space-y-1">
+                        <div className="flex justify-between"><span>Cash</span><span>₹{formatMoneyPrecise(toSafeMoney(editingCashPaid))}</span></div>
+                        <div className="flex justify-between"><span>Online</span><span>₹{formatMoneyPrecise(toSafeMoney(editingOnlinePaid))}</span></div>
+                        <div className="flex justify-between"><span>Credit Due</span><span>₹{formatMoneyPrecise(toSafeMoney(editingCreditDue))}</span></div>
+                      </div>
+                      {editingTx.type === 'sale' && (() => {
+                        const before = getSaleSettlementBreakdown(editingTx);
+                        const after = getSaleSettlementBreakdown(editingDraftTransaction || editingTx);
+                        return (
+                          <div className="rounded border bg-white p-2 space-y-1">
+                            <div className="font-medium">Settlement change</div>
+                            <div className="text-[12px]">Before: Cash ₹{formatMoneyPrecise(before.cashPaid)} • Online ₹{formatMoneyPrecise(before.onlinePaid)} • Credit ₹{formatMoneyPrecise(before.creditDue)}</div>
+                            <div className="text-[12px]">After: Cash ₹{formatMoneyPrecise(after.cashPaid)} • Online ₹{formatMoneyPrecise(after.onlinePaid)} • Credit ₹{formatMoneyPrecise(after.creditDue)}</div>
+                            <div className="text-[12px]">Impact: Cash {before.cashPaid === after.cashPaid ? '₹0.00' : `${after.cashPaid > before.cashPaid ? '+' : '-'}₹${formatMoneyPrecise(Math.abs(after.cashPaid - before.cashPaid))}`} • Online {before.onlinePaid === after.onlinePaid ? '₹0.00' : `${after.onlinePaid > before.onlinePaid ? '+' : '-'}₹${formatMoneyPrecise(Math.abs(after.onlinePaid - before.onlinePaid))}`} • Due {before.creditDue === after.creditDue ? '₹0.00' : `${after.creditDue > before.creditDue ? '+' : '-'}₹${formatMoneyPrecise(Math.abs(after.creditDue - before.creditDue))}`}</div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                  {editingTx.type === 'return' && editingReturnPreview && (
+                    <div className="rounded-md border p-2.5 bg-orange-50/40 space-y-1.5 text-[13px]">
+                      <div className="font-semibold text-[14px]">Return Preview Summary</div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Due Before → After</span><span className="font-semibold">₹{formatMoneyPrecise(editingReturnPreview.dueBefore)} → ₹{formatMoneyPrecise(editingReturnPreview.dueAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit Before → After</span><span className="font-semibold">₹{formatMoneyPrecise(editingReturnPreview.storeCreditBefore)} → ₹{formatMoneyPrecise(editingReturnPreview.storeCreditAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Cash Outflow</span><span className="font-semibold">₹{formatMoneyPrecise(editingReturnPreview.cashRefund)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Online Outflow</span><span className="font-semibold">₹{formatMoneyPrecise(editingReturnPreview.onlineRefund)}</span></div>
+                    </div>
+                  )}
+                  {editingTx.type === 'payment' && (
+                    <div className="rounded-md border p-2.5 space-y-1.5 text-[13px]">
+                      <div className="font-semibold text-[14px]">Payment Impact Preview</div>
+                      <div>Collection: ₹{formatMoneyPrecise(Number(editingAmount || 0))} via {editingTxPaymentMethod}</div>
+                      {editingCustomerId && (() => {
+                        const currentDue = customers.find(c => c.id === editingCustomerId)?.totalDue || 0;
+                        const dueAfter = Math.max(0, currentDue - Math.max(0, Number(editingAmount || 0)));
+                        return <div>Due: ₹{formatMoneyPrecise(currentDue)} → ₹{formatMoneyPrecise(dueAfter)}</div>;
+                      })()}
+                    </div>
+                  )}
+                  {editingAuditPreview && (
+                    <div className="rounded-md border p-2.5 space-y-1.5 text-[13px] bg-muted/10">
+                      <div className="font-semibold text-[14px]">Edit impact (audit preview)</div>
+                      <div>Stock effect: {editingAuditPreview.cashbookDelta.cogsEffect === 0 ? 'No stock-value change' : `${editingAuditPreview.cashbookDelta.cogsEffect > 0 ? '+' : '-'}₹${formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.cogsEffect))} COGS delta`}</div>
+                      <div>Current due: {editingAuditPreview.cashbookDelta.currentDueEffect >= 0 ? '+' : '-'}₹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.currentDueEffect))}</div>
+                      <div>Store credit: {editingAuditPreview.cashbookDelta.currentStoreCreditEffect >= 0 ? '+' : '-'}₹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.currentStoreCreditEffect))}</div>
+                      <div>Cash movement: {editingAuditPreview.cashbookDelta.netCashEffect >= 0 ? '+' : '-'}₹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.netCashEffect))}</div>
+                      <div>Online movement: {((editingAuditPreview.cashbookDelta.onlineIn || 0) - (editingAuditPreview.cashbookDelta.onlineOut || 0)) >= 0 ? '+' : '-'}₹{formatMoneyPrecise(Math.abs((editingAuditPreview.cashbookDelta.onlineIn || 0) - (editingAuditPreview.cashbookDelta.onlineOut || 0)))}</div>
+                      <div>Revenue delta: {editingAuditPreview.cashbookDelta.netSales >= 0 ? '+' : '-'}₹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.netSales))}</div>
+                      <div>Gross profit delta: {editingAuditPreview.cashbookDelta.grossProfitEffect >= 0 ? '+' : '-'}₹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.grossProfitEffect))}</div>
+                      {!!editingAuditPreview.changeSummary && <div className="text-[12px] text-muted-foreground">{editingAuditPreview.changeSummary}</div>}
+                      {editingTx.customerId !== editingCustomerId && (
+                        <div className="rounded border bg-white p-2 text-[12px]">
+                          Customer impact: old customer effect will be removed, and new customer effect will be applied during reconcile.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="border-t pt-3 flex gap-2">
                 <Button variant="outline" onClick={closeTransactionEditor} disabled={isSavingTransaction}>Cancel</Button>
                 <Button variant="outline" onClick={() => void handleSaveTransaction(true)} disabled={isSavingTransaction}>
                   {isSavingTransaction ? 'Saving…' : remainingBatchTransactions > 0 ? `Update & Next (${remainingBatchTransactions} left)` : 'Update & Next'}

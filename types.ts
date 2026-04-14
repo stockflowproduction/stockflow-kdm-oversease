@@ -45,6 +45,10 @@ export interface CartItem extends Product {
   discountAmount?: number;
   selectedVariant?: string;
   selectedColor?: string;
+  sourceTransactionId?: string;
+  sourceTransactionDate?: string;
+  sourceLineCompositeKey?: string;
+  sourceUnitPriceSnapshot?: number;
 }
 
 export interface Customer {
@@ -80,6 +84,8 @@ export interface Transaction {
   taxLabel?: string;
   paymentMethod?: 'Cash' | 'Credit' | 'Online';
   notes?: string;
+  sourceTransactionId?: string;
+  sourceTransactionDate?: string;
 }
 
 export interface StoreProfile {
@@ -460,11 +466,45 @@ export interface DeletedTransactionRecord {
   afterImpact: DeletedTransactionImpactSnapshot;
 }
 
+export interface UpdatedTransactionRecord {
+  id: string;
+  updatedAt: string;
+  originalTransactionId: string;
+  updatedTransactionId: string;
+  originalTransaction: Transaction;
+  updatedTransaction: Transaction;
+  customerId?: string;
+  customerName?: string;
+  effectSummaryBefore?: string;
+  effectSummaryAfter?: string;
+  changeSummary?: string;
+  changeTags?: string[];
+  cashbookDelta?: {
+    grossSales: number;
+    salesReturn: number;
+    netSales: number;
+    creditDueCreated: number;
+    onlineSale: number;
+    currentDueEffect: number;
+    currentStoreCreditEffect: number;
+    cashIn: number;
+    cashOut: number;
+    onlineIn: number;
+    onlineOut: number;
+    netCashEffect: number;
+    cogsEffect: number;
+    grossProfitEffect: number;
+    expense: number;
+    netProfitEffect: number;
+  };
+}
+
 export interface AppState {
   products: Product[];
   transactions: Transaction[];
   deletedTransactions?: DeletedTransactionRecord[];
   deleteCompensations?: DeleteCompensationRecord[];
+  updatedTransactionEvents?: UpdatedTransactionRecord[];
   categories: string[];
   customers: Customer[];
   profile: StoreProfile;
