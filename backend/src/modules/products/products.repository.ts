@@ -6,7 +6,7 @@ import { ProductDto } from '../../contracts/v1/products/product.types';
 
 type CreateProductInput = Omit<
   ProductDto,
-  'id' | 'createdAt' | 'updatedAt' | 'version' | 'isArchived' | 'archivedAt'
+  'id' | 'storeId' | 'createdAt' | 'updatedAt' | 'version' | 'isArchived' | 'archivedAt'
 >;
 
 type UpdateProductInput = Partial<

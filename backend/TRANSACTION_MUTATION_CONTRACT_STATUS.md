@@ -1,11 +1,11 @@
-# Transaction Mutation Contract Status (Phase 3B)
+# Transaction Mutation Contract Status (Phase 3B + Phase 3D Planning)
 
-Date: 2026-04-14
+Date: 2026-04-16
 
 ## Scope of this document
-This file locks the contract-design outputs for transaction mutations in Phase 3B.
+This file locks contract-design outputs for transaction mutations through Phase 3D planning.
 
-## Contract artifacts now complete
+## Contract artifacts complete
 
 ### 1) Shared mutation payload contracts
 - `backend/src/contracts/v1/transactions/mutation-common.dto.ts`
@@ -22,11 +22,27 @@ This file locks the contract-design outputs for transaction mutations in Phase 3
 - `CreatePaymentTransactionDto`
 - `CreateReturnTransactionDto`
 
-### 3) Update/delete mutation request contracts
+### 3) Update/delete request contracts
 - `UpdateTransactionRequestDto`
 - `DeleteTransactionRequestDto`
 
-### 4) Transaction mutation error code set (expanded + locked)
+### 4) Phase 3D reconciliation preview contracts (new)
+- `backend/src/contracts/v1/transactions/update-delete-preview.dto.ts`
+  - `TransactionStockEffectDeltaDto`
+  - `TransactionCustomerBalanceDeltaDto`
+  - `TransactionSettlementDeltaDto`
+  - `TransactionFinanceImpactPreviewDto`
+  - `ArchiveDeletedSnapshotPreviewDto`
+  - `TransactionUpdateDeletePreviewPayloadDto`
+  - `DeleteCompensationPreviewDto`
+
+### 5) Phase 3D update/delete response envelopes (new)
+- `backend/src/contracts/v1/transactions/update-delete-response.dto.ts`
+  - `UpdateTransactionPreviewResponseDto`
+  - `DeleteTransactionPreviewResponseDto`
+  - `TransactionUpdateDeleteAcceptedResponseDto`
+
+### 6) Transaction mutation error code set (locked)
 Defined in `backend/src/contracts/v1/common/error-codes.ts`:
 - `TRANSACTION_MUTATION_INVALID_OPERATION`
 - `TRANSACTION_MUTATION_INVALID_REQUEST`
@@ -43,17 +59,16 @@ Defined in `backend/src/contracts/v1/common/error-codes.ts`:
 - `TRANSACTION_MUTATION_COMPENSATION_INVALID`
 - `TRANSACTION_MUTATION_BLOCKED`
 
-## Explicitly deferred (must remain unimplemented in 3B)
-- Transaction create execution path
+## Explicitly deferred (must remain unimplemented in 3D)
 - Transaction update execution path
 - Transaction delete execution path
-- Settlement engine
-- Return allocation engine
-- Stock mutation effects
-- Customer due/store-credit ledger mutations
-- Finance/cashbook mutations
 - Delete compensation executor
+- Settlement engine widening beyond create-path scope
+- Return allocation engine widening beyond create-path scope
+- Stock mutation effects for update/delete apply
+- Customer due/store-credit ledger mutations for update/delete apply
+- Finance/cashbook mutation engine
 
 ## Approval status
-- Contract design: **Approved for Phase 3B completion**
-- Ready for Phase 3C planning: **Yes (planning only, not implementation in this phase)**
+- Contract design through Phase 3D planning: **Approved**
+- Ready for later narrow implementation planning (Phase 3E): **Yes, with scope gates preserved**

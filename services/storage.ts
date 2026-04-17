@@ -2449,6 +2449,62 @@ export const loadData = (): AppState => {
   return memoryState;
 };
 
+export type TransactionPageCursor = { lastId: string; lastDate: string } | null;
+
+type TransactionPageOptions = {
+  limit?: number;
+  cursor?: TransactionPageCursor;
+};
+
+type TransactionPageResult<T> = {
+  rows: T[];
+  nextCursor: TransactionPageCursor;
+  hasMore: boolean;
+  totalAvailable: number;
+};
+
+const resolveCursorStartIndex = <T extends { id: string; date?: string; deletedAt?: string }>(
+  rows: T[],
+  cursor: TransactionPageCursor,
+  getCursorDate: (row: T) => string
+) => {
+  if (!cursor) return 0;
+  const index = rows.findIndex((row) => row.id === cursor.lastId && getCursorDate(row) === cursor.lastDate);
+  return index >= 0 ? index + 1 : rows.findIndex((row) => getCursorDate(row) < cursor.lastDate);
+};
+
+export const loadTransactionsPage = (options?: TransactionPageOptions): TransactionPageResult<Transaction> => {
+  const limit = Math.max(1, options?.limit || 50);
+  const data = loadData();
+  const all = [...(data.transactions || [])].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  const startIndex = Math.max(0, resolveCursorStartIndex(all, options?.cursor || null, (row) => row.date || ''));
+  const rows = all.slice(startIndex, startIndex + limit);
+  const last = rows.length ? rows[rows.length - 1] : null;
+  const nextCursor = last ? { lastId: last.id, lastDate: last.date } : null;
+  return {
+    rows,
+    nextCursor,
+    hasMore: startIndex + rows.length < all.length,
+    totalAvailable: all.length,
+  };
+};
+
+export const loadDeletedTransactionsPage = (options?: TransactionPageOptions): TransactionPageResult<DeletedTransactionRecord> => {
+  const limit = Math.max(1, options?.limit || 50);
+  const data = loadData();
+  const all = [...(data.deletedTransactions || [])].sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
+  const startIndex = Math.max(0, resolveCursorStartIndex(all, options?.cursor || null, (row) => row.deletedAt || ''));
+  const rows = all.slice(startIndex, startIndex + limit);
+  const last = rows.length ? rows[rows.length - 1] : null;
+  const nextCursor = last ? { lastId: last.id, lastDate: last.deletedAt } : null;
+  return {
+    rows,
+    nextCursor,
+    hasMore: startIndex + rows.length < all.length,
+    totalAvailable: all.length,
+  };
+};
+
 export const getNextBarcode = (category: string): string => {
   const data = loadData();
   const categoryIndex = data.categories.indexOf(category);
@@ -3725,16 +3781,17 @@ const applyPurchaseLineToProduct = async (
 
   const newProduct: Product = {
     id: `purchase-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-    barcode: `PUR-${Math.floor(100000 + Math.random() * 900000)}`,
+    barcode: line.pendingProductBarcode || line.pendingProductDraft?.barcode || `PUR-${Math.floor(100000 + Math.random() * 900000)}`,
     name: line.productName.trim(),
-    description: '',
+    description: line.pendingProductDraft?.description || '',
     buyPrice: line.unitCost,
-    sellPrice: Math.max(line.unitCost, line.unitCost * 1.2),
+    sellPrice: Math.max(line.pendingProductDraft?.sellPrice || 0, line.unitCost, line.unitCost * 1.2),
     stock: line.quantity,
     image: line.image || '',
     category: line.category || 'Uncategorized',
-    variants: line.variant ? [line.variant] : [],
-    colors: line.color ? [line.color] : [],
+    hsn: line.pendingProductDraft?.hsn || '',
+    variants: line.pendingProductDraft?.variants?.length ? line.pendingProductDraft.variants : (line.variant ? [line.variant] : []),
+    colors: line.pendingProductDraft?.colors?.length ? line.pendingProductDraft.colors : (line.color ? [line.color] : []),
     stockByVariantColor: line.variant || line.color
       ? [{ variant: line.variant || 'No Variant', color: line.color || 'No Color', stock: line.quantity, totalPurchase: line.quantity, totalSold: 0 }]
       : [],

@@ -1,6 +1,6 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { readFileSync } from 'fs';
-import path from 'path';
+import * as path from 'path';
 
 import { normalizeCreatePayload } from '../../src/modules/products/helpers/product-normalizer';
 import { createProductsTestContext, validateCreateProductPayload } from '../utils/products-test-factory';

@@ -1,0 +1,11 @@
+{
+  "name": "transactions_delete_no_compensation_v1",
+  "storeId": "store-tx-del-1",
+  "setup": {
+    "customer": { "name": "Delete None User", "phone": "+1 555 6200" },
+    "product": { "name": "Delete None Product", "barcode": "SKU-DEL-NONE", "category": "General", "buyPrice": 10, "sellPrice": 40, "stock": 5, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "sale": { "items": [{ "quantity": 2, "unitPrice": 40 }], "settlement": { "cashPaid": 40, "onlinePaid": 0, "creditDue": 40, "storeCreditUsed": 0, "paymentMethod": "mixed" } }
+  },
+  "delete": { "compensation": { "mode": "none", "amount": 0 } },
+  "expected": { "remainingTransactions": 0, "deletedCount": 1, "stock": 5, "dueBalance": 0 }
+}

@@ -379,6 +379,21 @@ export interface PurchaseOrderLine {
   sourceType: 'inventory' | 'new';
   productId?: string;
   productName: string;
+  pendingProductBarcode?: string;
+  pendingProductDraft?: {
+    barcode?: string;
+    description?: string;
+    hsn?: string;
+    variants?: string[];
+    colors?: string[];
+    sellPrice?: number;
+    pricingMatrix?: Array<{
+      variant?: string;
+      color?: string;
+      quantity: number;
+      unitCost: number;
+    }>;
+  };
   category?: string;
   image?: string;
   variant?: string;
@@ -395,6 +410,11 @@ export interface PurchaseOrder {
   partyPhone?: string;
   partyGst?: string;
   partyLocation?: string;
+  billNumber?: string;
+  billDate?: string;
+  gstPercent?: number;
+  taxableAmount?: number;
+  gstAmount?: number;
   status: 'draft' | 'ordered' | 'partially_received' | 'received' | 'cancelled';
   orderDate: string;
   notes?: string;

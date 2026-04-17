@@ -12,19 +12,21 @@ import { AuthTenantErrorCode } from '../../contracts/v1/common/error-codes';
 import { CreatePaymentTransactionDto } from '../../contracts/v1/transactions/create-payment-transaction.dto';
 import { CreateReturnTransactionDto } from '../../contracts/v1/transactions/create-return-transaction.dto';
 import { CreateSaleTransactionDto } from '../../contracts/v1/transactions/create-sale-transaction.dto';
+import { DeleteTransactionRequestDto } from '../../contracts/v1/transactions/delete-transaction-request.dto';
 import { ListTransactionsQueryDto } from '../../contracts/v1/transactions/list-transactions-query.dto';
 import {
   TransactionMutationAcceptedResponseDto,
   TransactionMutationLineItemDto,
   TransactionSettlementPayloadDto,
 } from '../../contracts/v1/transactions/mutation-common.dto';
+import { UpdateTransactionRequestDto } from '../../contracts/v1/transactions/update-transaction-request.dto';
 import {
   DeletedTransactionListResponseDto,
   TransactionAuditEventListResponseDto,
   TransactionListResponseDto,
   TransactionResponseDto,
 } from '../../contracts/v1/transactions/transaction-response.dto';
-import { TransactionLineItemSnapshotDto } from '../../contracts/v1/transactions/transaction.types';
+import { TransactionDto, TransactionLineItemSnapshotDto } from '../../contracts/v1/transactions/transaction.types';
 import { TransactionsRepository } from './transactions.repository';
 
 @Injectable()
@@ -289,6 +291,146 @@ export class TransactionsService {
     });
   }
 
+  async updateTransaction(
+    storeId: string,
+    payload: UpdateTransactionRequestDto,
+    context: { idempotencyKey: string; requestId: string },
+  ): Promise<TransactionMutationAcceptedResponseDto> {
+    this.ensureIdempotencyKey(context.idempotencyKey);
+
+    return this.withIdempotency('update_transaction', storeId, context, payload, async (mutationId) => {
+      const transaction = await this.repository.findById(storeId, payload.transactionId);
+      if (!transaction) {
+        throw new NotFoundException({
+          code: AuthTenantErrorCode.TRANSACTION_NOT_FOUND,
+          message: 'Transaction not found in this store.',
+        });
+      }
+      if (payload.expectedVersion !== transaction.version) {
+        throw new ConflictException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_VERSION_CONFLICT,
+          message: 'Transaction version conflict detected.',
+        });
+      }
+      if (transaction.type !== 'sale') {
+        throw new BadRequestException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_INVALID_OPERATION,
+          message: 'Update execution currently supports sale transactions only.',
+        });
+      }
+
+      const patch = (payload.patch ?? {}) as Record<string, unknown>;
+      const nextItems = this.toMutationItems(
+        patch.items,
+        transaction.lineItems.map((line) => ({
+          productId: line.productId,
+          variant: line.variant ?? undefined,
+          color: line.color ?? undefined,
+          quantity: line.quantity,
+          unitPrice: line.unitPrice,
+        })),
+      );
+      const nextSettlement = this.toSettlement(
+        patch.settlement,
+        transaction.settlement as TransactionSettlementPayloadDto,
+      );
+      const nextCustomerId = this.toNullableCustomerId(patch.customerId, transaction.customer.customerId ?? null);
+      const nextNote = this.toNullableNote(patch.note, transaction.metadata.note ?? null);
+      const nextSubtotal = this.computeSubtotal(nextItems);
+      this.assertSettlement(nextSettlement, nextSubtotal);
+
+      await this.reconcileStockForSaleUpdate(storeId, transaction, nextItems);
+      await this.reconcileCustomerForSaleUpdate(
+        storeId,
+        transaction.customer.customerId ?? null,
+        nextCustomerId,
+        this.toSettlement(undefined, transaction.settlement as TransactionSettlementPayloadDto),
+        nextSettlement,
+      );
+
+      const lineItems = await this.materializeSnapshotsOnly(storeId, nextItems);
+      const next = await this.repository.update(
+        storeId,
+        transaction.id,
+        {
+          transactionDate: new Date().toISOString(),
+          lineItems,
+          settlement: nextSettlement,
+          customer: {
+            customerId: nextCustomerId,
+            customerName: await this.resolveCustomerName(storeId, nextCustomerId),
+            customerPhone: await this.resolveCustomerPhone(storeId, nextCustomerId),
+          },
+          totals: {
+            subtotal: nextSubtotal,
+            discount: 0,
+            tax: 0,
+            grandTotal: nextSubtotal,
+          },
+          metadata: {
+            ...transaction.metadata,
+            note: nextNote,
+          },
+        },
+        payload.reason ?? 'transaction updated',
+      );
+      if (!next) {
+        throw new NotFoundException({
+          code: AuthTenantErrorCode.TRANSACTION_NOT_FOUND,
+          message: 'Transaction not found in this store.',
+        });
+      }
+
+      return this.appliedResponse('update_transaction', mutationId, context);
+    });
+  }
+
+  async deleteTransaction(
+    storeId: string,
+    payload: DeleteTransactionRequestDto,
+    context: { idempotencyKey: string; requestId: string },
+  ): Promise<TransactionMutationAcceptedResponseDto> {
+    this.ensureIdempotencyKey(context.idempotencyKey);
+
+    return this.withIdempotency('delete_transaction', storeId, context, payload, async (mutationId) => {
+      const transaction = await this.repository.findById(storeId, payload.transactionId);
+      if (!transaction) {
+        throw new NotFoundException({
+          code: AuthTenantErrorCode.TRANSACTION_NOT_FOUND,
+          message: 'Transaction not found in this store.',
+        });
+      }
+      if (payload.expectedVersion !== transaction.version) {
+        throw new ConflictException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_VERSION_CONFLICT,
+          message: 'Transaction version conflict detected.',
+        });
+      }
+      if (transaction.type !== 'sale') {
+        throw new BadRequestException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_INVALID_OPERATION,
+          message: 'Delete execution currently supports sale transactions only.',
+        });
+      }
+
+      await this.revertSaleStock(storeId, transaction.lineItems);
+      await this.reconcileCustomerForSaleDelete(storeId, transaction, payload.compensation);
+
+      const archived = await this.repository.archiveDelete(storeId, transaction.id, {
+        reason: payload.reason ?? null,
+        deletedBy: null,
+      });
+      if (!archived) {
+        throw new NotFoundException({
+          code: AuthTenantErrorCode.TRANSACTION_NOT_FOUND,
+          message: 'Transaction not found in this store.',
+        });
+      }
+
+      return this.appliedResponse('delete_transaction', mutationId, context);
+    });
+  }
+
   private ensureIdempotencyKey(idempotencyKey: string): void {
     if (!idempotencyKey?.trim()) {
       throw new BadRequestException({
@@ -365,7 +507,7 @@ export class TransactionsService {
   }
 
   private async withIdempotency(
-    operation: 'create_sale' | 'create_payment' | 'create_return',
+    operation: 'create_sale' | 'create_payment' | 'create_return' | 'update_transaction' | 'delete_transaction',
     storeId: string,
     context: { idempotencyKey: string; requestId: string },
     payload: unknown,
@@ -397,6 +539,311 @@ export class TransactionsService {
     const response = await execute(begin.mutationId);
     this.idempotencyService.complete(keyInput, payloadHash, response);
     return response;
+  }
+
+  private toMutationItems(value: unknown, fallback: TransactionMutationLineItemDto[]): TransactionMutationLineItemDto[] {
+    if (value === undefined) return fallback;
+    if (!Array.isArray(value)) {
+      throw new BadRequestException({
+        code: AuthTenantErrorCode.TRANSACTION_MUTATION_INVALID_REQUEST,
+        message: 'patch.items must be an array.',
+      });
+    }
+    return value.map((item) => {
+      const x = item as Record<string, unknown>;
+      return {
+        productId: String(x.productId ?? ''),
+        variant: x.variant === undefined || x.variant === null ? undefined : String(x.variant),
+        color: x.color === undefined || x.color === null ? undefined : String(x.color),
+        quantity: Number(x.quantity ?? 0),
+        unitPrice: Number(x.unitPrice ?? 0),
+      };
+    });
+  }
+
+  private toSettlement(
+    value: unknown,
+    fallback: TransactionSettlementPayloadDto,
+  ): TransactionSettlementPayloadDto {
+    if (value === undefined) return fallback;
+    const x = value as Record<string, unknown>;
+    return {
+      cashPaid: Number(x.cashPaid ?? 0),
+      onlinePaid: Number(x.onlinePaid ?? 0),
+      creditDue: Number(x.creditDue ?? 0),
+      storeCreditUsed: Number(x.storeCreditUsed ?? 0),
+      paymentMethod: String(x.paymentMethod ?? 'mixed') as TransactionSettlementPayloadDto['paymentMethod'],
+    };
+  }
+
+  private toNullableCustomerId(value: unknown, fallback: string | null): string | null {
+    if (value === undefined) return fallback;
+    if (value === null || value === '') return null;
+    return String(value);
+  }
+
+  private toNullableNote(value: unknown, fallback: string | null): string | null {
+    if (value === undefined) return fallback;
+    if (value === null || value === '') return null;
+    return String(value);
+  }
+
+  private async reconcileStockForSaleUpdate(
+    storeId: string,
+    transaction: TransactionDto,
+    nextItems: TransactionMutationLineItemDto[],
+  ): Promise<void> {
+    const oldByKey = this.aggregateLineItems(
+      transaction.lineItems.map((line) => ({
+        productId: line.productId,
+        variant: line.variant ?? undefined,
+        color: line.color ?? undefined,
+        quantity: line.quantity,
+      })),
+    );
+    const nextByKey = this.aggregateLineItems(nextItems.map((line) => ({
+      productId: line.productId,
+      variant: line.variant,
+      color: line.color,
+      quantity: line.quantity,
+    })));
+    const allKeys = new Set([...oldByKey.keys(), ...nextByKey.keys()]);
+
+    const productCache = new Map<string, { stock: number; variantStock: number }>();
+    for (const key of allKeys) {
+      const currentQty = oldByKey.get(key) ?? 0;
+      const nextQty = nextByKey.get(key) ?? 0;
+      const netDelta = currentQty - nextQty;
+      if (netDelta >= 0) continue;
+      const parsed = this.parseLineKey(key);
+      const product = await this.productsRepository.findById(storeId, parsed.productId);
+      if (!product) {
+        throw new NotFoundException({
+          code: AuthTenantErrorCode.PRODUCT_NOT_FOUND,
+          message: 'Product not found in this store.',
+        });
+      }
+      const variantStock = this.resolveVariantStock(product, parsed.variant, parsed.color);
+      productCache.set(key, { stock: product.stock, variantStock });
+      if (variantStock + currentQty + netDelta < 0 || product.stock + currentQty + netDelta < 0) {
+        throw new ConflictException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_INSUFFICIENT_STOCK,
+          message: 'Insufficient stock for one or more line items.',
+        });
+      }
+    }
+
+    for (const key of allKeys) {
+      const currentQty = oldByKey.get(key) ?? 0;
+      const nextQty = nextByKey.get(key) ?? 0;
+      const netDelta = currentQty - nextQty;
+      if (netDelta === 0) continue;
+      const parsed = this.parseLineKey(key);
+      const updated = await this.productsRepository.applyStockDelta(
+        storeId,
+        parsed.productId,
+        netDelta,
+        parsed.variant,
+        parsed.color,
+      );
+      if (!updated) {
+        throw new ConflictException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_INSUFFICIENT_STOCK,
+          message: 'Insufficient stock for one or more line items.',
+        });
+      }
+    }
+  }
+
+  private async reconcileCustomerForSaleUpdate(
+    storeId: string,
+    oldCustomerId: string | null,
+    nextCustomerId: string | null,
+    oldSettlement: TransactionSettlementPayloadDto,
+    nextSettlement: TransactionSettlementPayloadDto,
+  ): Promise<void> {
+    const deltas = new Map<string, { dueDelta: number; storeCreditDelta: number }>();
+    const addDelta = (customerId: string | null, dueDelta: number, storeCreditDelta: number) => {
+      if (!customerId) return;
+      const current = deltas.get(customerId) ?? { dueDelta: 0, storeCreditDelta: 0 };
+      deltas.set(customerId, {
+        dueDelta: current.dueDelta + dueDelta,
+        storeCreditDelta: current.storeCreditDelta + storeCreditDelta,
+      });
+    };
+    addDelta(oldCustomerId, -oldSettlement.creditDue, oldSettlement.storeCreditUsed);
+    addDelta(nextCustomerId, nextSettlement.creditDue, -nextSettlement.storeCreditUsed);
+
+    for (const [customerId, delta] of deltas.entries()) {
+      const customer = await this.customersRepository.findById(storeId, customerId);
+      if (!customer) {
+        throw new NotFoundException({
+          code: AuthTenantErrorCode.CUSTOMER_NOT_FOUND,
+          message: 'Customer not found in this store.',
+        });
+      }
+      if (customer.dueBalance + delta.dueDelta < 0 || customer.storeCreditBalance + delta.storeCreditDelta < 0) {
+        throw new BadRequestException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_INVALID_REQUEST,
+          message: 'Customer balance mutation would result in an invalid state.',
+        });
+      }
+    }
+
+    for (const [customerId, delta] of deltas.entries()) {
+      if (delta.dueDelta === 0 && delta.storeCreditDelta === 0) continue;
+      const updated = await this.customersRepository.applyBalanceDelta(storeId, customerId, delta);
+      if (!updated) {
+        throw new BadRequestException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_INVALID_REQUEST,
+          message: 'Customer balance mutation would result in an invalid state.',
+        });
+      }
+    }
+  }
+
+  private async revertSaleStock(storeId: string, lineItems: TransactionDto['lineItems']): Promise<void> {
+    for (const line of lineItems) {
+      const updated = await this.productsRepository.applyStockDelta(
+        storeId,
+        line.productId,
+        line.quantity,
+        line.variant ?? null,
+        line.color ?? null,
+      );
+      if (!updated) {
+        throw new ConflictException({
+          code: AuthTenantErrorCode.TRANSACTION_MUTATION_INSUFFICIENT_STOCK,
+          message: 'Insufficient stock for one or more line items.',
+        });
+      }
+    }
+  }
+
+  private async reconcileCustomerForSaleDelete(
+    storeId: string,
+    transaction: TransactionDto,
+    compensation: DeleteTransactionRequestDto['compensation'],
+  ): Promise<void> {
+    const customerId = transaction.customer.customerId;
+    if (!customerId) return;
+    const customer = await this.customersRepository.findById(storeId, customerId);
+    if (!customer) {
+      throw new NotFoundException({
+        code: AuthTenantErrorCode.CUSTOMER_NOT_FOUND,
+        message: 'Customer not found in this store.',
+      });
+    }
+
+    const cappedAmount = Math.min(
+      transaction.totals.grandTotal,
+      compensation.amount ?? transaction.totals.grandTotal,
+    );
+    const dueDelta = -transaction.settlement.creditDue;
+    let storeCreditDelta = transaction.settlement.storeCreditUsed;
+    if (compensation.mode === 'store_credit') {
+      storeCreditDelta += cappedAmount;
+    }
+    if (customer.dueBalance + dueDelta < 0 || customer.storeCreditBalance + storeCreditDelta < 0) {
+      throw new BadRequestException({
+        code: AuthTenantErrorCode.TRANSACTION_MUTATION_INVALID_REQUEST,
+        message: 'Customer balance mutation would result in an invalid state.',
+      });
+    }
+
+    const updated = await this.customersRepository.applyBalanceDelta(storeId, customerId, {
+      dueDelta,
+      storeCreditDelta,
+    });
+    if (!updated) {
+      throw new BadRequestException({
+        code: AuthTenantErrorCode.TRANSACTION_MUTATION_INVALID_REQUEST,
+        message: 'Customer balance mutation would result in an invalid state.',
+      });
+    }
+  }
+
+  private aggregateLineItems(
+    rows: Array<{ productId: string; variant?: string; color?: string; quantity: number }>,
+  ): Map<string, number> {
+    const map = new Map<string, number>();
+    for (const row of rows) {
+      const key = this.lineKey(row.productId, row.variant, row.color);
+      map.set(key, (map.get(key) ?? 0) + row.quantity);
+    }
+    return map;
+  }
+
+  private lineKey(productId: string, variant?: string | null, color?: string | null): string {
+    return `${productId}::${variant ?? ''}::${color ?? ''}`;
+  }
+
+  private parseLineKey(key: string): { productId: string; variant: string | null; color: string | null } {
+    const [productId, variant, color] = key.split('::');
+    return {
+      productId,
+      variant: variant || null,
+      color: color || null,
+    };
+  }
+
+  private resolveVariantStock(product: any, variant: string | null, color: string | null): number {
+    if (!variant && !color) return product.stock;
+    const row = product.stockByVariantColor.find(
+      (item: any) => item.variant === (variant ?? '') && item.color === (color ?? ''),
+    );
+    return row?.stock ?? product.stock;
+  }
+
+  private async materializeSnapshotsOnly(
+    storeId: string,
+    items: TransactionMutationLineItemDto[],
+  ): Promise<TransactionLineItemSnapshotDto[]> {
+    const snapshots: TransactionLineItemSnapshotDto[] = [];
+    for (const item of items) {
+      const product = await this.productsRepository.findById(storeId, item.productId);
+      if (!product) {
+        throw new NotFoundException({
+          code: AuthTenantErrorCode.PRODUCT_NOT_FOUND,
+          message: 'Product not found in this store.',
+        });
+      }
+      snapshots.push({
+        productId: product.id,
+        productName: product.name,
+        sku: product.barcode,
+        variant: item.variant ?? null,
+        color: item.color ?? null,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        lineSubtotal: item.quantity * item.unitPrice,
+      });
+    }
+    return snapshots;
+  }
+
+  private async resolveCustomerName(storeId: string, customerId: string | null): Promise<string | null> {
+    if (!customerId) return null;
+    const customer = await this.customersRepository.findById(storeId, customerId);
+    if (!customer) {
+      throw new NotFoundException({
+        code: AuthTenantErrorCode.CUSTOMER_NOT_FOUND,
+        message: 'Customer not found in this store.',
+      });
+    }
+    return customer.name;
+  }
+
+  private async resolveCustomerPhone(storeId: string, customerId: string | null): Promise<string | null> {
+    if (!customerId) return null;
+    const customer = await this.customersRepository.findById(storeId, customerId);
+    if (!customer) {
+      throw new NotFoundException({
+        code: AuthTenantErrorCode.CUSTOMER_NOT_FOUND,
+        message: 'Customer not found in this store.',
+      });
+    }
+    return customer.phone;
   }
 
   private appliedResponse(

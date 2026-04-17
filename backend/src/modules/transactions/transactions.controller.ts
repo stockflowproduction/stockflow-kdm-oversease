@@ -14,8 +14,10 @@ import { TenantGuard } from '../../common/guards/tenant.guard';
 import { CreatePaymentTransactionDto } from '../../contracts/v1/transactions/create-payment-transaction.dto';
 import { CreateReturnTransactionDto } from '../../contracts/v1/transactions/create-return-transaction.dto';
 import { CreateSaleTransactionDto } from '../../contracts/v1/transactions/create-sale-transaction.dto';
+import { DeleteTransactionRequestDto } from '../../contracts/v1/transactions/delete-transaction-request.dto';
 import { ListTransactionsQueryDto } from '../../contracts/v1/transactions/list-transactions-query.dto';
 import { TransactionMutationAcceptedResponseDto } from '../../contracts/v1/transactions/mutation-common.dto';
+import { UpdateTransactionRequestDto } from '../../contracts/v1/transactions/update-transaction-request.dto';
 import {
   DeletedTransactionListResponseDto,
   TransactionAuditEventListResponseDto,
@@ -75,6 +77,34 @@ export class TransactionsController {
     @Headers('x-request-id') requestId: string | undefined,
   ): Promise<TransactionMutationAcceptedResponseDto> {
     return this.transactionsService.createReturn(tenantContext.storeId, payload, {
+      idempotencyKey: xIdempotencyKey ?? idempotencyKey ?? '',
+      requestId: requestId ?? 'request-unknown',
+    });
+  }
+
+  @Post('update')
+  updateTransaction(
+    @CurrentTenantContext() tenantContext: { storeId: string },
+    @Body() payload: UpdateTransactionRequestDto,
+    @Headers('x-idempotency-key') xIdempotencyKey: string | undefined,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Headers('x-request-id') requestId: string | undefined,
+  ): Promise<TransactionMutationAcceptedResponseDto> {
+    return this.transactionsService.updateTransaction(tenantContext.storeId, payload, {
+      idempotencyKey: xIdempotencyKey ?? idempotencyKey ?? '',
+      requestId: requestId ?? 'request-unknown',
+    });
+  }
+
+  @Post('delete')
+  deleteTransaction(
+    @CurrentTenantContext() tenantContext: { storeId: string },
+    @Body() payload: DeleteTransactionRequestDto,
+    @Headers('x-idempotency-key') xIdempotencyKey: string | undefined,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Headers('x-request-id') requestId: string | undefined,
+  ): Promise<TransactionMutationAcceptedResponseDto> {
+    return this.transactionsService.deleteTransaction(tenantContext.storeId, payload, {
       idempotencyKey: xIdempotencyKey ?? idempotencyKey ?? '',
       requestId: requestId ?? 'request-unknown',
     });

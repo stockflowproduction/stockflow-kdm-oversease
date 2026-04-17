@@ -1,0 +1,20 @@
+{
+  "name": "transactions_update_line_identity_change_v1",
+  "storeId": "store-tx-upd-4",
+  "setup": {
+    "customer": { "name": "Line Shift User", "phone": "+1 555 6104" },
+    "productA": { "name": "Line A", "barcode": "SKU-UPD-LA", "category": "General", "buyPrice": 10, "sellPrice": 40, "stock": 3, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "productB": { "name": "Line B", "barcode": "SKU-UPD-LB", "category": "General", "buyPrice": 10, "sellPrice": 40, "stock": 4, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "sale": {
+      "items": [{ "product": "A", "quantity": 1, "unitPrice": 40 }],
+      "settlement": { "cashPaid": 40, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" }
+    }
+  },
+  "update": {
+    "patch": {
+      "items": [{ "product": "B", "quantity": 1, "unitPrice": 40 }],
+      "settlement": { "cashPaid": 40, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" }
+    }
+  },
+  "expected": { "stockA": 3, "stockB": 3, "status": "applied" }
+}

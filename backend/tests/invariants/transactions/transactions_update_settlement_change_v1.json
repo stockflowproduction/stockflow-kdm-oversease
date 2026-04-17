@@ -1,0 +1,18 @@
+{
+  "name": "transactions_update_settlement_change_v1",
+  "storeId": "store-tx-upd-2",
+  "setup": {
+    "customer": { "name": "Update Settlement User", "phone": "+1 555 6101" },
+    "product": { "name": "Settlement Product", "barcode": "SKU-UPD-SET", "category": "General", "buyPrice": 10, "sellPrice": 50, "stock": 6, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "sale": {
+      "items": [{ "quantity": 1, "unitPrice": 50 }],
+      "settlement": { "cashPaid": 20, "onlinePaid": 0, "creditDue": 30, "storeCreditUsed": 0, "paymentMethod": "mixed" }
+    }
+  },
+  "update": {
+    "patch": {
+      "settlement": { "cashPaid": 50, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" }
+    }
+  },
+  "expected": { "dueBalance": 0, "status": "applied" }
+}

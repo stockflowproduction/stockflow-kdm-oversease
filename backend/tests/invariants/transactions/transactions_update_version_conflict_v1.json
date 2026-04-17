@@ -1,0 +1,14 @@
+{
+  "name": "transactions_update_version_conflict_v1",
+  "storeId": "store-tx-upd-6",
+  "setup": {
+    "customer": { "name": "Version User", "phone": "+1 555 6106" },
+    "product": { "name": "Version Product", "barcode": "SKU-UPD-VER", "category": "General", "buyPrice": 10, "sellPrice": 50, "stock": 3, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "sale": {
+      "items": [{ "quantity": 1, "unitPrice": 50 }],
+      "settlement": { "cashPaid": 50, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" }
+    }
+  },
+  "update": { "patch": { "note": "stale update" }, "expectedVersionOffset": 1 },
+  "expectedErrorCode": "TRANSACTION_MUTATION_VERSION_CONFLICT"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "transactions_update_sale_quantity_change_v1",
+  "storeId": "store-tx-upd-1",
+  "setup": {
+    "customer": { "name": "Update Qty User", "phone": "+1 555 6100" },
+    "product": { "name": "Qty Product", "barcode": "SKU-UPD-QTY", "category": "General", "buyPrice": 10, "sellPrice": 50, "stock": 10, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "sale": {
+      "items": [{ "quantity": 2, "unitPrice": 50 }],
+      "settlement": { "cashPaid": 60, "onlinePaid": 0, "creditDue": 40, "storeCreditUsed": 0, "paymentMethod": "mixed" }
+    }
+  },
+  "update": {
+    "patch": {
+      "items": [{ "quantity": 3, "unitPrice": 50 }],
+      "settlement": { "cashPaid": 80, "onlinePaid": 0, "creditDue": 70, "storeCreditUsed": 0, "paymentMethod": "mixed" }
+    }
+  },
+  "expected": { "stock": 7, "dueBalance": 70, "status": "applied" }
+}

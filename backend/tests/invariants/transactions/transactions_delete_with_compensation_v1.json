@@ -1,0 +1,11 @@
+{
+  "name": "transactions_delete_with_compensation_v1",
+  "storeId": "store-tx-del-2",
+  "setup": {
+    "customer": { "name": "Delete Comp User", "phone": "+1 555 6201" },
+    "product": { "name": "Delete Comp Product", "barcode": "SKU-DEL-COMP", "category": "General", "buyPrice": 10, "sellPrice": 60, "stock": 5, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "sale": { "items": [{ "quantity": 1, "unitPrice": 60 }], "settlement": { "cashPaid": 20, "onlinePaid": 0, "creditDue": 40, "storeCreditUsed": 0, "paymentMethod": "mixed" } }
+  },
+  "delete": { "compensation": { "mode": "store_credit", "amount": 30 } },
+  "expected": { "storeCreditBalance": 30, "dueBalance": 0 }
+}

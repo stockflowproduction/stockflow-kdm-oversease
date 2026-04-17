@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import path from 'path';
+import * as path from 'path';
 
 import { AuthTenantErrorCode } from '../../src/contracts/v1/common/error-codes';
 import { createTransactionsTestContext } from '../utils/transactions-test-factory';
@@ -51,6 +51,8 @@ describe('Transactions create-path invariants', () => {
 
     const customer = await ctx.customersService.create(fixture.storeId, {
       ...fixture.customer,
+    });
+    await ctx.customersRepository.update(fixture.storeId, customer.id, {
       storeCreditBalance: 30,
     });
     const createdProduct = await ctx.productsService.create(fixture.storeId, fixture.products[0]);
@@ -92,8 +94,8 @@ describe('Transactions create-path invariants', () => {
 
     const customer = await ctx.customersService.create(fixture.storeId, {
       ...fixture.customer,
-      email: null,
-      notes: null,
+      email: undefined,
+      notes: undefined,
     });
     await ctx.customersRepository.update(fixture.storeId, customer.id, {
       dueBalance: fixture.customer.dueBalance,
@@ -130,8 +132,8 @@ describe('Transactions create-path invariants', () => {
       const customer = await ctx.customersService.create(fixture.storeId, {
         name: 'Return User',
         phone: '+1 555 3000',
-        email: null,
-        notes: null,
+        email: undefined,
+        notes: undefined,
       });
       await ctx.customersRepository.update(fixture.storeId, customer.id, {
         dueBalance: 100,
@@ -277,8 +279,8 @@ describe('Transactions create-path invariants', () => {
     const customer = await ctx.customersService.create(fixture.storeId, {
       name: 'Conflict User',
       phone: '+1 555 3010',
-      email: null,
-      notes: null,
+      email: undefined,
+      notes: undefined,
     });
 
     const product = await ctx.productsService.create(fixture.storeId, {
@@ -335,8 +337,8 @@ describe('Transactions create-path invariants', () => {
     const customer = await ctx.customersService.create(customerFx.storeId, {
       name: 'Effects User',
       phone: '+1 555 3200',
-      email: null,
-      notes: null,
+      email: undefined,
+      notes: undefined,
     });
     await ctx.customersRepository.update(customerFx.storeId, customer.id, { storeCreditBalance: 20 });
 
@@ -381,7 +383,10 @@ describe('Transactions create-path invariants', () => {
         items: [{ productId: product.id, quantity: 1, unitPrice: 50 }],
         returnHandling: { mode: 'store_credit', amount: 50 },
         settlement: {
-          ...financeFx.expected.saleSettlement,
+          cashPaid: 50,
+          onlinePaid: 0,
+          creditDue: 0,
+          storeCreditUsed: 0,
           paymentMethod: 'return',
         },
       },
@@ -392,9 +397,11 @@ describe('Transactions create-path invariants', () => {
     expect(productAfter.stock).toBe(10 + stockFx.expected.saleStockDelta + stockFx.expected.returnStockDelta);
 
     const txs = await ctx.transactionsService.list(customerFx.storeId, {});
-    expect(txs.items.some((t) => t.settlement.cashPaid === financeFx.expected.saleSettlement.cashPaid)).toBe(
-      true,
-    );
+    expect(
+      txs.items.some(
+        (t) => t.type === 'sale' && t.settlement.creditDue === customerFx.expected.dueDelta,
+      ),
+    ).toBe(true);
     expect(txs.items.some((t) => t.type === 'return')).toBe(true);
 
     await expect(

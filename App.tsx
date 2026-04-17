@@ -1,14 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { HashRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
-import Admin from './pages/Admin';
-import Sales from './pages/Sales';
-import Reports from './pages/Reports';
-import Transactions from './pages/Transactions';
-import Customers from './pages/Customers';
-import Settings from './pages/Settings';
-import Finance from './pages/Finance';
-import FreightBooking from './pages/FreightBooking';
-import PurchasePanel from './pages/PurchasePanel';
 import Auth from './pages/Auth';
 import VerificationRequired from './pages/VerificationRequired';
 import { getCurrentUser, logout } from './services/auth';
@@ -17,6 +8,16 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
+
+const Admin = lazy(() => import('./pages/Admin'));
+const Sales = lazy(() => import('./pages/Sales'));
+const Reports = lazy(() => import('./pages/Reports'));
+const Transactions = lazy(() => import('./pages/Transactions'));
+const Customers = lazy(() => import('./pages/Customers'));
+const Settings = lazy(() => import('./pages/Settings'));
+const Finance = lazy(() => import('./pages/Finance'));
+const FreightBooking = lazy(() => import('./pages/FreightBooking'));
+const PurchasePanel = lazy(() => import('./pages/PurchasePanel'));
 
 // --- Components ---
 
@@ -283,22 +284,24 @@ export default function App() {
         {/* Main Content */}
         <main className="flex-1 overflow-auto bg-background">
           <div className="h-full p-4 md:p-8 pb-20 md:pb-8 max-w-7xl mx-auto">
-            <Routes>
-              <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />
-              <Route path="/transactions" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Transactions /></ProtectedRoute>} />
-              <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
-              <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
-              <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
-              <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
-              <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />
-              <Route path="/purchase-panel" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><PurchasePanel /></ProtectedRoute>} />
-              
-              {/* Unprotected Route (POS) */}
-              <Route path="/sales" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Sales /></ProtectedRoute>} />
-              
-              <Route path="/verify-email" element={<VerificationRequired email={currentEmail || undefined} />} />
-              <Route path="*" element={<Navigate to="/" />} />
-            </Routes>
+            <Suspense fallback={<div className="h-full flex items-center justify-center text-sm text-muted-foreground">Loading page…</div>}>
+              <Routes>
+                <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />
+                <Route path="/transactions" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Transactions /></ProtectedRoute>} />
+                <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
+                <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
+                <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
+                <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
+                <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />
+                <Route path="/purchase-panel" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><PurchasePanel /></ProtectedRoute>} />
+                
+                {/* Unprotected Route (POS) */}
+                <Route path="/sales" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Sales /></ProtectedRoute>} />
+                
+                <Route path="/verify-email" element={<VerificationRequired email={currentEmail || undefined} />} />
+                <Route path="*" element={<Navigate to="/" />} />
+              </Routes>
+            </Suspense>
           </div>
         </main>
       </div>

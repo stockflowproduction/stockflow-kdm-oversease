@@ -15,6 +15,7 @@ import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileT
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 
 export default function Customers() {
+  const CUSTOMERS_PAGE_SIZE = 15;
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
@@ -74,6 +75,7 @@ export default function Customers() {
   const [filterType, setFilterType] = useState('all_time');
   const [sortBy, setSortBy] = useState<'spend' | 'due' | 'lastVisit'>('spend');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const [customerPage, setCustomerPage] = useState(1);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -167,6 +169,19 @@ export default function Customers() {
     const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
   }, [canonicalCustomers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold]);
+  const customerTotalPages = Math.max(1, Math.ceil(filteredData.displayCustomers.length / CUSTOMERS_PAGE_SIZE));
+  const paginatedCustomers = useMemo(
+    () => filteredData.displayCustomers.slice((customerPage - 1) * CUSTOMERS_PAGE_SIZE, customerPage * CUSTOMERS_PAGE_SIZE),
+    [filteredData.displayCustomers, customerPage]
+  );
+
+  useEffect(() => {
+    setCustomerPage(1);
+  }, [searchQuery, filterType, sortBy, sortOrder]);
+
+  useEffect(() => {
+    setCustomerPage((prev) => Math.min(prev, customerTotalPages));
+  }, [customerTotalPages]);
 
   const viewingCustomerCanonical = useMemo(() => {
     if (!viewingCustomer) return null;
@@ -784,7 +799,7 @@ export default function Customers() {
             </tr>
           </thead>
           <tbody>
-            {filteredData.displayCustomers.map((customer) => (
+            {paginatedCustomers.map((customer) => (
               <tr key={customer.id} className="border-t hover:bg-muted/20">
                 <td className="p-3">
                   <input
@@ -821,6 +836,13 @@ export default function Customers() {
           </tbody>
         </table>
       </div>
+      {filteredData.displayCustomers.length > CUSTOMERS_PAGE_SIZE && (
+        <div className="mt-3 flex items-center justify-between rounded-lg border bg-card p-2">
+          <Button variant="outline" size="sm" onClick={() => setCustomerPage((prev) => Math.max(1, prev - 1))} disabled={customerPage === 1}>Prev</Button>
+          <span className="text-xs text-muted-foreground">Page {customerPage} of {customerTotalPages}</span>
+          <Button variant="outline" size="sm" onClick={() => setCustomerPage((prev) => Math.min(customerTotalPages, prev + 1))} disabled={customerPage === customerTotalPages}>Next</Button>
+        </div>
+      )}
 
       {isAddModalOpen && (
           <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-4">

@@ -4,7 +4,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
-import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction } from '../services/storage';
+import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, TransactionPageCursor } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
 import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, Trash2 } from 'lucide-react';
@@ -15,6 +15,10 @@ import { downloadTransactionsData, downloadTransactionsTemplate, importHistorica
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 
 export default function Transactions() {
+  const TRANSACTIONS_ROWS_PER_PAGE = 25;
+  const DELETED_ROWS_PER_PAGE = 25;
+  const TRANSACTIONS_WINDOW_BATCH_SIZE = 200;
+  const DELETED_WINDOW_BATCH_SIZE = 100;
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [deletedTransactions, setDeletedTransactions] = useState<DeletedTransactionRecord[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -61,6 +65,14 @@ export default function Transactions() {
   const [deleteTargetTx, setDeleteTargetTx] = useState<Transaction | null>(null);
   const [deleteReason, setDeleteReason] = useState<'customer_cancelled' | 'created_by_mistake' | 'other'>('customer_cancelled');
   const [deleteReasonOther, setDeleteReasonOther] = useState('');
+  const [transactionPage, setTransactionPage] = useState(1);
+  const [deletedPage, setDeletedPage] = useState(1);
+  const [transactionsWindowCursor, setTransactionsWindowCursor] = useState<TransactionPageCursor>(null);
+  const [deletedWindowCursor, setDeletedWindowCursor] = useState<TransactionPageCursor>(null);
+  const [hasMoreTransactionsWindow, setHasMoreTransactionsWindow] = useState(false);
+  const [hasMoreDeletedWindow, setHasMoreDeletedWindow] = useState(false);
+  const [isTransactionWindowed, setIsTransactionWindowed] = useState(true);
+  const [isDeletedWindowed, setIsDeletedWindowed] = useState(true);
 
   const formatRoleLabel = (role?: string) => {
     const source = (role || 'Admin').trim();
@@ -83,11 +95,19 @@ export default function Transactions() {
   useEffect(() => {
     const refreshData = () => {
       try {
+        const txWindow = loadTransactionsPage({ limit: TRANSACTIONS_WINDOW_BATCH_SIZE });
+        const deletedWindow = loadDeletedTransactionsPage({ limit: DELETED_WINDOW_BATCH_SIZE });
         const data = loadData();
-        setTransactions(data.transactions);
-        setDeletedTransactions(data.deletedTransactions || []);
+        setTransactions(txWindow.rows);
+        setDeletedTransactions(deletedWindow.rows);
         setCustomers(data.customers);
         setProducts(data.products || []);
+        setTransactionsWindowCursor(txWindow.nextCursor);
+        setDeletedWindowCursor(deletedWindow.nextCursor);
+        setHasMoreTransactionsWindow(txWindow.hasMore);
+        setHasMoreDeletedWindow(deletedWindow.hasMore);
+        setIsTransactionWindowed(txWindow.hasMore);
+        setIsDeletedWindowed(deletedWindow.hasMore);
         setLoadError(null);
       } catch (error) {
         console.error('[transactions] load failed', error);
@@ -105,6 +125,46 @@ export default function Transactions() {
         window.removeEventListener('local-storage-update', refreshData);
     };
   }, []);
+
+  const loadOlderTransactionsWindow = () => {
+    if (!transactionsWindowCursor || !hasMoreTransactionsWindow) return;
+    const next = loadTransactionsPage({ limit: TRANSACTIONS_WINDOW_BATCH_SIZE, cursor: transactionsWindowCursor });
+    setTransactions((prev) => {
+      const existing = new Set(prev.map((tx) => tx.id));
+      const merged = [...prev];
+      next.rows.forEach((row) => {
+        if (!existing.has(row.id)) merged.push(row);
+      });
+      return merged;
+    });
+    setTransactionsWindowCursor(next.nextCursor);
+    setHasMoreTransactionsWindow(next.hasMore);
+    if (!next.hasMore) setIsTransactionWindowed(false);
+  };
+
+  const loadOlderDeletedWindow = () => {
+    if (!deletedWindowCursor || !hasMoreDeletedWindow) return;
+    const next = loadDeletedTransactionsPage({ limit: DELETED_WINDOW_BATCH_SIZE, cursor: deletedWindowCursor });
+    setDeletedTransactions((prev) => {
+      const existing = new Set(prev.map((row) => row.id));
+      const merged = [...prev];
+      next.rows.forEach((row) => {
+        if (!existing.has(row.id)) merged.push(row);
+      });
+      return merged;
+    });
+    setDeletedWindowCursor(next.nextCursor);
+    setHasMoreDeletedWindow(next.hasMore);
+    if (!next.hasMore) setIsDeletedWindowed(false);
+  };
+
+  const loadAllTransactionsForExport = () => {
+    const data = loadData();
+    setTransactions(data.transactions);
+    setTransactionsWindowCursor(null);
+    setHasMoreTransactionsWindow(false);
+    setIsTransactionWindowed(false);
+  };
 
   const filteredTransactions = useMemo(() => {
       const now = new Date();
@@ -222,9 +282,57 @@ export default function Transactions() {
     () => transactions.filter(tx => selectedTransactionIds.includes(tx.id)),
     [transactions, selectedTransactionIds]
   );
+  const transactionTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredTransactions.length / TRANSACTIONS_ROWS_PER_PAGE)),
+    [filteredTransactions.length]
+  );
+  const paginatedTransactions = useMemo(() => {
+    const start = (transactionPage - 1) * TRANSACTIONS_ROWS_PER_PAGE;
+    return filteredTransactions.slice(start, start + TRANSACTIONS_ROWS_PER_PAGE);
+  }, [filteredTransactions, transactionPage]);
+  const paginatedTransactionRows = useMemo(() => paginatedTransactions.map((tx) => {
+    const isSale = tx.type === 'sale';
+    const isReturn = tx.type === 'return';
+    const isPayment = tx.type === 'payment';
+    const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
+    return {
+      tx,
+      isSale,
+      isReturn,
+      isPayment,
+      itemCount,
+      typeLabel: isSale ? 'SALE' : isReturn ? 'RETURN' : 'PAYMENT',
+      typeVariant: isSale ? 'success' : isReturn ? 'destructive' : 'secondary',
+      amountClass: isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700',
+    };
+  }), [paginatedTransactions]);
+  const deletedTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(deletedTransactions.length / DELETED_ROWS_PER_PAGE)),
+    [deletedTransactions.length]
+  );
+  const paginatedDeletedTransactions = useMemo(() => {
+    const start = (deletedPage - 1) * DELETED_ROWS_PER_PAGE;
+    return deletedTransactions.slice(start, start + DELETED_ROWS_PER_PAGE);
+  }, [deletedTransactions, deletedPage]);
   const allFilteredTransactionsSelected = filteredTransactions.length > 0 && filteredTransactions.every(tx => selectedTransactionIds.includes(tx.id));
   const isBatchEditing = batchEditTransactionIds.length > 0;
   const remainingBatchTransactions = isBatchEditing ? Math.max(0, batchEditTransactionIds.length - batchEditTransactionIndex - 1) : 0;
+
+  useEffect(() => {
+    setTransactionPage(1);
+  }, [filterType, customStart, customEnd]);
+
+  useEffect(() => {
+    setDeletedPage(1);
+  }, [showBin]);
+
+  useEffect(() => {
+    setTransactionPage((prev) => Math.min(prev, transactionTotalPages));
+  }, [transactionTotalPages]);
+
+  useEffect(() => {
+    setDeletedPage((prev) => Math.min(prev, deletedTotalPages));
+  }, [deletedTotalPages]);
   const toSafeMoney = (value: unknown) => {
     const num = Number(value);
     if (!Number.isFinite(num)) return 0;
@@ -877,6 +985,12 @@ export default function Transactions() {
                 <Calendar className="w-3.5 h-3.5" />
                 {filteredTransactions.length} records
             </Badge>
+            {!showBin && hasMoreTransactionsWindow && (
+              <Button variant="outline" onClick={loadOlderTransactionsWindow} className="h-9 text-sm">Load Older Transactions</Button>
+            )}
+            {showBin && hasMoreDeletedWindow && (
+              <Button variant="outline" onClick={loadOlderDeletedWindow} className="h-9 text-sm">Load Older Bin Rows</Button>
+            )}
             <Button variant={showBin ? 'default' : 'outline'} onClick={() => setShowBin(prev => !prev)} className="h-9 text-sm">
               <Trash2 className="w-4 h-4 mr-1" />
               {showBin ? 'Back to Active' : `Bin (${deletedTransactions.length})`}
@@ -885,6 +999,9 @@ export default function Transactions() {
             <Button onClick={() => { setExportType('summary'); setIsExportModalOpen(true); }} variant="outline" size="icon" title="Download Report">
                 <Download className="w-4 h-4" />
             </Button>
+            {!showBin && isTransactionWindowed && (
+              <Button variant="outline" onClick={loadAllTransactionsForExport} className="h-9 text-sm">Load All for Export</Button>
+            )}
 
             <Button variant="outline" onClick={() => downloadTransactionsData()} className="h-9 text-sm">Download Data</Button>
             {selectedTransactionIds.length > 0 && (
@@ -906,6 +1023,16 @@ export default function Transactions() {
             </Select>
         </div>
       </div>
+      {!showBin && isTransactionWindowed && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Showing a recent transactions window for performance. Load older pages or use <span className="font-semibold">Load All for Export</span> for full-history exports.
+        </div>
+      )}
+      {showBin && isDeletedWindowed && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+          Bin is currently showing a recent window. Use <span className="font-semibold">Load Older Bin Rows</span> to extend history.
+        </div>
+      )}
 
       {/* Stats Cards - Redesigned for Mobile Overflow & Aesthetics */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
@@ -1022,7 +1149,7 @@ export default function Transactions() {
                       </tr>
                     </thead>
                     <tbody className="divide-y">
-                      {deletedTransactions.map(record => (
+                      {paginatedDeletedTransactions.map(record => (
                         <tr key={record.id} className="hover:bg-muted/30 transition-colors">
                           <td className="px-4 py-3">{new Date(record.deletedAt).toLocaleString()}</td>
                           <td className="px-4 py-3 uppercase font-semibold text-xs">{record.type}</td>
@@ -1045,6 +1172,13 @@ export default function Transactions() {
                     </tbody>
                   </table>
                 </div>
+                {deletedTransactions.length > DELETED_ROWS_PER_PAGE && (
+                  <div className="flex items-center justify-between border-t bg-card px-4 py-2">
+                    <Button size="sm" variant="outline" onClick={() => setDeletedPage((prev) => Math.max(1, prev - 1))} disabled={deletedPage <= 1}>Previous</Button>
+                    <div className="text-xs text-muted-foreground">Page {deletedPage} of {deletedTotalPages}</div>
+                    <Button size="sm" variant="outline" onClick={() => setDeletedPage((prev) => Math.min(deletedTotalPages, prev + 1))} disabled={deletedPage >= deletedTotalPages}>Next</Button>
+                  </div>
+                )}
               </Card>
             )
         ) : filteredTransactions.length === 0 ? (
@@ -1080,14 +1214,7 @@ export default function Transactions() {
                             </tr>
                         </thead>
                         <tbody className="divide-y">
-                            {filteredTransactions.map(tx => {
-                                const isSale = tx.type === 'sale';
-                                const isReturn = tx.type === 'return';
-                                const isPayment = tx.type === 'payment';
-                                const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
-                                const typeLabel = isSale ? 'SALE' : isReturn ? 'RETURN' : 'PAYMENT';
-                                const typeVariant = isSale ? 'success' : isReturn ? 'destructive' : 'secondary';
-                                const amountClass = isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700';
+                            {paginatedTransactionRows.map(({ tx, isSale, isReturn, isPayment, itemCount, typeLabel, typeVariant, amountClass }) => {
                                 return (
                                     <tr key={tx.id} className="hover:bg-muted/30 transition-colors group">
                                         <td className="px-4 py-3">
@@ -1158,6 +1285,13 @@ export default function Transactions() {
                         </tbody>
                     </table>
                 </div>
+                {filteredTransactions.length > TRANSACTIONS_ROWS_PER_PAGE && (
+                  <div className="flex items-center justify-between border-t bg-card px-4 py-2">
+                    <Button size="sm" variant="outline" onClick={() => setTransactionPage((prev) => Math.max(1, prev - 1))} disabled={transactionPage <= 1}>Previous</Button>
+                    <div className="text-xs text-muted-foreground">Page {transactionPage} of {transactionTotalPages}</div>
+                    <Button size="sm" variant="outline" onClick={() => setTransactionPage((prev) => Math.min(transactionTotalPages, prev + 1))} disabled={transactionPage >= transactionTotalPages}>Next</Button>
+                  </div>
+                )}
             </Card>
         ) : (
             <div className={`grid grid-cols-1 gap-4 ${
@@ -1165,11 +1299,7 @@ export default function Transactions() {
                 ? 'sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' 
                 : 'sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'
             }`}>
-                {filteredTransactions.map(tx => {
-                    const isSale = tx.type === 'sale';
-                    const isReturn = tx.type === 'return';
-                    const isPayment = tx.type === 'payment';
-                    const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
+                {paginatedTransactionRows.map(({ tx, isSale, isReturn, isPayment, itemCount }) => {
                     const cardBorder = isSale ? 'bg-green-500' : isReturn ? 'bg-red-500' : 'bg-emerald-500';
                     const amountClass = isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700';
                     const badgeVariant = isSale ? 'success' : isReturn ? 'destructive' : 'secondary';
@@ -1295,6 +1425,13 @@ export default function Transactions() {
                         </Card>
                     );
                 })}
+                {filteredTransactions.length > TRANSACTIONS_ROWS_PER_PAGE && (
+                  <div className="col-span-full flex items-center justify-between rounded-lg border bg-card px-4 py-2">
+                    <Button size="sm" variant="outline" onClick={() => setTransactionPage((prev) => Math.max(1, prev - 1))} disabled={transactionPage <= 1}>Previous</Button>
+                    <div className="text-xs text-muted-foreground">Page {transactionPage} of {transactionTotalPages}</div>
+                    <Button size="sm" variant="outline" onClick={() => setTransactionPage((prev) => Math.min(transactionTotalPages, prev + 1))} disabled={transactionPage >= transactionTotalPages}>Next</Button>
+                  </div>
+                )}
             </div>
         )}
       </div>

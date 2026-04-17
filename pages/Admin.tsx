@@ -13,6 +13,7 @@ import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
 
 export default function Admin() {
+  const INVENTORY_PAGE_SIZE = 25;
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [storeName, setStoreName] = useState('StockFlow');
@@ -34,6 +35,7 @@ export default function Admin() {
   const [searchTerm, setSearchTerm] = useState('');
   const [sortOption, setSortOption] = useState('name-asc');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [inventoryPage, setInventoryPage] = useState(1);
 
   // Low Stock Modal Filters
   const [lowStockCategoryFilter, setLowStockCategoryFilter] = useState('all');
@@ -871,7 +873,20 @@ export default function Admin() {
 
     return result;
   }, [products, searchTerm, sortOption, categoryFilter]);
+  const inventoryTotalPages = Math.max(1, Math.ceil(filteredProducts.length / INVENTORY_PAGE_SIZE));
+  const paginatedProducts = useMemo(
+    () => filteredProducts.slice((inventoryPage - 1) * INVENTORY_PAGE_SIZE, inventoryPage * INVENTORY_PAGE_SIZE),
+    [filteredProducts, inventoryPage]
+  );
   const allFilteredProductsSelected = filteredProducts.length > 0 && filteredProducts.every(product => selectedProductIds.includes(product.id));
+
+  useEffect(() => {
+    setInventoryPage(1);
+  }, [searchTerm, categoryFilter, sortOption]);
+
+  useEffect(() => {
+    setInventoryPage((prev) => Math.min(prev, inventoryTotalPages));
+  }, [inventoryTotalPages]);
 
   // Calculate Dashboard Stats
   const stats = useMemo(() => {
@@ -1335,7 +1350,7 @@ export default function Admin() {
             </tr>
           </thead>
           <tbody>
-            {filteredProducts.map(product => {
+            {paginatedProducts.map(product => {
               const metrics = computeProductInventoryMetrics(product);
               return (
               <tr key={product.id} className="border-t align-top">
@@ -1414,6 +1429,13 @@ export default function Admin() {
           </div>
         )}
       </div>
+      {filteredProducts.length > INVENTORY_PAGE_SIZE && (
+        <div className="mt-3 flex items-center justify-between rounded-lg border bg-card p-2">
+          <Button variant="outline" size="sm" onClick={() => setInventoryPage((prev) => Math.max(1, prev - 1))} disabled={inventoryPage === 1}>Prev</Button>
+          <span className="text-xs text-muted-foreground">Page {inventoryPage} of {inventoryTotalPages}</span>
+          <Button variant="outline" size="sm" onClick={() => setInventoryPage((prev) => Math.min(inventoryTotalPages, prev + 1))} disabled={inventoryPage === inventoryTotalPages}>Next</Button>
+        </div>
+      )}
 
       {/* Edit/Add Modal */}
       {isModalOpen && (

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
-import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder } from '../services/storage';
+import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, updatePurchaseOrder } from '../services/storage';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
@@ -22,10 +22,37 @@ type DraftLine = {
   unitCost: number | '';
 };
 
+type PendingProductDraft = {
+  name: string;
+  category: string;
+  image: string;
+  description: string;
+  barcode: string;
+  hsn: string;
+  variants: string[];
+  colors: string[];
+  sellPrice: number | '';
+};
+
+type PendingVariantRow = { key: string; label: string; variant?: string; color?: string };
+
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const toNum = (v: number | '') => (v === '' ? 0 : Number(v));
 const formatNumber = (value: number, digits = 2) => value.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const todayLabel = () => new Date().toLocaleDateString('en-GB');
+const makePendingBarcode = () => `PENDING-${Math.floor(100000 + Math.random() * 900000)}`;
+const normalizeText = (v?: string) => (v || '').trim();
+const comboKey = (variant?: string, color?: string) => `${normalizeText(variant)}::${normalizeText(color)}`;
+const buildPendingVariantRows = (variants: string[], colors: string[]): PendingVariantRow[] => {
+  const cleanVariants = variants.map(v => v.trim()).filter(Boolean);
+  const cleanColors = colors.map(c => c.trim()).filter(Boolean);
+  if (!cleanVariants.length && !cleanColors.length) return [{ key: comboKey(), label: 'Default' }];
+  if (cleanVariants.length && !cleanColors.length) return cleanVariants.map(v => ({ key: comboKey(v, ''), label: `${v} / Default`, variant: v }));
+  if (!cleanVariants.length && cleanColors.length) return cleanColors.map(c => ({ key: comboKey('', c), label: `Default / ${c}`, color: c }));
+  const rows: PendingVariantRow[] = [];
+  cleanVariants.forEach(v => cleanColors.forEach(c => rows.push({ key: comboKey(v, c), label: `${v} / ${c}`, variant: v, color: c })));
+  return rows;
+};
 
 const getVariantStock = (product: Product, variant?: string, color?: string) => {
   if (!variant && !color) return Math.max(0, product.stock || 0);
@@ -96,6 +123,7 @@ function Modal({ open, title, onClose, children }: { open: boolean; title: strin
 }
 
 export default function PurchasePanel() {
+  const ORDERS_PAGE_SIZE = 15;
   const [activeTab, setActiveTab] = useState<PurchaseTab>('orders');
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
@@ -104,6 +132,7 @@ export default function PurchasePanel() {
   const [homeSearch, setHomeSearch] = useState('');
   const [sortBy, setSortBy] = useState<'latest' | 'amount' | 'party'>('latest');
   const [filterBy, setFilterBy] = useState<'all' | PurchaseOrder['status']>('all');
+  const [ordersPage, setOrdersPage] = useState(1);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState<WizardStep>('source');
@@ -113,12 +142,26 @@ export default function PurchasePanel() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedVariantKeys, setSelectedVariantKeys] = useState<string[]>([]);
 
-  const [newProductName, setNewProductName] = useState('');
-  const [newProductCategory, setNewProductCategory] = useState('');
-  const [newProductImage, setNewProductImage] = useState('');
+  const [newProductDraft, setNewProductDraft] = useState<PendingProductDraft>({
+    name: '',
+    category: '',
+    image: '',
+    description: '',
+    barcode: makePendingBarcode(),
+    hsn: '',
+    variants: [],
+    colors: [],
+    sellPrice: '',
+  });
+  const [newVariantInput, setNewVariantInput] = useState('');
+  const [newColorInput, setNewColorInput] = useState('');
 
   const [partyId, setPartyId] = useState('');
   const [notes, setNotes] = useState('');
+  const [billNumber, setBillNumber] = useState('');
+  const [billDate, setBillDate] = useState('');
+  const [gstPercent, setGstPercent] = useState<number | ''>('');
+  const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
   const [pricingEntries, setPricingEntries] = useState<Record<string, DraftLine>>({});
 
   const [newPartyName, setNewPartyName] = useState('');
@@ -176,6 +219,22 @@ export default function PurchasePanel() {
 
     return rows;
   }, [orders, homeSearch, filterBy, sortBy]);
+  const orderTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(orderList.length / ORDERS_PAGE_SIZE)),
+    [orderList.length]
+  );
+  const paginatedOrderList = useMemo(() => {
+    const start = (ordersPage - 1) * ORDERS_PAGE_SIZE;
+    return orderList.slice(start, start + ORDERS_PAGE_SIZE);
+  }, [orderList, ordersPage]);
+
+  useEffect(() => {
+    setOrdersPage(1);
+  }, [homeSearch, filterBy, sortBy]);
+
+  useEffect(() => {
+    setOrdersPage((prev) => Math.min(prev, orderTotalPages));
+  }, [orderTotalPages]);
 
   const selectedVariants = useMemo(() => {
     if (!selectedProduct) return [] as Array<{ key: string; label: string; stock: number; variant?: string; color?: string }>;
@@ -188,13 +247,25 @@ export default function PurchasePanel() {
     })).filter(v => selectedVariantKeys.includes(v.key));
   }, [selectedProduct, selectedVariantKeys]);
 
+  const pendingVariantRows = useMemo(
+    () => buildPendingVariantRows(newProductDraft.variants, newProductDraft.colors),
+    [newProductDraft.variants, newProductDraft.colors]
+  );
+
   const activeLines = useMemo(() => {
     if (sourceMode === 'new') {
-      const key = 'new-default';
-      return [pricingEntries[key] || { key, label: 'Default', stock: 0, quantity: '', unitCost: '' }];
+      return pendingVariantRows.map(row => pricingEntries[row.key] || {
+        key: row.key,
+        label: row.label,
+        stock: 0,
+        quantity: '',
+        unitCost: '',
+        variant: row.variant,
+        color: row.color,
+      });
     }
     return selectedVariants.map(v => pricingEntries[v.key] || { key: v.key, label: v.label, stock: v.stock, variant: v.variant, color: v.color, quantity: '', unitCost: '' });
-  }, [sourceMode, selectedVariants, pricingEntries]);
+  }, [sourceMode, selectedVariants, pricingEntries, pendingVariantRows]);
 
   const draftTotals = useMemo(() => activeLines.reduce((acc, line) => {
     const qty = toNum(line.quantity);
@@ -221,11 +292,25 @@ export default function PurchasePanel() {
     setProductSearch('');
     setSelectedProduct(null);
     setSelectedVariantKeys([]);
-    setNewProductName('');
-    setNewProductCategory('');
-    setNewProductImage('');
+    setNewProductDraft({
+      name: '',
+      category: '',
+      image: '',
+      description: '',
+      barcode: makePendingBarcode(),
+      hsn: '',
+      variants: [],
+      colors: [],
+      sellPrice: '',
+    });
+    setNewVariantInput('');
+    setNewColorInput('');
     setPartyId('');
     setNotes('');
+    setBillNumber('');
+    setBillDate('');
+    setGstPercent('');
+    setEditingOrderId(null);
     setPricingEntries({});
   };
 
@@ -244,7 +329,17 @@ export default function PurchasePanel() {
   const goToPricing = () => {
     const seed: Record<string, DraftLine> = {};
     if (sourceMode === 'new') {
-      seed['new-default'] = pricingEntries['new-default'] || { key: 'new-default', label: 'Default', stock: 0, quantity: '', unitCost: '' };
+      pendingVariantRows.forEach(row => {
+        seed[row.key] = pricingEntries[row.key] || {
+          key: row.key,
+          label: row.label,
+          stock: 0,
+          quantity: '',
+          unitCost: '',
+          variant: row.variant,
+          color: row.color,
+        };
+      });
     } else {
       selectedVariants.forEach(v => {
         seed[v.key] = pricingEntries[v.key] || {
@@ -271,6 +366,35 @@ export default function PurchasePanel() {
         [field]: Number.isNaN(parsed) ? '' : parsed,
       }
     }));
+  };
+
+  const updateNewDraft = (patch: Partial<PendingProductDraft>) => {
+    setNewProductDraft(prev => ({ ...prev, ...patch }));
+  };
+
+  const addNewDraftToken = (kind: 'variants' | 'colors', value: string) => {
+    const token = value.trim();
+    if (!token) return;
+    setNewProductDraft(prev => {
+      const list = prev[kind] || [];
+      if (list.includes(token)) return prev;
+      return { ...prev, [kind]: [...list, token] };
+    });
+  };
+
+  const removeNewDraftToken = (kind: 'variants' | 'colors', value: string) => {
+    setNewProductDraft(prev => ({ ...prev, [kind]: (prev[kind] || []).filter(v => v !== value) }));
+  };
+
+  const handleNewProductImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      if (result) updateNewDraft({ image: result });
+    };
+    reader.readAsDataURL(file);
   };
 
   const resetPartyDraft = () => {
@@ -306,9 +430,24 @@ export default function PurchasePanel() {
       id: `${line.key}-${idx}-${uid()}`,
       sourceType: sourceMode,
       productId: sourceMode === 'inventory' ? selectedProduct?.id : undefined,
-      productName: sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductName,
-      category: sourceMode === 'inventory' ? selectedProduct?.category : newProductCategory,
-      image: sourceMode === 'inventory' ? selectedProduct?.image : newProductImage,
+      productName: sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductDraft.name,
+      pendingProductBarcode: sourceMode === 'new' ? newProductDraft.barcode : undefined,
+      pendingProductDraft: sourceMode === 'new' ? {
+        barcode: newProductDraft.barcode,
+        description: newProductDraft.description.trim() || undefined,
+        hsn: newProductDraft.hsn.trim() || undefined,
+        variants: newProductDraft.variants,
+        colors: newProductDraft.colors,
+        sellPrice: newProductDraft.sellPrice === '' ? undefined : Math.max(0, Number(newProductDraft.sellPrice) || 0),
+        pricingMatrix: activeLines.map(d => ({
+          variant: d.variant,
+          color: d.color,
+          quantity: toNum(d.quantity),
+          unitCost: toNum(d.unitCost),
+        })),
+      } : undefined,
+      category: sourceMode === 'inventory' ? selectedProduct?.category : newProductDraft.category,
+      image: sourceMode === 'inventory' ? selectedProduct?.image : newProductDraft.image,
       variant: line.variant,
       color: line.color,
       quantity: toNum(line.quantity),
@@ -317,28 +456,115 @@ export default function PurchasePanel() {
     }));
 
     const now = new Date().toISOString();
+    const taxableAmount = lines.reduce((s, l) => s + l.totalCost, 0);
+    const gstRate = gstPercent === '' ? 0 : Math.max(0, Number(gstPercent) || 0);
+    const gstAmount = Number(((taxableAmount * gstRate) / 100).toFixed(2));
     const order: PurchaseOrder = {
-      id: `po-${uid()}`,
+      id: editingOrderId || `po-${uid()}`,
       partyId: party.id,
       partyName: party.name,
       partyPhone: party.phone,
       partyGst: party.gst,
       partyLocation: party.location,
+      billNumber: billNumber.trim() || undefined,
+      billDate: billDate || undefined,
+      gstPercent: gstRate,
+      taxableAmount,
+      gstAmount,
       status: 'ordered',
       orderDate: now,
       notes: notes.trim() || undefined,
       lines,
       totalQuantity: lines.reduce((s, l) => s + l.quantity, 0),
-      totalAmount: lines.reduce((s, l) => s + l.totalCost, 0),
+      totalAmount: taxableAmount + gstAmount,
       receivedQuantity: 0,
-      createdAt: now,
+      createdAt: editingOrderId ? (orders.find(o => o.id === editingOrderId)?.createdAt || now) : now,
       updatedAt: now,
     };
 
-    await createPurchaseOrder(order);
+    if (editingOrderId) await updatePurchaseOrder(order);
+    else await createPurchaseOrder(order);
     setIsModalOpen(false);
     resetWizard();
     refresh();
+  };
+
+  const editOrder = (order: PurchaseOrder) => {
+    const first = order.lines[0];
+    if (!first) return;
+    setEditingOrderId(order.id);
+    setPartyId(order.partyId);
+    setNotes(order.notes || '');
+    setBillNumber(order.billNumber || '');
+    setBillDate(order.billDate ? order.billDate.slice(0, 10) : '');
+    setGstPercent(order.gstPercent ?? '');
+    setPricingEntries({});
+
+    if (first.sourceType === 'inventory' && first.productId) {
+      const product = products.find(p => p.id === first.productId) || null;
+      if (!product) return;
+      setSourceMode('inventory');
+      setSelectedProduct(product);
+
+      const rowMap = new Map<string, { key: string; variant?: string; color?: string; stock: number; label: string }>();
+      getProductStockRows(product).forEach((row, idx) => {
+        const key = `${product.id}-${idx}-${row.variant}-${row.color}`;
+        rowMap.set(`${row.variant || ''}__${row.color || ''}`, { key, variant: row.variant, color: row.color, stock: row.stock, label: `${row.variant} / ${row.color}` });
+      });
+      const selectedKeys: string[] = [];
+      const seeded: Record<string, DraftLine> = {};
+      order.lines.forEach((line) => {
+        const mapKey = `${line.variant || ''}__${line.color || ''}`;
+        const row = rowMap.get(mapKey);
+        if (!row) return;
+        selectedKeys.push(row.key);
+        seeded[row.key] = {
+          key: row.key,
+          label: row.label,
+          stock: row.stock,
+          variant: row.variant,
+          color: row.color,
+          quantity: line.quantity,
+          unitCost: line.unitCost,
+        };
+      });
+      setSelectedVariantKeys(selectedKeys);
+      setPricingEntries(seeded);
+    } else {
+      setSourceMode('new');
+      const lineVariants = order.lines.map(l => l.variant).filter((v): v is string => !!v);
+      const lineColors = order.lines.map(l => l.color).filter((c): c is string => !!c);
+      const uniqueVariants = Array.from(new Set(lineVariants));
+      const uniqueColors = Array.from(new Set(lineColors));
+      setNewProductDraft({
+        name: first.productName || '',
+        category: first.category || '',
+        image: first.image || '',
+        description: first.pendingProductDraft?.description || '',
+        barcode: first.pendingProductBarcode || first.pendingProductDraft?.barcode || makePendingBarcode(),
+        hsn: first.pendingProductDraft?.hsn || '',
+        variants: first.pendingProductDraft?.variants?.length ? first.pendingProductDraft.variants : uniqueVariants,
+        colors: first.pendingProductDraft?.colors?.length ? first.pendingProductDraft.colors : uniqueColors,
+        sellPrice: first.pendingProductDraft?.sellPrice ?? '',
+      });
+      const seeded: Record<string, DraftLine> = {};
+      order.lines.forEach((line) => {
+        const key = comboKey(line.variant, line.color);
+        seeded[key] = {
+          key,
+          label: `${line.variant || 'Default'} / ${line.color || 'Default'}`,
+          stock: 0,
+          quantity: line.quantity,
+          unitCost: line.unitCost,
+          variant: line.variant,
+          color: line.color,
+        };
+      });
+      setPricingEntries(seeded);
+    }
+
+    setWizardStep('pricing');
+    setIsModalOpen(true);
   };
 
   const handleReceive = (order: PurchaseOrder) => {
@@ -485,7 +711,7 @@ export default function PurchasePanel() {
               <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-slate-500">No purchase orders yet.</div>
             ) : (
               <div className="space-y-3">
-                {orderList.map(({ order, date, totalQty, totalAmount, totalLines, productsLabel }) => (
+                {paginatedOrderList.map(({ order, date, totalQty, totalAmount, totalLines, productsLabel }) => (
                   <div key={order.id} className="rounded-2xl border border-slate-200 p-4 hover:bg-slate-50">
                     <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                       <div className="flex items-center gap-4">
@@ -506,12 +732,24 @@ export default function PurchasePanel() {
                         <SummaryCard label="Lines" value={formatNumber(totalLines, 0)} />
                         <SummaryCard label="Total" value={`₹${formatNumber(totalAmount)}`} />
                       </div>
-                      <Button size="sm" onClick={() => handleReceive(order)} disabled={order.status === 'received'}>
-                        <Truck className="w-4 h-4 mr-1" /> {order.status === 'received' ? 'Received' : 'Receive'}
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="outline" onClick={() => editOrder(order)} disabled={order.status === 'received'}>
+                          <Pencil className="w-4 h-4 mr-1" /> Edit
+                        </Button>
+                        <Button size="sm" onClick={() => handleReceive(order)} disabled={order.status === 'received'}>
+                          <Truck className="w-4 h-4 mr-1" /> {order.status === 'received' ? 'Received' : 'Receive'}
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 ))}
+                {orderList.length > ORDERS_PAGE_SIZE && (
+                  <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2">
+                    <Button variant="outline" size="sm" onClick={() => setOrdersPage((prev) => Math.max(1, prev - 1))} disabled={ordersPage <= 1}>Previous</Button>
+                    <div className="text-xs text-slate-500">Page {ordersPage} of {orderTotalPages}</div>
+                    <Button variant="outline" size="sm" onClick={() => setOrdersPage((prev) => Math.min(orderTotalPages, prev + 1))} disabled={ordersPage >= orderTotalPages}>Next</Button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -603,13 +841,59 @@ export default function PurchasePanel() {
         {wizardStep === 'newProduct' && (
           <div>
             <button onClick={() => setWizardStep('source')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="grid gap-4 md:grid-cols-2">
-              <div><Label>Product Name</Label><Input value={newProductName} onChange={e => setNewProductName(e.target.value)} /></div>
-              <div><Label>Category</Label><Input value={newProductCategory} onChange={e => setNewProductCategory(e.target.value)} /></div>
-              <div className="md:col-span-2"><Label>Image URL (optional)</Label><Input value={newProductImage} onChange={e => setNewProductImage(e.target.value)} /></div>
+            <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+              Linked party for this purchase order: <span className="font-semibold text-slate-900">{parties.find(p => p.id === partyId)?.name || 'Not selected yet (set in Pricing step)'}</span>
             </div>
-            <div className="mt-5 flex justify-end">
-              <button onClick={() => setWizardStep('pricing')} disabled={!newProductName.trim() || !newProductCategory.trim()} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Continue to Pricing <ArrowRight className="h-4 w-4" /></button>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div><Label>Product Name</Label><Input value={newProductDraft.name} onChange={e => updateNewDraft({ name: e.target.value })} placeholder="e.g. Wireless Mouse" /></div>
+              <div><Label>Category</Label><Input value={newProductDraft.category} onChange={e => updateNewDraft({ category: e.target.value })} placeholder="Category" /></div>
+              <div><Label>Barcode</Label><Input value={newProductDraft.barcode} onChange={e => updateNewDraft({ barcode: e.target.value })} /></div>
+              <div><Label>HSN</Label><Input value={newProductDraft.hsn} onChange={e => updateNewDraft({ hsn: e.target.value })} placeholder="Tax HSN code" /></div>
+              <div className="md:col-span-2">
+                <Label>Product Image</Label>
+                <div className="mt-1 grid gap-3 md:grid-cols-[88px_1fr] rounded-xl border border-dashed border-slate-300 p-3">
+                  <div className="h-20 w-20 overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+                    {newProductDraft.image ? <img src={newProductDraft.image} alt="Pending product preview" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-[10px] text-slate-400">No Image</div>}
+                  </div>
+                  <div className="space-y-2">
+                    <Input type="file" accept="image/*" onChange={handleNewProductImageUpload} className="text-xs" />
+                    <Input value={newProductDraft.image.startsWith('data:image/') ? '' : newProductDraft.image} onChange={e => updateNewDraft({ image: e.target.value })} placeholder="Optional image URL fallback" />
+                  </div>
+                </div>
+              </div>
+              <div className="md:col-span-2"><Label>Description</Label><textarea value={newProductDraft.description} onChange={e => updateNewDraft({ description: e.target.value })} className="w-full rounded-md border px-3 py-2 text-sm" rows={3} placeholder="Product details" /></div>
+              <div><Label>Default Sell Price (optional)</Label><Input type="number" value={newProductDraft.sellPrice} onChange={e => updateNewDraft({ sellPrice: e.target.value === '' ? '' : Number(e.target.value) })} placeholder="0.00" /></div>
+              <div className="text-xs text-slate-500 self-end">Buy price will be derived from purchase receive as per existing logic.</div>
+              <div>
+                <Label>Add Variant</Label>
+                <div className="flex gap-2">
+                  <Input value={newVariantInput} onChange={e => setNewVariantInput(e.target.value)} placeholder="e.g. 64GB" />
+                  <Button type="button" variant="outline" onClick={() => { addNewDraftToken('variants', newVariantInput); setNewVariantInput(''); }}>Add</Button>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {newProductDraft.variants.map(v => <button key={v} type="button" onClick={() => removeNewDraftToken('variants', v)} className="rounded-full border px-2 py-1 text-xs">{v} ×</button>)}
+                </div>
+              </div>
+              <div>
+                <Label>Add Color</Label>
+                <div className="flex gap-2">
+                  <Input value={newColorInput} onChange={e => setNewColorInput(e.target.value)} placeholder="e.g. Black" />
+                  <Button type="button" variant="outline" onClick={() => { addNewDraftToken('colors', newColorInput); setNewColorInput(''); }}>Add</Button>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {newProductDraft.colors.map(c => <button key={c} type="button" onClick={() => removeNewDraftToken('colors', c)} className="rounded-full border px-2 py-1 text-xs">{c} ×</button>)}
+                </div>
+              </div>
+            </div>
+            <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
+              Pricing sections to be created: <span className="font-semibold text-slate-900">{pendingVariantRows.length}</span>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {pendingVariantRows.map(row => <span key={row.key} className="rounded-full border px-2 py-1">{row.label}</span>)}
+              </div>
+            </div>
+            <div className="mt-5 flex items-center justify-between">
+              <div className="text-xs text-slate-500">Pending purchase product: this will not be visible in inventory until receive/finalize.</div>
+              <button onClick={() => goToPricing()} disabled={!newProductDraft.name.trim() || !newProductDraft.category.trim()} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Continue to Pricing <ArrowRight className="h-4 w-4" /></button>
             </div>
           </div>
         )}
@@ -654,6 +938,9 @@ export default function PurchasePanel() {
                     <button type="button" onClick={() => setShowPartyPopup(true)} className="mt-2 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"><Plus className="h-3.5 w-3.5" /> Create Party</button>
                   </div>
                   <div><Label>Order Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div>
+                  <div><Label>Bill Number</Label><Input value={billNumber} onChange={e => setBillNumber(e.target.value)} placeholder="Supplier invoice no." /></div>
+                  <div><Label>Bill Date</Label><Input type="date" value={billDate} onChange={e => setBillDate(e.target.value)} /></div>
+                  <div><Label>GST %</Label><Input type="number" value={gstPercent} onChange={e => setGstPercent(e.target.value === '' ? '' : Number(e.target.value))} placeholder="e.g. 18" /></div>
                   <div className="md:col-span-2"><Label>Notes</Label><Input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes" /></div>
                 </div>
               </div>
@@ -664,6 +951,8 @@ export default function PurchasePanel() {
                   <SummaryCard label="Total Amount" value={`₹${formatNumber(draftTotals.totalAmount)}`} />
                   <SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} />
                   <SummaryCard label="Party" value={parties.find(p => p.id === partyId)?.name || 'Not selected'} />
+                  <SummaryCard label="GST Amount" value={`₹${formatNumber((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)}`} />
+                  <SummaryCard label="Grand Total" value={`₹${formatNumber(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))}`} />
                 </div>
               </div>
             </div>
@@ -676,7 +965,14 @@ export default function PurchasePanel() {
                 return (
                   <div key={line.key} className="rounded-3xl border border-slate-200 p-4">
                     <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                      <div><h4 className="text-base font-semibold text-slate-900">{line.label}</h4><p className="text-sm text-slate-500">Current stock: {line.stock}</p></div>
+                      <div>
+                        <h4 className="text-base font-semibold text-slate-900">{line.label}</h4>
+                        <p className="text-sm text-slate-500">
+                          {sourceMode === 'new'
+                            ? `Variant: ${line.variant || 'Default'} · Color: ${line.color || 'Default'}`
+                            : `Current stock: ${line.stock}`}
+                        </p>
+                      </div>
                       <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
                         <SummaryCard label="Qty" value={formatNumber(qty, 0)} />
                         <SummaryCard label="Unit Cost" value={`₹${formatNumber(unitCost)}`} />
@@ -712,7 +1008,7 @@ export default function PurchasePanel() {
                     <tbody>
                       {activeLines.map((line, i) => (
                         <tr key={`${line.key}-${i}`} className="border-b border-slate-100 last:border-b-0">
-                          <td className="px-4 py-3 font-medium text-slate-900">{sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductName}</td>
+                          <td className="px-4 py-3 font-medium text-slate-900">{sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductDraft.name}</td>
                           <td className="px-4 py-3">{line.variant || 'Default'} / {line.color || 'Default'}</td>
                           <td className="px-4 py-3">{formatNumber(toNum(line.quantity), 0)}</td>
                           <td className="px-4 py-3">₹{formatNumber(toNum(line.unitCost))}</td>
@@ -729,18 +1025,21 @@ export default function PurchasePanel() {
                   <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Party</div><div className="font-medium text-slate-900">{parties.find(p => p.id === partyId)?.name || '—'}</div></div>
                   <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Party Details</div><div className="font-medium text-slate-900 text-sm">{parties.find(p => p.id === partyId)?.phone || '—'} · GST {parties.find(p => p.id === partyId)?.gst || '—'}</div></div>
                   <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Location</div><div className="font-medium text-slate-900">{parties.find(p => p.id === partyId)?.location || '—'}</div></div>
+                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Bill</div><div className="font-medium text-slate-900 text-sm">{billNumber || '—'} {billDate ? `• ${billDate}` : ''}</div></div>
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-3">
                   <SummaryCard label="Total Qty" value={formatNumber(draftTotals.totalQty, 0)} />
                   <SummaryCard label="Lines" value={formatNumber(activeLines.length, 0)} />
                   <SummaryCard label="Total Amount" value={`₹${formatNumber(draftTotals.totalAmount)}`} />
+                  <SummaryCard label="GST Amount" value={`₹${formatNumber((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100)}`} />
+                  <SummaryCard label="Grand Total" value={`₹${formatNumber(draftTotals.totalAmount + ((draftTotals.totalAmount * (gstPercent === '' ? 0 : Number(gstPercent) || 0)) / 100))}`} />
                   <SummaryCard label="Date" value={todayLabel()} />
                 </div>
                 <div className="mt-4 grid gap-2">
-                  <button type="button" onClick={() => setWizardStep('product')} className="flex w-full items-center justify-between rounded-2xl border border-slate-200 px-3 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">Go to Product <Pencil className="h-4 w-4" /></button>
+                  <button type="button" onClick={() => setWizardStep(sourceMode === 'new' ? 'newProduct' : 'product')} className="flex w-full items-center justify-between rounded-2xl border border-slate-200 px-3 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">Go to Product <Pencil className="h-4 w-4" /></button>
                   <button type="button" onClick={() => setWizardStep('pricing')} className="flex w-full items-center justify-between rounded-2xl border border-slate-200 px-3 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">Go to Pricing <Pencil className="h-4 w-4" /></button>
                 </div>
-                <button onClick={saveOrder} className="mt-4 w-full rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Save Purchase Order</button>
+                <button onClick={saveOrder} className="mt-4 w-full rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">{editingOrderId ? 'Update Purchase Order' : 'Save Purchase Order'}</button>
               </div>
             </div>
           </div>

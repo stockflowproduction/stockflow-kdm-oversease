@@ -124,6 +124,8 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
 
 export default function Sales() {
   type ReturnHandlingMode = 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
+  const POS_PRODUCTS_PER_PAGE = 10;
+  const RETURN_TRANSACTIONS_PER_PAGE = 10;
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -172,6 +174,8 @@ export default function Sales() {
   const [isReturnPopupOpen, setIsReturnPopupOpen] = useState(false);
   const [returnSubmitError, setReturnSubmitError] = useState<string | null>(null);
   const [mixedReturnChoice, setMixedReturnChoice] = useState<'refund_paid_method' | 'store_credit'>('refund_paid_method');
+  const [productPage, setProductPage] = useState(1);
+  const [returnPage, setReturnPage] = useState(1);
 
   const refreshData = () => {
       const data = loadData();
@@ -239,20 +243,66 @@ export default function Sales() {
       ? getAvailableStockForCombination(product, variant, color)
       : Math.max(0, product.stock || 0);
 
+  const customerById = useMemo(() => new Map(customers.map((customer) => [customer.id, customer])), [customers]);
+  const productById = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
+  const productLookupByCode = useMemo(() => {
+    const map = new Map<string, Product>();
+    products.forEach((product) => {
+      map.set(product.id.toLowerCase(), product);
+      if (product.barcode) map.set(product.barcode.toLowerCase(), product);
+    });
+    return map;
+  }, [products]);
+
   const lineKey = (id: string, variant?: string, color?: string) => getStockBucketKey(id, variant, color);
+  const returnabilityIndexes = useMemo(() => {
+    const overall = new Map<string, number>();
+    const byCustomer = new Map<string, Map<string, number>>();
+    const linkedReturnQtyBySourceLine = new Map<string, number>();
+    const legacyReturnQtyByLine = new Map<string, number>();
+    const legacyReturnQtyByCustomerLine = new Map<string, Map<string, number>>();
+
+    transactions.forEach((tx) => {
+      const txCustomerId = tx.customerId || '';
+      (tx.items || []).forEach((item) => {
+        const key = lineKey(item.id, item.selectedVariant, item.selectedColor);
+        const qty = Number(item.quantity) || 0;
+        if (!qty) return;
+        if (tx.type === 'sale' || tx.type === 'return') {
+          const delta = tx.type === 'sale' ? qty : -qty;
+          overall.set(key, (overall.get(key) || 0) + delta);
+          if (txCustomerId) {
+            const customerMap = byCustomer.get(txCustomerId) || new Map<string, number>();
+            customerMap.set(key, (customerMap.get(key) || 0) + delta);
+            byCustomer.set(txCustomerId, customerMap);
+          }
+        }
+
+        if (tx.type !== 'return') return;
+        if (item.sourceTransactionId && item.sourceLineCompositeKey) {
+          const sourceKey = `${item.sourceTransactionId}__${item.sourceLineCompositeKey}`;
+          linkedReturnQtyBySourceLine.set(sourceKey, (linkedReturnQtyBySourceLine.get(sourceKey) || 0) + qty);
+          return;
+        }
+        legacyReturnQtyByLine.set(key, (legacyReturnQtyByLine.get(key) || 0) + qty);
+        if (txCustomerId) {
+          const customerLegacyMap = legacyReturnQtyByCustomerLine.get(txCustomerId) || new Map<string, number>();
+          customerLegacyMap.set(key, (customerLegacyMap.get(key) || 0) + qty);
+          legacyReturnQtyByCustomerLine.set(txCustomerId, customerLegacyMap);
+        }
+      });
+    });
+
+    return { overall, byCustomer, linkedReturnQtyBySourceLine, legacyReturnQtyByLine, legacyReturnQtyByCustomerLine };
+  }, [transactions]);
+
   const getReturnableQty = (id: string, variant?: string, color?: string, customerId?: string) => {
     const key = lineKey(id, variant, color);
-    const soldQty = transactions
-      .filter((tx) => tx.type === 'sale' && (!customerId || tx.customerId === customerId))
-      .reduce((sum, tx) => sum + tx.items
-        .filter((line) => lineKey(line.id, line.selectedVariant, line.selectedColor) === key)
-        .reduce((lineSum, line) => lineSum + (line.quantity || 0), 0), 0);
-    const returnedQty = transactions
-      .filter((tx) => tx.type === 'return' && (!customerId || tx.customerId === customerId))
-      .reduce((sum, tx) => sum + tx.items
-        .filter((line) => lineKey(line.id, line.selectedVariant, line.selectedColor) === key)
-        .reduce((lineSum, line) => lineSum + (line.quantity || 0), 0), 0);
-    return Math.max(0, soldQty - returnedQty);
+    if (customerId) {
+      const customerMap = returnabilityIndexes.byCustomer.get(customerId);
+      return Math.max(0, customerMap?.get(key) || 0);
+    }
+    return Math.max(0, returnabilityIndexes.overall.get(key) || 0);
   };
 
   const getProductReturnableQty = (product: Product, customerId?: string) => {
@@ -265,7 +315,7 @@ export default function Sales() {
   const handleProductSelect = (scanValue: string, explicitQty: number = 1) => {
     let targetCode = scanValue;
     try { const p = JSON.parse(scanValue); if (p.sku) targetCode = p.sku; if(p.barcode) targetCode = p.barcode; } catch(e) {}
-    const product = loadData().products.find(p => p.barcode.toLowerCase() === targetCode.toLowerCase() || p.id === targetCode);
+    const product = productLookupByCode.get(targetCode.toLowerCase());
     if (!product) return;
 
     let error = null;
@@ -638,6 +688,8 @@ export default function Sales() {
     return searchMatch && categoryMatch;
   });
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
+  const productTotalPages = Math.max(1, Math.ceil(filteredProducts.length / POS_PRODUCTS_PER_PAGE));
+  const paginatedProducts = filteredProducts.slice((productPage - 1) * POS_PRODUCTS_PER_PAGE, productPage * POS_PRODUCTS_PER_PAGE);
   const returnTransactions = useMemo(() => {
     const now = new Date();
     const thresholdDays = returnDateFilter === '30d' ? 30 : returnDateFilter === '90d' ? 90 : null;
@@ -647,7 +699,7 @@ export default function Sales() {
     const filtered = base.filter((tx) => {
       if (threshold && new Date(tx.date).getTime() < threshold) return false;
       if (!query) return true;
-      const customer = customers.find(c => c.id === tx.customerId);
+      const customer = tx.customerId ? customerById.get(tx.customerId) : undefined;
       const haystack = [
         tx.id,
         tx.customerName || '',
@@ -662,15 +714,33 @@ export default function Sales() {
       if (returnSort === 'amount_low') return Math.abs(a.total) - Math.abs(b.total);
       return new Date(b.date).getTime() - new Date(a.date).getTime();
     });
-  }, [transactions, customers, returnDateFilter, returnSearch, returnSort]);
+  }, [transactions, customerById, returnDateFilter, returnSearch, returnSort]);
+  const returnTotalPages = Math.max(1, Math.ceil(returnTransactions.length / RETURN_TRANSACTIONS_PER_PAGE));
+  const paginatedReturnTransactions = returnTransactions.slice((returnPage - 1) * RETURN_TRANSACTIONS_PER_PAGE, returnPage * RETURN_TRANSACTIONS_PER_PAGE);
+
+  useEffect(() => {
+    setProductPage(1);
+  }, [productSearch, selectedCategory]);
+
+  useEffect(() => {
+    setReturnPage(1);
+  }, [returnSearch, returnDateFilter, returnSort]);
+
+  useEffect(() => {
+    setProductPage((prev) => Math.min(prev, productTotalPages));
+  }, [productTotalPages]);
+
+  useEffect(() => {
+    setReturnPage((prev) => Math.min(prev, returnTotalPages));
+  }, [returnTotalPages]);
 
   const selectedReturnTx = useMemo(
     () => returnTransactions.find(tx => tx.id === selectedReturnTxId) || null,
     [returnTransactions, selectedReturnTxId]
   );
   const selectedReturnCustomer = useMemo(
-    () => customers.find(c => c.id === selectedReturnTx?.customerId) || null,
-    [customers, selectedReturnTx]
+    () => (selectedReturnTx?.customerId ? customerById.get(selectedReturnTx.customerId) || null : null),
+    [customerById, selectedReturnTx]
   );
   const selectedReturnLines = useMemo(() => {
     if (!selectedReturnTx) return [] as Array<{
@@ -697,28 +767,17 @@ export default function Sales() {
       else rows.set(key, { key, id: item.id, name: item.name, variant, color, originalQty: Math.max(0, Number(item.quantity) || 0), unitPrice: Math.max(0, Number(item.sellPrice) || 0) });
     });
     return Array.from(rows.values()).map((row) => {
-      const linkedReturnedQty = transactions
-        .filter(tx => tx.type === 'return')
-        .reduce((sum, tx) => sum + (tx.items || [])
-          .filter(item => item.sourceTransactionId === selectedReturnTx.id && item.sourceLineCompositeKey === row.key)
-          .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
-
-      const legacyFallbackReturnedQty = transactions
-        .filter(tx => tx.type === 'return' && (!selectedReturnTx.customerId || tx.customerId === selectedReturnTx.customerId))
-        .reduce((sum, tx) => sum + (tx.items || [])
-          .filter(item =>
-            !item.sourceTransactionId
-            && !item.sourceLineCompositeKey
-            && item.id === row.id
-            && (item.selectedVariant || NO_VARIANT) === row.variant
-            && (item.selectedColor || NO_COLOR) === row.color
-          )
-          .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
+      const linkedSourceKey = `${selectedReturnTx.id}__${row.key}`;
+      const linkedReturnedQty = returnabilityIndexes.linkedReturnQtyBySourceLine.get(linkedSourceKey) || 0;
+      const rowLineKey = lineKey(row.id, row.variant, row.color);
+      const legacyFallbackReturnedQty = selectedReturnTx.customerId
+        ? (returnabilityIndexes.legacyReturnQtyByCustomerLine.get(selectedReturnTx.customerId)?.get(rowLineKey) || 0)
+        : (returnabilityIndexes.legacyReturnQtyByLine.get(rowLineKey) || 0);
 
       const returnedQty = linkedReturnedQty > 0 ? linkedReturnedQty : legacyFallbackReturnedQty;
       const returnableQty = Math.max(0, row.originalQty - returnedQty);
       const selectedQty = Math.max(0, Math.min(returnableQty, Number(returnQtyByLine[row.key] || 0)));
-      const productRef = products.find(p => p.id === row.id);
+      const productRef = productById.get(row.id);
       return {
         key: row.key,
         id: row.id,
@@ -734,7 +793,7 @@ export default function Sales() {
         selectedSubtotal: selectedQty * row.unitPrice,
       };
     });
-  }, [selectedReturnTx, transactions, returnQtyByLine, products]);
+  }, [selectedReturnTx, returnQtyByLine, productById, returnabilityIndexes]);
   const selectedSettlement = selectedReturnTx?.saleSettlement || { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
   const originalPaidMethodKind: 'cash' | 'online' = Number(selectedSettlement.onlinePaid || 0) > 0 && Number(selectedSettlement.cashPaid || 0) <= 0 ? 'online' : 'cash';
   const selectedReturnQty = selectedReturnLines.reduce((sum, line) => sum + line.selectedQty, 0);
@@ -750,7 +809,7 @@ export default function Sales() {
           && (item.selectedColor || NO_COLOR) === line.color
           && Math.abs(Number(item.sellPrice) - line.unitPrice) < 0.0001
         );
-        const productRef = products.find(p => p.id === line.id);
+        const productRef = productById.get(line.id);
         return {
           ...(sourceLine || productRef || {
             id: line.id,
@@ -775,7 +834,7 @@ export default function Sales() {
           sourceUnitPriceSnapshot: line.unitPrice,
         };
       });
-  }, [selectedReturnLines, selectedReturnTx, products]);
+  }, [selectedReturnLines, selectedReturnTx, productById]);
   const dueFirstDraftTransaction = useMemo<Transaction | null>(() => {
     if (!selectedReturnTx) return null;
     const returnSubtotal = selectedReturnItems.reduce((sum, item) => sum + ((Number(item.quantity) || 0) * (Number(item.sellPrice) || 0)), 0);
@@ -904,7 +963,7 @@ export default function Sales() {
   };
 
   return (
-    <div className={`h-full rounded-xl border p-3 md:p-4 grid grid-cols-1 ${isReturnMode ? 'lg:grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_390px]'} gap-3 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
+    <div className={`h-full rounded-xl border p-3 md:p-4 grid grid-cols-1 ${isReturnMode ? 'lg:grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_390px] lg:items-start'} gap-3 ${isReturnMode ? 'bg-orange-50/20 border-orange-200' : 'bg-background border-border'}`}>
       <div className="min-w-0 flex flex-col gap-3">
         <div className="bg-card border rounded-xl p-3 space-y-3">
           <div className={`grid gap-3 items-center ${isReturnMode ? 'md:grid-cols-[minmax(0,1fr)_420px]' : 'md:grid-cols-[minmax(0,1fr)_220px]'}`}>
@@ -917,8 +976,8 @@ export default function Sales() {
                 placeholder={isReturnMode ? 'Search customer, phone, bill no, product, code' : 'Search product, barcode, variant'}
               />
             </div>
-            <div className={`grid gap-2 ${isReturnMode ? 'grid-cols-4' : 'grid-cols-2'}`}>
-              {!isReturnMode && <Button variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setCart([]); }}>Sale</Button>}
+            <div className={`grid gap-2 ${isReturnMode ? 'grid-cols-5' : 'grid-cols-2'}`}>
+              <Button variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setCart([]); }}>Sales</Button>
               <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setCart([]); }}>Return</Button>
               {isReturnMode && (
                 <>
@@ -961,7 +1020,7 @@ export default function Sales() {
                   <div>Price</div>
                   <div />
                 </div>
-                {returnTransactions.map((tx) => {
+                {paginatedReturnTransactions.map((tx) => {
                   const totalQty = (tx.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
                   return (
                     <div key={tx.id} className="w-full rounded-xl border bg-card p-3 grid gap-2 md:grid-cols-[130px_180px_minmax(0,1fr)_92px_120px_132px] items-center box-border">
@@ -975,11 +1034,19 @@ export default function Sales() {
                   );
                 })}
                 {!returnTransactions.length && <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No sale transactions found for return workflow.</div>}
+                {returnTransactions.length > RETURN_TRANSACTIONS_PER_PAGE && (
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border bg-card p-2">
+                    <Button size="sm" variant="outline" onClick={() => setReturnPage((prev) => Math.max(1, prev - 1))} disabled={returnPage === 1}>Prev</Button>
+                    <span className="text-xs text-muted-foreground">Page {returnPage} of {returnTotalPages}</span>
+                    <Button size="sm" variant="outline" onClick={() => setReturnPage((prev) => Math.min(returnTotalPages, prev + 1))} disabled={returnPage === returnTotalPages}>Next</Button>
+                  </div>
+                )}
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
-              {filteredProducts.map(p => {
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+              {paginatedProducts.map(p => {
                 const cartItem = cart.find(item => item.id === p.id);
                 const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
                 return (
@@ -993,6 +1060,14 @@ export default function Sales() {
                   />
                 );
               })}
+              </div>
+              {filteredProducts.length > POS_PRODUCTS_PER_PAGE && (
+                <div className="flex items-center justify-between gap-2 rounded-lg border bg-card p-2">
+                  <Button size="sm" variant="outline" onClick={() => setProductPage((prev) => Math.max(1, prev - 1))} disabled={productPage === 1}>Prev</Button>
+                  <span className="text-xs text-muted-foreground">Page {productPage} of {productTotalPages}</span>
+                  <Button size="sm" variant="outline" onClick={() => setProductPage((prev) => Math.min(productTotalPages, prev + 1))} disabled={productPage === productTotalPages}>Next</Button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1037,7 +1112,7 @@ export default function Sales() {
       )}
 
       {!isReturnMode && (
-      <div className="min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden">
+      <div className="min-h-0 flex flex-col bg-card border rounded-xl overflow-hidden self-start lg:sticky lg:top-3">
         <div className="px-4 py-3 border-b flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold">{isReturnMode ? 'Return Guidance' : 'Cart'}</h2>

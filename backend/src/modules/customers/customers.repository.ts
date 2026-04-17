@@ -6,7 +6,7 @@ import { ListCustomersQueryDto } from '../../contracts/v1/customers/list-custome
 
 type CreateCustomerInput = Omit<
   CustomerDto,
-  'id' | 'createdAt' | 'updatedAt' | 'version' | 'isArchived' | 'archivedAt'
+  'id' | 'storeId' | 'createdAt' | 'updatedAt' | 'version' | 'isArchived' | 'archivedAt'
 >;
 
 type UpdateCustomerInput = Partial<

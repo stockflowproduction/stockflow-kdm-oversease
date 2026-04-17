@@ -53,6 +53,7 @@ type CashbookRow = {
   layerType?: 'operational' | 'adjustment';
   isCorrectionImpact?: boolean;
   isRealActivity?: boolean;
+  correctionImpactClass?: 'financial' | 'metadata_only' | 'n/a';
 };
 const normalizeCashbookRowMoney = (row: CashbookRow): CashbookRow => ({
   ...row,
@@ -101,6 +102,33 @@ const toFiniteMoney = (value: unknown) => {
 };
 const roundMoney = (value: unknown) => Math.round((toFiniteMoney(value) + Number.EPSILON) * 100) / 100;
 const isCorrectionRowType = (type: CashbookRow['type']) => type === 'delete_reversal' || type === 'delete_compensation' || type === 'update_correction';
+const isSyntheticCorrectionRow = (row: CashbookRow) => (
+  row.isSynthetic === true
+  && (
+    row.eventType === 'delete_reversal'
+    || row.eventType === 'delete_compensation'
+    || row.eventType === 'update_correction'
+    || isCorrectionRowType(row.type)
+  )
+);
+const classifyCashbookLayer = (row: CashbookRow): 'operational' | 'adjustment' => (isSyntheticCorrectionRow(row) ? 'adjustment' : 'operational');
+const hasMaterialFinancialImpact = (row: Pick<CashbookRow, 'grossSales' | 'netSales' | 'currentDueEffect' | 'currentStoreCreditEffect' | 'cashIn' | 'cashOut' | 'onlineIn' | 'onlineOut' | 'grossProfitEffect' | 'netProfitEffect'>, eps = 0.01) => (
+  Math.abs(row.grossSales) > eps
+  || Math.abs(row.netSales) > eps
+  || Math.abs(row.currentDueEffect) > eps
+  || Math.abs(row.currentStoreCreditEffect) > eps
+  || Math.abs(row.cashIn) > eps
+  || Math.abs(row.cashOut) > eps
+  || Math.abs(row.onlineIn) > eps
+  || Math.abs(row.onlineOut) > eps
+  || Math.abs(row.grossProfitEffect) > eps
+  || Math.abs(row.netProfitEffect) > eps
+);
+const getCorrectionImpactClass = (row: CashbookRow): 'financial' | 'metadata_only' | 'n/a' => {
+  if (!isSyntheticCorrectionRow(row)) return 'n/a';
+  return hasMaterialFinancialImpact(row) ? 'financial' : 'metadata_only';
+};
+const CASHBOOK_ROWS_PER_PAGE = 25;
 const getCashbookAuditSignals = (
   row: CashbookRow,
   context: { avgReturnValue: number; avgBalanceMovement: number }
@@ -114,7 +142,10 @@ const getCashbookAuditSignals = (
   const touchesPnL = Math.abs(row.grossProfitEffect) > 0.01 || Math.abs(row.netProfitEffect) > 0.01 || Math.abs(row.cogsEffect) > 0.01;
   const mechanismCount = [touchesRevenue, touchesBalance, touchesCashbook, touchesPnL].filter(Boolean).length;
 
-  if (isCorrectionRowType(row.type)) flags.push('Manual correction event');
+  if (isSyntheticCorrectionRow(row)) {
+    if (row.correctionImpactClass === 'metadata_only') flags.push('Metadata-only correction event');
+    else flags.push('Manual correction event');
+  }
   if (row.type === 'return' && row.salesReturn >= Math.max(1000, context.avgReturnValue * 1.5)) flags.push('High return value');
   if (row.type === 'return' && returnTouchCount >= 3) flags.push('Complex return allocation');
   if (row.type === 'return' && row.currentStoreCreditEffect > 0.01) flags.push('Store credit created');
@@ -126,6 +157,7 @@ const getCashbookAuditSignals = (
   const highPriorityFlags = ['Manual correction event', 'Mixed refund and due adjustment', 'Large balance movement', 'High return value'];
   const hasHighPriority = flags.some(flag => highPriorityFlags.includes(flag));
   if (flags.length === 0) return { flags, riskLevel: 'low' };
+  if (flags.length === 1 && flags[0] === 'Metadata-only correction event') return { flags, riskLevel: 'low' };
   if (hasHighPriority && flags.length >= 2) return { flags, riskLevel: 'high' };
   if (flags.length >= 3) return { flags, riskLevel: 'high' };
   return { flags, riskLevel: 'medium' };
@@ -476,7 +508,10 @@ function MoneyTile({ label, value, tone = 'neutral' }: { label: string; value: s
 export default function Finance() {
   const [data, setData] = useState<AppState>(loadData());
   const [errors, setErrors] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<FinanceTabKey>('dashboard');
+  const [activeTab, setActiveTab] = useState<FinanceTabKey>('cashbook');
+  // Cash tab summary cards depend on the same canonical cashbook rows used by cashbook/profit tabs.
+  // Keep derivation gated to tabs that actually render those metrics so other tabs stay lightweight.
+  const shouldComputeDetailedCashbook = activeTab === 'cashbook' || activeTab === 'profit' || activeTab === 'cash';
 
   const [openingBalance, setOpeningBalance] = useState('');
   const [openingBalanceAutoFilled, setOpeningBalanceAutoFilled] = useState(false);
@@ -512,8 +547,9 @@ export default function Finance() {
   const [cashbookTypeFilter, setCashbookTypeFilter] = useState<'all' | 'sale' | 'payment' | 'return' | 'expense' | 'delete_reversal' | 'delete_compensation' | 'update_correction'>('all');
   const [cashbookAuditFilter, setCashbookAuditFilter] = useState<'all' | 'needs_review' | 'corrections_only'>('all');
   const [cashbookCustomerQuery, setCashbookCustomerQuery] = useState('');
+  const [cashbookPage, setCashbookPage] = useState(1);
+  const [cashbookScope, setCashbookScope] = useState<'recent_90d' | 'all'>('recent_90d');
   const [showReturnEffectDetails, setShowReturnEffectDetails] = useState(false);
-  const [showCashbookDiagnostics, setShowCashbookDiagnostics] = useState(false);
   const [showFullCashbookColumns, setShowFullCashbookColumns] = useState(false);
 
   const refreshData = () => setData(loadData());
@@ -852,13 +888,20 @@ export default function Finance() {
     return { totalDue: snapshot.totalDue, totalStoreCredit: snapshot.totalStoreCredit };
   }, [data.customers, data.transactions]);
 
+  const scopedCashbookTransactions = useMemo(() => {
+    if (cashbookScope === 'all') return data.transactions;
+    const cutoff = Date.now() - (90 * 24 * 60 * 60 * 1000);
+    return data.transactions.filter((tx) => new Date(tx.date).getTime() >= cutoff);
+  }, [data.transactions, cashbookScope]);
+
   const cashbookRows = useMemo(() => {
+    if (!shouldComputeDetailedCashbook) return [] as CashbookRow[];
     const parseTime = (iso: string) => {
       const parsed = new Date(iso).getTime();
       return Number.isFinite(parsed) ? parsed : 0;
     };
     const events: Array<{ date: string; kind: 'tx' | 'expense' | 'deleted' | 'delete_compensation' | 'updated'; tx?: Transaction; expense?: Expense; deleted?: DeletedTransactionRecord; compensation?: DeleteCompensationRecord; updated?: UpdatedTransactionRecord }> = [
-      ...data.transactions.map(tx => ({ date: tx.date, kind: 'tx' as const, tx })),
+      ...scopedCashbookTransactions.map(tx => ({ date: tx.date, kind: 'tx' as const, tx })),
       ...expenses.map(expense => ({ date: expense.createdAt, kind: 'expense' as const, expense })),
       ...((data.deletedTransactions || []).map(deleted => ({ date: deleted.deletedAt, kind: 'deleted' as const, deleted }))),
       ...((data.deleteCompensations || []).map(compensation => ({ date: compensation.createdAt, kind: 'delete_compensation' as const, compensation }))),
@@ -922,6 +965,19 @@ export default function Finance() {
           netProfitEffect: 0,
         };
         const updatedType = updatedEvent.updatedTransaction?.type || 'sale';
+        const hasFinancialDelta = hasMaterialFinancialImpact({
+          grossSales: delta.grossSales,
+          netSales: delta.netSales,
+          currentDueEffect: delta.currentDueEffect,
+          currentStoreCreditEffect: delta.currentStoreCreditEffect,
+          cashIn: delta.cashIn,
+          cashOut: delta.cashOut,
+          onlineIn: delta.onlineIn,
+          onlineOut: delta.onlineOut,
+          grossProfitEffect: delta.grossProfitEffect,
+          netProfitEffect: delta.netProfitEffect,
+        });
+        const customerChanged = (updatedEvent.changeTags || []).some(tag => /customer/i.test(tag));
         const effectSummary = updatedEvent.changeSummary || (updatedType === 'return'
           ? 'Updated return correction'
           : updatedType === 'payment'
@@ -956,7 +1012,7 @@ export default function Finance() {
           grossProfitEffect: delta.grossProfitEffect,
           expense: delta.expense,
           netProfitEffect: delta.netProfitEffect,
-          effectSummary,
+          effectSummary: (!hasFinancialDelta && customerChanged) ? 'Metadata update — customer changed' : effectSummary,
         });
         return;
       }
@@ -968,7 +1024,7 @@ export default function Finance() {
         const dueDelta = (deleted.afterImpact?.customerDue || 0) - (deleted.beforeImpact?.customerDue || 0);
         const storeCreditDelta = (deleted.afterImpact?.customerStoreCredit || 0) - (deleted.beforeImpact?.customerStoreCredit || 0);
         const settlement = original.type === 'sale' ? getSaleSettlementBreakdown(original) : { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
-        const historicalTransactions = data.transactions
+        const historicalTransactions = scopedCashbookTransactions
           .filter(candidate => resolveTransactionTimeForSession(candidate) < resolveTransactionTimeForSession(original)
             || (resolveTransactionTimeForSession(candidate) === resolveTransactionTimeForSession(original) && candidate.id !== original.id))
           .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
@@ -1149,7 +1205,7 @@ export default function Finance() {
         });
         return;
       }
-      const historicalTransactions = data.transactions
+      const historicalTransactions = scopedCashbookTransactions
         .filter(candidate => resolveTransactionTimeForSession(candidate) < resolveTransactionTimeForSession(tx)
           || (resolveTransactionTimeForSession(candidate) === resolveTransactionTimeForSession(tx) && candidate.id !== tx.id))
         .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
@@ -1191,15 +1247,18 @@ export default function Finance() {
       });
     });
     return rows.map((row) => {
-      const isCorrectionImpact = isCorrectionRowType(row.type);
+      const layerType = classifyCashbookLayer(row);
+      const isCorrectionImpact = layerType === 'adjustment';
+      const correctionImpactClass = getCorrectionImpactClass(row);
       return normalizeCashbookRowMoney({
         ...row,
-        layerType: isCorrectionImpact ? 'adjustment' : 'operational',
+        layerType,
         isCorrectionImpact,
         isRealActivity: !isCorrectionImpact,
+        correctionImpactClass,
       });
     });
-  }, [data.transactions, expenses]);
+  }, [scopedCashbookTransactions, expenses, data.deletedTransactions, data.deleteCompensations, data.updatedTransactionEvents, shouldComputeDetailedCashbook]);
 
   const cashbookRowsWithSignals = useMemo(() => {
     const returnRows = cashbookRows.filter(row => row.type === 'return');
@@ -1229,7 +1288,9 @@ export default function Finance() {
   }, [cashbookRowsWithSignals, cashbookFromDate, cashbookToDate, cashbookTypeFilter, cashbookCustomerQuery]);
 
   const cashbookIntelligenceSummary = useMemo(() => ({
-    corrections: baseFilteredCashbookRows.filter(row => isCorrectionRowType(row.type)).length,
+    corrections: baseFilteredCashbookRows.filter(row => row.layerType === 'adjustment').length,
+    financialCorrections: baseFilteredCashbookRows.filter(row => row.correctionImpactClass === 'financial').length,
+    metadataOnlyCorrections: baseFilteredCashbookRows.filter(row => row.correctionImpactClass === 'metadata_only').length,
     returnsWithStoreCredit: baseFilteredCashbookRows.filter(row => row.type === 'return' && row.auditFlags?.includes('Store credit created')).length,
     needsReview: baseFilteredCashbookRows.filter(row => row.riskLevel === 'medium' || row.riskLevel === 'high').length,
     largeBalanceMovements: baseFilteredCashbookRows.filter(row => row.auditFlags?.includes('Large balance movement')).length,
@@ -1249,10 +1310,28 @@ export default function Finance() {
     }
     if (cashbookAuditFilter === 'corrections_only') {
       return layerScopedCashbookRows
-        .filter(row => isCorrectionRowType(row.type));
+        .filter(row => row.layerType === 'adjustment');
     }
     return layerScopedCashbookRows;
   }, [layerScopedCashbookRows, cashbookAuditFilter]);
+
+  const cashbookTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredCashbookRows.length / CASHBOOK_ROWS_PER_PAGE)),
+    [filteredCashbookRows.length]
+  );
+
+  const paginatedCashbookRows = useMemo(() => {
+    const start = (cashbookPage - 1) * CASHBOOK_ROWS_PER_PAGE;
+    return filteredCashbookRows.slice(start, start + CASHBOOK_ROWS_PER_PAGE);
+  }, [filteredCashbookRows, cashbookPage]);
+
+  useEffect(() => {
+    setCashbookPage(1);
+  }, [cashbookFromDate, cashbookToDate, cashbookTypeFilter, reportingLayerMode, cashbookCustomerQuery, cashbookAuditFilter]);
+
+  useEffect(() => {
+    setCashbookPage(prev => Math.min(prev, cashbookTotalPages));
+  }, [cashbookTotalPages]);
 
   const cashbookRollups = useMemo(() => {
     return filteredCashbookRows.reduce((acc, row) => {
@@ -1281,11 +1360,16 @@ export default function Finance() {
   const realActivityRollups = useMemo(() => {
     const realRows = filteredCashbookRows.filter(row => row.isRealActivity);
     const correctionRows = filteredCashbookRows.filter(row => row.isCorrectionImpact);
+    const financialCorrectionRows = correctionRows.filter(row => row.correctionImpactClass === 'financial');
+    const metadataOnlyCorrectionRows = correctionRows.filter(row => row.correctionImpactClass === 'metadata_only');
     return {
       realSales: roundMoney(realRows.reduce((sum, row) => sum + row.grossSales, 0)),
       realReturns: roundMoney(realRows.reduce((sum, row) => sum + row.salesReturn, 0)),
       correctionAdjustments: correctionRows.length,
+      financialCorrectionAdjustments: financialCorrectionRows.length,
+      metadataOnlyCorrectionAdjustments: metadataOnlyCorrectionRows.length,
       netAdjustmentImpact: roundMoney(correctionRows.reduce((sum, row) => sum + row.netSales, 0)),
+      netFinancialAdjustmentImpact: roundMoney(financialCorrectionRows.reduce((sum, row) => sum + row.netSales, 0)),
     };
   }, [filteredCashbookRows]);
 
@@ -1354,6 +1438,7 @@ export default function Finance() {
       'Transaction / Bill No': row.billNo,
       'Type': row.type.toUpperCase(),
       'Activity Layer': row.layerType === 'adjustment' ? 'Adjustment' : 'Operational',
+      'Correction Impact Class': row.correctionImpactClass || 'n/a',
       'Customer': row.customer,
       'Effect Summary': row.effectSummary,
       'Risk Level': row.riskLevel || 'low',
@@ -1386,6 +1471,7 @@ export default function Finance() {
 
   const cashbookExportSummaryRows = useMemo(() => ([
     { Metric: 'Export generated at', Value: new Date().toISOString() },
+    { Metric: 'Cashbook scope', Value: cashbookScope === 'all' ? 'Full history' : 'Recent 90 days' },
     { Metric: 'From date filter', Value: cashbookFromDate || 'All' },
     { Metric: 'To date filter', Value: cashbookToDate || 'All' },
     { Metric: 'Type filter', Value: cashbookTypeFilter },
@@ -1393,7 +1479,9 @@ export default function Finance() {
     { Metric: 'Search filter', Value: cashbookCustomerQuery || 'None' },
     { Metric: 'Rows exported', Value: String(filteredCashbookRows.length) },
     { Metric: 'Rows needing review', Value: String(cashbookIntelligenceSummary.needsReview) },
-    { Metric: 'Correction rows', Value: String(cashbookIntelligenceSummary.corrections) },
+    { Metric: 'Adjustment rows', Value: String(cashbookIntelligenceSummary.corrections) },
+    { Metric: 'Financial adjustment rows', Value: String(cashbookIntelligenceSummary.financialCorrections) },
+    { Metric: 'Metadata-only adjustment rows', Value: String(cashbookIntelligenceSummary.metadataOnlyCorrections) },
     { Metric: 'Store-credit return rows', Value: String(cashbookIntelligenceSummary.returnsWithStoreCredit) },
     { Metric: 'Large balance movement rows', Value: String(cashbookIntelligenceSummary.largeBalanceMovements) },
     { Metric: 'Mixed refund events', Value: String(cashbookIntelligenceSummary.mixedRefundEvents) },
@@ -1411,8 +1499,11 @@ export default function Finance() {
     { Metric: 'Operational Sales', Value: realActivityRollups.realSales.toFixed(2) },
     { Metric: 'Operational Returns', Value: realActivityRollups.realReturns.toFixed(2) },
     { Metric: 'Adjustment Rows', Value: String(realActivityRollups.correctionAdjustments) },
+    { Metric: 'Financial Adjustment Rows', Value: String(realActivityRollups.financialCorrectionAdjustments) },
+    { Metric: 'Metadata-only Adjustment Rows', Value: String(realActivityRollups.metadataOnlyCorrectionAdjustments) },
     { Metric: 'Net Adjustment Impact', Value: realActivityRollups.netAdjustmentImpact.toFixed(2) },
-  ]), [cashbookFromDate, cashbookToDate, cashbookTypeFilter, cashbookAuditFilter, reportingLayerMode, cashbookCustomerQuery, filteredCashbookRows.length, cashbookRollups, dueStoreCreditSummary.totalDue, dueStoreCreditSummary.totalStoreCredit, cashbookIntelligenceSummary, realActivityRollups]);
+    { Metric: 'Net Financial Adjustment Impact', Value: realActivityRollups.netFinancialAdjustmentImpact.toFixed(2) },
+  ]), [cashbookScope, cashbookFromDate, cashbookToDate, cashbookTypeFilter, cashbookAuditFilter, reportingLayerMode, cashbookCustomerQuery, filteredCashbookRows.length, cashbookRollups, dueStoreCreditSummary.totalDue, dueStoreCreditSummary.totalStoreCredit, cashbookIntelligenceSummary, realActivityRollups]);
 
   const downloadTextFile = (content: string, fileName: string) => {
     const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
@@ -1815,7 +1906,6 @@ export default function Finance() {
   const chartMax = Math.max(monthlySummary.netSales, monthlySummary.todayExpenses, Math.abs(monthlySummary.grossProfit), 1);
 
   const tabs: Array<{ key: FinanceTabKey; label: string; icon: React.ReactNode }> = [
-    { key: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="w-4 h-4" /> },
     { key: 'cashbook', label: 'Cashbook', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
     { key: 'cash', label: 'Cash Management', icon: <Wallet className="w-4 h-4" /> },
     { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
@@ -1855,166 +1945,11 @@ export default function Finance() {
           })}
         </div>
 
-        {activeTab === 'dashboard' && (
-          <div className="space-y-4">
-            <Card className="border-slate-200 shadow-sm">
-              <CardHeader>
-                <CardTitle>Finance Dashboard (Current Window)</CardTitle>
-                <p className="text-xs text-muted-foreground">Switch between business activity, correction adjustments, and final accounting truth without changing underlying math.</p>
-                <div className="flex gap-2 pt-2 flex-wrap">
-                  <Button size="sm" variant={reportingLayerMode === 'operational' ? 'default' : 'outline'} onClick={() => setReportingLayerMode('operational')}>Operational View</Button>
-                  <Button size="sm" variant={reportingLayerMode === 'adjustment' ? 'default' : 'outline'} onClick={() => setReportingLayerMode('adjustment')}>Adjustment View</Button>
-                  <Button size="sm" variant={reportingLayerMode === 'final' ? 'default' : 'outline'} onClick={() => setReportingLayerMode('final')}>Final Accounting View</Button>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <StatCard label="Operational Net Sales" value={formatINR(todayLayerBreakdowns.operational.netSales)} />
-                  <StatCard label="Adjustment Net Impact" value={formatINR(todayLayerBreakdowns.adjustment.netSales)} tone={todayLayerBreakdowns.adjustment.netSales >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="Final Net Sales" value={formatINR(todayLayerBreakdowns.final.netSales)} />
-                </div>
-                <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Revenue / Sale-time activity</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <StatCard label="Gross Sales" value={formatINR(todayFinanceBreakdown.grossSales)} />
-                    <StatCard label="Sales Returns" value={formatINR(todayFinanceBreakdown.salesReturns)} tone={todayFinanceBreakdown.salesReturns > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Net Sales" value={formatINR(todayFinanceBreakdown.netSales)} tone={todayFinanceBreakdown.netSales >= 0 ? 'good' : 'bad'} />
-                    <StatCard label="Due Created (This Period)" value={formatINR(todayFinanceBreakdown.creditSalesCreated)} />
-                    <StatCard label="Online Sales (at sale)" value={formatINR(todayFinanceBreakdown.onlineSalesAtSale)} />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Profitability (P&L)</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <StatCard label="COGS (net of returns)" value={formatINR(todayFinanceBreakdown.cogs)} />
-                    <StatCard label="Gross Profit" value={formatINR(todayFinanceBreakdown.grossProfit)} tone={todayFinanceBreakdown.grossProfit >= 0 ? 'good' : 'bad'} />
-                    <StatCard label="Expenses" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Net Profit" value={formatINR(todayFinanceBreakdown.netProfit)} tone={todayFinanceBreakdown.netProfit >= 0 ? 'good' : 'bad'} />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Cash Movement / Cashbook (selected layer)</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <StatCard label="Cash at Sale" value={formatINR(todayFinanceBreakdown.saleCashReceipts)} />
-                    <StatCard label="Cash Collections" value={formatINR(todayFinanceBreakdown.cashCollections)} />
-                    <StatCard label="Online Collections" value={formatINR(todayFinanceBreakdown.onlineCollections)} />
-                    <StatCard label="Return Cash Outflow" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Expenses (cash outflow)" value={formatINR(todayFinanceBreakdown.todayExpenses)} tone={todayFinanceBreakdown.todayExpenses > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Net Cash Movement" value={formatINR(todayFinanceBreakdown.cashMovementAfterExpenses)} tone={todayFinanceBreakdown.cashMovementAfterExpenses >= 0 ? 'good' : 'bad'} />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Return effects</p>
-                    <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px]" onClick={() => setShowReturnEffectDetails(prev => !prev)}>
-                      {showReturnEffectDetails ? 'Hide details' : 'Show details'}
-                    </Button>
-                  </div>
-                  {showReturnEffectDetails && (
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      <StatCard label="Cash Outflow (Returns)" value={formatINR(todayFinanceBreakdown.cashRefunds)} tone={todayFinanceBreakdown.cashRefunds > 0 ? 'bad' : 'neutral'} />
-                      <StatCard label="Online Outflow (Returns)" value={formatINR(todayFinanceBreakdown.onlineRefunds)} tone={todayFinanceBreakdown.onlineRefunds > 0 ? 'bad' : 'neutral'} />
-                      <StatCard label="Due Reduction (Returns)" value={formatINR(todayFinanceBreakdown.dueReductionFromReturns)} />
-                      <StatCard label="Store Credit Created (Returns)" value={formatINR(todayFinanceBreakdown.storeCreditCreatedFromReturns)} />
-                    </div>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Current balances (live state)</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <StatCard label="Due Outstanding" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
-                    <StatCard label="Current Store Credit Total" value={formatINR(dueStoreCreditSummary.totalStoreCredit)} tone={dueStoreCreditSummary.totalStoreCredit > 0 ? 'good' : 'neutral'} />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <Card className="border-slate-200 shadow-sm">
-                <CardHeader>
-                  <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
-                    <span>Daily Summary ({reportingLayerMode === 'operational' ? 'Operational' : reportingLayerMode === 'adjustment' ? 'Adjustment' : 'Final Accounting'})</span>
-                    <Input type="date" className="w-auto" value={profitDate} onChange={e => setProfitDate(e.target.value)} />
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  <StatCard label="Gross Sales" value={formatINR(dailySummary.grossSales)} />
-                  <StatCard label="Sales Returns" value={formatINR(dailySummary.salesReturns)} tone={dailySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Net Sales" value={formatINR(dailySummary.netSales)} tone={dailySummary.netSales >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="COGS" value={formatINR(dailySummary.cogs)} />
-                  <StatCard label="Gross Profit" value={formatINR(dailySummary.grossProfit)} tone={dailySummary.grossProfit >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="Expenses" value={formatINR(dailySummary.todayExpenses)} tone={dailySummary.todayExpenses > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Net Profit" value={formatINR(dailySummary.netProfit)} tone={dailySummary.netProfit >= 0 ? 'good' : 'bad'} />
-                </CardContent>
-              </Card>
-              <Card className="border-slate-200 shadow-sm">
-                <CardHeader>
-                  <CardTitle className="flex items-center justify-between gap-2 flex-wrap">
-                    <span>Monthly Summary ({reportingLayerMode === 'operational' ? 'Operational' : reportingLayerMode === 'adjustment' ? 'Adjustment' : 'Final Accounting'})</span>
-                    <Input type="month" className="w-auto" value={profitMonth} onChange={e => setProfitMonth(e.target.value)} />
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  <StatCard label="Gross Sales" value={formatINR(monthlySummary.grossSales)} />
-                  <StatCard label="Sales Returns" value={formatINR(monthlySummary.salesReturns)} tone={monthlySummary.salesReturns > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Net Sales" value={formatINRSummary(monthlySummary.netSales)} tone={monthlySummary.netSales >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="COGS" value={formatINR(monthlySummary.cogs)} />
-                  <StatCard label="Gross Profit" value={formatINRSummary(monthlySummary.grossProfit)} tone={monthlySummary.grossProfit >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="Expenses" value={formatINRSummary(monthlySummary.todayExpenses)} tone={monthlySummary.todayExpenses > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Net Profit" value={formatINR(monthlySummary.netProfit)} tone={monthlySummary.netProfit >= 0 ? 'good' : 'bad'} />
-                </CardContent>
-              </Card>
-            </div>
-          </div>
-        )}
-
         {activeTab === 'cashbook' && (
           <div className="space-y-4">
             <Card className="border-slate-200 shadow-sm">
-              <CardHeader>
-                <CardTitle>Cashbook (Accountant Audit View)</CardTitle>
-                <p className="text-xs text-muted-foreground">Invoice/event level effects across revenue, live balances, cash movement, and profitability.</p>
-              </CardHeader>
               <CardContent className="space-y-3">
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-                  <StatCard label="Opening Balance" value={formatINR(openSession?.openingBalance ?? latestCarryForwardSession?.closingBalance ?? 0)} />
-                  <StatCard label="Cash In Total" value={formatINR(cashbookRollups.cashIn)} />
-                  <StatCard label="Cash Out Total" value={formatINR(cashbookRollups.cashOut)} tone={cashbookRollups.cashOut > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Online In Total" value={formatINR(cashbookRollups.onlineIn)} />
-                  <StatCard label="Online Out Total" value={formatINR(cashbookRollups.onlineOut)} tone={cashbookRollups.onlineOut > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Net Cash Effect" value={formatINR(cashbookRollups.cashIn - cashbookRollups.cashOut)} tone={(cashbookRollups.cashIn - cashbookRollups.cashOut) >= 0 ? 'good' : 'bad'} />
-                  <StatCard label="Gross Sales" value={formatINR(cashbookRollups.grossSales)} />
-                  <StatCard label="Returns" value={formatINR(cashbookRollups.salesReturns)} tone={cashbookRollups.salesReturns > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Due Created (This Period)" value={formatINR(cashbookRollups.creditDueCreated)} />
-                  <StatCard label="Due Outstanding" value={formatINR(dueStoreCreditSummary.totalDue)} tone={dueStoreCreditSummary.totalDue > 0 ? 'bad' : 'neutral'} />
-                  <StatCard label="Current Store Credit" value={formatINR(dueStoreCreditSummary.totalStoreCredit)} tone={dueStoreCreditSummary.totalStoreCredit > 0 ? 'good' : 'neutral'} />
-                  <StatCard label="Net Profit Effect" value={formatINR(cashbookRollups.netProfit)} tone={cashbookRollups.netProfit >= 0 ? 'good' : 'bad'} />
-                </div>
-                <div className="rounded-md border p-2.5 bg-muted/10 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Audit diagnostics</div>
-                    <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px]" onClick={() => setShowCashbookDiagnostics(prev => !prev)}>
-                      {showCashbookDiagnostics ? 'Hide audit diagnostics' : 'Show audit diagnostics'}
-                    </Button>
-                  </div>
-                  {showCashbookDiagnostics && (
-                    <>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-                        <StatCard label="Correction Rows" value={String(cashbookIntelligenceSummary.corrections)} tone={cashbookIntelligenceSummary.corrections > 0 ? 'bad' : 'neutral'} />
-                        <StatCard label="Rows Needing Review" value={String(cashbookIntelligenceSummary.needsReview)} tone={cashbookIntelligenceSummary.needsReview > 0 ? 'bad' : 'neutral'} />
-                        <StatCard label="Returns + Store Credit" value={String(cashbookIntelligenceSummary.returnsWithStoreCredit)} tone={cashbookIntelligenceSummary.returnsWithStoreCredit > 0 ? 'bad' : 'neutral'} />
-                        <StatCard label="Large Balance Moves" value={String(cashbookIntelligenceSummary.largeBalanceMovements)} tone={cashbookIntelligenceSummary.largeBalanceMovements > 0 ? 'bad' : 'neutral'} />
-                        <StatCard label="Mixed Refund Events" value={String(cashbookIntelligenceSummary.mixedRefundEvents)} tone={cashbookIntelligenceSummary.mixedRefundEvents > 0 ? 'bad' : 'neutral'} />
-                      </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        <StatCard label="Operational Activity Sales" value={formatINR(realActivityRollups.realSales)} />
-                        <StatCard label="Operational Activity Returns" value={formatINR(realActivityRollups.realReturns)} tone={realActivityRollups.realReturns > 0 ? 'bad' : 'neutral'} />
-                        <StatCard label="Correction Adjustments" value={String(realActivityRollups.correctionAdjustments)} tone={realActivityRollups.correctionAdjustments > 0 ? 'bad' : 'neutral'} />
-                        <StatCard label="Net Adjustment Impact" value={formatINR(realActivityRollups.netAdjustmentImpact)} tone={realActivityRollups.netAdjustmentImpact >= 0 ? 'good' : 'bad'} />
-                      </div>
-                    </>
-                  )}
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
+                <div className="grid grid-cols-1 md:grid-cols-8 gap-2">
                   <Input type="date" value={cashbookFromDate} onChange={e => setCashbookFromDate(e.target.value)} />
                   <Input type="date" value={cashbookToDate} onChange={e => setCashbookToDate(e.target.value)} />
                   <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={cashbookTypeFilter} onChange={e => setCashbookTypeFilter(e.target.value as 'all' | 'sale' | 'payment' | 'return' | 'expense' | 'delete_reversal' | 'delete_compensation' | 'update_correction')}>
@@ -2037,7 +1972,16 @@ export default function Finance() {
                     <option value="adjustment">Adjustment Activity</option>
                     <option value="final">Final Accounting</option>
                   </select>
+                  <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={cashbookScope} onChange={e => setCashbookScope(e.target.value as 'recent_90d' | 'all')}>
+                    <option value="recent_90d">Recent 90 Days Scope</option>
+                    <option value="all">Full History Scope</option>
+                  </select>
                   <Input placeholder="Search customer, bill, or notes" value={cashbookCustomerQuery} onChange={e => setCashbookCustomerQuery(e.target.value)} className="md:col-span-2" />
+                </div>
+                <div className={`rounded-md border px-3 py-2 text-xs ${cashbookScope === 'all' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                  {cashbookScope === 'all'
+                    ? 'Cashbook scope: Full history (complete accounting view).'
+                    : 'Cashbook scope: Recent 90 days (performance mode). Switch to Full History Scope for complete accounting view/export.'}
                 </div>
                 <div className="rounded-md border p-2.5 bg-muted/20">
                   <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Cashbook Download Center</div>
@@ -2099,7 +2043,7 @@ export default function Finance() {
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredCashbookRows.map(row => (
+                      {paginatedCashbookRows.map(row => (
                         <tr key={row.id} className="border-t">
                           <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleString()}</td>
                           <td className="p-2 font-medium whitespace-nowrap">#{row.billNo}</td>
@@ -2155,6 +2099,13 @@ export default function Finance() {
                     </tbody>
                   </table>
                 </div>
+                {filteredCashbookRows.length > CASHBOOK_ROWS_PER_PAGE && (
+                  <div className="mt-3 flex items-center justify-between gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setCashbookPage(p => Math.max(1, p - 1))} disabled={cashbookPage <= 1}>Previous</Button>
+                    <div className="text-xs text-muted-foreground">Page {cashbookPage} of {cashbookTotalPages}</div>
+                    <Button size="sm" variant="outline" onClick={() => setCashbookPage(p => Math.min(cashbookTotalPages, p + 1))} disabled={cashbookPage >= cashbookTotalPages}>Next</Button>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>

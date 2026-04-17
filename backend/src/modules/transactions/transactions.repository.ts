@@ -100,4 +100,74 @@ export class TransactionsRepository {
 
     return transaction;
   }
+
+  async update(
+    storeId: string,
+    id: string,
+    input: Partial<Omit<TransactionDto, 'id' | 'storeId' | 'createdAt' | 'version'>>,
+    summary = 'transaction updated',
+  ): Promise<TransactionDto | null> {
+    const index = this.transactions.findIndex((t) => t.storeId === storeId && t.id === id);
+    if (index < 0) return null;
+
+    const existing = this.transactions[index];
+    const now = new Date().toISOString();
+    const next: TransactionDto = {
+      ...existing,
+      ...input,
+      id: existing.id,
+      storeId: existing.storeId,
+      createdAt: existing.createdAt,
+      version: existing.version + 1,
+      updatedAt: now,
+    };
+    this.transactions[index] = next;
+
+    this.auditEvents.push({
+      id: randomUUID(),
+      storeId,
+      transactionId: next.id,
+      eventType: 'updated',
+      eventAt: now,
+      actorId: next.metadata.createdBy ?? null,
+      summary,
+    });
+
+    return next;
+  }
+
+  async archiveDelete(
+    storeId: string,
+    id: string,
+    input: { reason?: string | null; deletedBy?: string | null },
+  ): Promise<DeletedTransactionDto | null> {
+    const index = this.transactions.findIndex((t) => t.storeId === storeId && t.id === id);
+    if (index < 0) return null;
+    const existing = this.transactions[index];
+    this.transactions.splice(index, 1);
+
+    const now = new Date().toISOString();
+    const deleted: DeletedTransactionDto = {
+      id: randomUUID(),
+      storeId,
+      originalTransactionId: existing.id,
+      deletedAt: now,
+      deletedBy: input.deletedBy ?? null,
+      reason: input.reason ?? null,
+      snapshot: existing,
+    };
+    this.deletedTransactions.push(deleted);
+
+    this.auditEvents.push({
+      id: randomUUID(),
+      storeId,
+      transactionId: existing.id,
+      eventType: 'deleted',
+      eventAt: now,
+      actorId: input.deletedBy ?? null,
+      summary: input.reason ?? 'transaction deleted',
+    });
+
+    return deleted;
+  }
 }

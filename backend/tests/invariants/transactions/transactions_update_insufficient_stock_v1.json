@@ -1,0 +1,19 @@
+{
+  "name": "transactions_update_insufficient_stock_v1",
+  "storeId": "store-tx-upd-5",
+  "setup": {
+    "customer": { "name": "Stock Guard User", "phone": "+1 555 6105" },
+    "product": { "name": "Stock Guard Product", "barcode": "SKU-UPD-STK", "category": "General", "buyPrice": 10, "sellPrice": 50, "stock": 1, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "sale": {
+      "items": [{ "quantity": 1, "unitPrice": 50 }],
+      "settlement": { "cashPaid": 50, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" }
+    }
+  },
+  "update": {
+    "patch": {
+      "items": [{ "quantity": 3, "unitPrice": 50 }],
+      "settlement": { "cashPaid": 150, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" }
+    }
+  },
+  "expectedErrorCode": "TRANSACTION_MUTATION_INSUFFICIENT_STOCK"
+}

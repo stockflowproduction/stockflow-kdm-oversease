@@ -1,0 +1,11 @@
+{
+  "name": "transactions_delete_finance_effect_preview_v1",
+  "storeId": "store-tx-del-4",
+  "setup": {
+    "customer": { "name": "Delete Finance User", "phone": "+1 555 6203" },
+    "product": { "name": "Delete Finance Product", "barcode": "SKU-DEL-FFX", "category": "General", "buyPrice": 10, "sellPrice": 70, "stock": 5, "variants": [], "colors": [], "stockByVariantColor": [] },
+    "sale": { "items": [{ "quantity": 1, "unitPrice": 70 }], "settlement": { "cashPaid": 30, "onlinePaid": 40, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "mixed" } }
+  },
+  "delete": { "compensation": { "mode": "cash_refund", "amount": 20 } },
+  "expected": { "deletedCount": 1, "stock": 5 }
+}
