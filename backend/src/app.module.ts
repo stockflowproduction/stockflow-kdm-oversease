@@ -5,9 +5,12 @@ import { ConfigModule } from './config/config.module';
 import { IdempotencyModule } from './infrastructure/idempotency/idempotency.module';
 import { MongoDbModule } from './infrastructure/mongodb/mongodb.module';
 import { AuditModule } from './modules/audit/audit.module';
+import { CashSessionsModule } from './modules/cash-sessions/cash-sessions.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { CustomersModule } from './modules/customers/customers.module';
 import { FinanceModule } from './modules/finance/finance.module';
+import { ExpensesModule } from './modules/expenses/expenses.module';
+import { FinanceArtifactsModule } from './modules/finance-artifacts/finance-artifacts.module';
 import { HealthModule } from './modules/health/health.module';
 import { ProcurementModule } from './modules/procurement/procurement.module';
 import { ProductsModule } from './modules/products/products.module';
@@ -30,6 +33,9 @@ import { UploadsModule } from './modules/uploads/uploads.module';
     CustomersModule,
     TransactionsModule,
     FinanceModule,
+    ExpensesModule,
+    CashSessionsModule,
+    FinanceArtifactsModule,
     ProcurementModule,
     ReportsModule,
     UploadsModule,

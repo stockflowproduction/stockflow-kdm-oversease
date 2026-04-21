@@ -25,6 +25,20 @@ export const envSchema = z.object({
     .string()
     .default('false')
     .transform((v) => v.toLowerCase() === 'true'),
+  FEATURE_FLAG_FINANCE_V2_SUMMARY_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v.toLowerCase() === 'true'),
+  FINANCE_V2_ALLOWED_CONSUMERS: z.string().default(''),
+  FINANCE_V2_USAGE_LOG_ENABLED: z
+    .string()
+    .default('false')
+    .transform((v) => v.toLowerCase() === 'true'),
+  FINANCE_V2_DIFF_LOG_ENABLED: z
+    .string()
+    .default('false')
+    .transform((v) => v.toLowerCase() === 'true'),
+  FINANCE_V2_DIFF_ALERT_THRESHOLD: z.coerce.number().min(0).default(0.01),
   MONGODB_URI: z.string().min(1).default('mongodb://localhost:27017'),
   MONGODB_DB_NAME: z.string().min(1).default('stockflow'),
   MONGODB_APP_NAME: z.string().default('stockflow-backend'),

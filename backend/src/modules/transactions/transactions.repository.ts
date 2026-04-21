@@ -73,6 +73,11 @@ export class TransactionsRepository {
     return this.auditEvents.filter((e) => e.storeId === storeId && e.transactionId === transactionId);
   }
 
+
+  async findAuditEventsByStore(storeId: string): Promise<TransactionAuditEventDto[]> {
+    return this.auditEvents.filter((event) => event.storeId === storeId);
+  }
+
   async create(
     storeId: string,
     input: Omit<TransactionDto, 'id' | 'storeId' | 'createdAt' | 'updatedAt' | 'version'>,

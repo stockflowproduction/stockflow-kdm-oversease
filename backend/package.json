@@ -13,7 +13,19 @@
     "test:products": "jest tests/products/products-baseline.spec.ts",
     "test:customers": "jest tests/customers/customers-baseline.spec.ts",
     "test:transactions:create": "jest tests/transactions/transactions-create-path.spec.ts",
-    "test:transactions:update-delete": "jest tests/transactions/transactions-update-delete-path.spec.ts"
+    "test:transactions:update-delete": "jest tests/transactions/transactions-update-delete-path.spec.ts",
+    "test:finance": "jest tests/finance/finance-read-model.spec.ts",
+    "test:finance:parity": "jest tests/finance/finance-parity-harness.spec.ts",
+    "test:finance:parity:matrix": "jest tests/finance/finance-parity-phase4g-matrix.spec.ts",
+    "test:finance:scenarios": "jest tests/finance/finance-parity-scenarios.spec.ts",
+    "test:finance:foundation": "jest tests/finance/finance-source-domain-scaffold.spec.ts",
+    "test:finance:v2": "jest tests/finance/finance-v2-summary-pilot.spec.ts",
+    "test:finance:v2:drift": "jest tests/finance/finance-v2-drift-detection.spec.ts",
+    "test:finance:v2:guardrails": "jest tests/finance/finance-v2-rollout-guardrails.spec.ts",
+    "test:finance:expenses": "jest tests/finance/expenses-source-activation.spec.ts",
+    "test:finance:sessions": "jest tests/finance/cash-sessions-source-activation.spec.ts",
+    "test:finance:delete-compensations": "jest tests/finance/delete-compensations-source-activation.spec.ts",
+    "test:finance:update-corrections": "jest tests/finance/update-corrections-source-activation.spec.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.8",

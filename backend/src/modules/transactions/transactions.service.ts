@@ -27,6 +27,7 @@ import {
   TransactionResponseDto,
 } from '../../contracts/v1/transactions/transaction-response.dto';
 import { TransactionDto, TransactionLineItemSnapshotDto } from '../../contracts/v1/transactions/transaction.types';
+import { FinanceArtifactsRepository } from '../finance-artifacts/finance-artifacts.repository';
 import { TransactionsRepository } from './transactions.repository';
 
 @Injectable()
@@ -36,6 +37,7 @@ export class TransactionsService {
     private readonly productsRepository: ProductsRepository,
     private readonly customersRepository: CustomersRepository,
     private readonly idempotencyService: IdempotencyService,
+    private readonly financeArtifactsRepository: FinanceArtifactsRepository,
   ) {}
 
   async list(storeId: string, query: ListTransactionsQueryDto): Promise<TransactionListResponseDto> {
@@ -381,6 +383,16 @@ export class TransactionsService {
         });
       }
 
+      await this.financeArtifactsRepository.createUpdateCorrection(storeId, {
+        originalTransactionId: transaction.id,
+        updatedTransactionId: next.id,
+        customerId: next.customer.customerId ?? null,
+        customerName: next.customer.customerName ?? null,
+        changeTags: this.deriveUpdateChangeTags(transaction, next),
+        delta: this.computeUpdateCorrectionDelta(transaction, next),
+        updatedBy: null,
+      });
+
       return this.appliedResponse('update_transaction', mutationId, context);
     });
   }
@@ -415,6 +427,7 @@ export class TransactionsService {
 
       await this.revertSaleStock(storeId, transaction.lineItems);
       await this.reconcileCustomerForSaleDelete(storeId, transaction, payload.compensation);
+      const compensationAmount = this.resolveDeleteCompensationAmount(transaction, payload.compensation);
 
       const archived = await this.repository.archiveDelete(storeId, transaction.id, {
         reason: payload.reason ?? null,
@@ -426,6 +439,16 @@ export class TransactionsService {
           message: 'Transaction not found in this store.',
         });
       }
+
+      await this.financeArtifactsRepository.createDeleteCompensation(storeId, {
+        transactionId: transaction.id,
+        customerId: transaction.customer.customerId ?? null,
+        customerName: transaction.customer.customerName ?? null,
+        amount: compensationAmount,
+        mode: payload.compensation.mode,
+        reason: payload.reason ?? payload.compensation.note ?? null,
+        createdBy: null,
+      });
 
       return this.appliedResponse('delete_transaction', mutationId, context);
     });
@@ -761,6 +784,65 @@ export class TransactionsService {
         message: 'Customer balance mutation would result in an invalid state.',
       });
     }
+  }
+
+  private resolveDeleteCompensationAmount(
+    transaction: TransactionDto,
+    compensation: DeleteTransactionRequestDto['compensation'],
+  ): number {
+    if (compensation.mode === 'none') return 0;
+    return Math.min(transaction.totals.grandTotal, compensation.amount ?? transaction.totals.grandTotal);
+  }
+
+  private computeUpdateCorrectionDelta(
+    previous: TransactionDto,
+    current: TransactionDto,
+  ): {
+    grossSales: number;
+    salesReturn: number;
+    netSales: number;
+    cashIn: number;
+    cashOut: number;
+    onlineIn: number;
+    onlineOut: number;
+    currentDueEffect: number;
+    currentStoreCreditEffect: number;
+    cogsEffect: number;
+    grossProfitEffect: number;
+    netProfitEffect: number;
+  } {
+    const grossSales = current.totals.grandTotal - previous.totals.grandTotal;
+    const cashIn = current.settlement.cashPaid - previous.settlement.cashPaid;
+    const onlineIn = current.settlement.onlinePaid - previous.settlement.onlinePaid;
+    const currentDueEffect = current.settlement.creditDue - previous.settlement.creditDue;
+    const currentStoreCreditEffect = previous.settlement.storeCreditUsed - current.settlement.storeCreditUsed;
+
+    return {
+      grossSales,
+      salesReturn: 0,
+      netSales: grossSales,
+      cashIn,
+      cashOut: 0,
+      onlineIn,
+      onlineOut: 0,
+      currentDueEffect,
+      currentStoreCreditEffect,
+      cogsEffect: 0,
+      grossProfitEffect: 0,
+      netProfitEffect: 0,
+    };
+  }
+
+  private deriveUpdateChangeTags(previous: TransactionDto, current: TransactionDto): string[] {
+    const tags: string[] = [];
+    if (JSON.stringify(previous.lineItems) !== JSON.stringify(current.lineItems)) tags.push('line_items_changed');
+    if (JSON.stringify(previous.settlement) !== JSON.stringify(current.settlement)) tags.push('settlement_changed');
+    if ((previous.customer.customerId ?? null) !== (current.customer.customerId ?? null)) {
+      tags.push('customer_changed');
+    }
+    if ((previous.metadata.note ?? null) !== (current.metadata.note ?? null)) tags.push('note_changed');
+    if (previous.totals.grandTotal !== current.totals.grandTotal) tags.push('grand_total_changed');
+    return tags.length > 0 ? tags : ['metadata_only'];
   }
 
   private aggregateLineItems(

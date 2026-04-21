@@ -1052,154 +1052,138 @@ export default function Admin() {
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.getHeight();
     const pageWidth = doc.internal.pageSize.getWidth();
-    
-    // Layout Configuration (Customer Catalog Style)
     const margin = 10;
-    const cols = 3; 
-    const colGap = 5;
-    const rowGap = 5;
-    const contentWidth = pageWidth - (margin * 2);
-    const cardWidth = (contentWidth - ((cols - 1) * colGap)) / cols;
-    const cardHeight = 60; // Compact height for customer catalog
+    const headerBottomY = 25;
+    const bottomSafeY = pageHeight - margin;
+    const cardX = margin;
+    const cardWidth = pageWidth - margin * 2;
+    const cardPadding = 4;
+    const imageSize = 24;
+    const rowGap = 4;
+    const sectionGap = 5;
+    const textLineHeight = 4.5;
+    const nowLabel = new Date().toLocaleString();
+    const imageCache = new Map<string, string | null>();
 
-    // Group filtered products by category
-    const groupedProducts: Record<string, Product[]> = {};
-    filteredProducts.forEach(p => {
-        if (!groupedProducts[p.category]) groupedProducts[p.category] = [];
-        groupedProducts[p.category].push(p);
-    });
+    const renderPageHeader = () => {
+      doc.setFontSize(18);
+      doc.setTextColor(40, 40, 40);
+      doc.setFont('helvetica', 'bold');
+      doc.text('Inventory Product Catalog', pageWidth / 2, 15, { align: 'center' });
+      doc.setFontSize(10);
+      doc.setTextColor(100, 100, 100);
+      doc.setFont('helvetica', 'normal');
+      doc.text(`Generated: ${nowLabel} | Filter: ${categoryFilter}`, pageWidth / 2, 22, { align: 'center' });
+      doc.setDrawColor(200, 200, 200);
+      doc.line(margin, headerBottomY, pageWidth - margin, headerBottomY);
+    };
 
-    // Sort categories alphabetically
-    const sortedCategories = Object.keys(groupedProducts).sort();
-    let isFirstCategory = true;
+    let y = 30;
+    renderPageHeader();
 
-    for (const cat of sortedCategories) {
-        if (!isFirstCategory) {
-            doc.addPage();
+    const ensureSpace = (requiredHeight: number) => {
+      if (y + requiredHeight <= bottomSafeY) return;
+      doc.addPage();
+      renderPageHeader();
+      y = 30;
+    };
+
+    const groupedProducts = filteredProducts.reduce<Record<string, Product[]>>((acc, product) => {
+      const rawCategory = (product.category || '').trim();
+      const categoryKey = rawCategory.length > 0 ? rawCategory : 'Uncategorized';
+      if (!acc[categoryKey]) acc[categoryKey] = [];
+      acc[categoryKey].push(product);
+      return acc;
+    }, {});
+
+    const sortedCategories = Object.keys(groupedProducts).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' }),
+    );
+
+    for (const categoryName of sortedCategories) {
+      ensureSpace(12);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(13);
+      doc.setTextColor(31, 41, 55);
+      doc.text(categoryName, margin, y);
+      y += 2;
+      doc.setDrawColor(220, 220, 220);
+      doc.line(margin, y + 1, pageWidth - margin, y + 1);
+      y += sectionGap;
+
+      const productsInCategory = [...groupedProducts[categoryName]].sort((a, b) => {
+        const nameCompare = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+        if (nameCompare !== 0) return nameCompare;
+        return a.barcode.localeCompare(b.barcode, undefined, { numeric: true, sensitivity: 'base' });
+      });
+
+      for (const product of productsInCategory) {
+        const productName = (product.name || '').trim() || 'Unnamed product';
+        const barcode = (product.barcode || '').trim() || 'N/A';
+        const categoryLabel = (product.category || '').trim() || 'Uncategorized';
+        const stockLabel = `Stock: ${Number.isFinite(product.stock) ? product.stock : 0}`;
+        const priceLabel = `Price: Rs.${Number.isFinite(product.sellPrice) ? product.sellPrice.toFixed(2) : '0.00'}`;
+        const textBlockX = cardX + cardPadding + imageSize + 4;
+        const textBlockWidth = cardWidth - (textBlockX - cardX) - cardPadding;
+        const nameLines = doc.splitTextToSize(productName, textBlockWidth) as string[];
+        const safeNameLines = nameLines.length > 0 ? nameLines : ['Unnamed product'];
+        const infoLines = [`Barcode: ${barcode}`, `Category: ${categoryLabel}`, `${priceLabel}    ${stockLabel}`];
+        const textBlockHeight = (safeNameLines.length + infoLines.length) * textLineHeight;
+        const cardHeight = Math.max(imageSize + cardPadding * 2, textBlockHeight + cardPadding * 2);
+
+        ensureSpace(cardHeight + rowGap);
+
+        doc.setDrawColor(225, 225, 225);
+        doc.setFillColor(255, 255, 255);
+        doc.roundedRect(cardX, y, cardWidth, cardHeight, 2.5, 2.5, 'FD');
+
+        const imageX = cardX + cardPadding;
+        const imageY = y + cardPadding;
+        let pdfImageSource: string | null = null;
+        const imageKey = product.image || '';
+        if (imageKey) {
+          if (imageCache.has(imageKey)) {
+            pdfImageSource = imageCache.get(imageKey) ?? null;
+          } else {
+            pdfImageSource = await getPdfImageSource(product.image);
+            imageCache.set(imageKey, pdfImageSource);
+          }
         }
-        isFirstCategory = false;
 
-        let x = margin;
-        let y = 30; // Start Y after header
+        if (pdfImageSource) {
+          const formatMatch = pdfImageSource.match(/^data:image\/(png|jpeg|jpg)/i);
+          const format = formatMatch?.[1]?.toLowerCase() === 'png' ? 'PNG' : 'JPEG';
+          doc.addImage(pdfImageSource, format, imageX, imageY, imageSize, imageSize, undefined, 'FAST');
+        } else {
+          doc.setFillColor(245, 245, 245);
+          doc.rect(imageX, imageY, imageSize, imageSize, 'F');
+          doc.setTextColor(150, 150, 150);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.text('No Image', imageX + imageSize / 2, imageY + imageSize / 2 + 1, { align: 'center' });
+        }
 
-        // --- Category Header ---
-        doc.setFontSize(18);
-        doc.setTextColor(40, 40, 40);
-        doc.setFont("helvetica", "bold");
-        doc.text(`Category: ${cat}`, pageWidth/2, 15, { align: "center" });
-        
+        let textY = y + cardPadding + 3;
+        doc.setFont('helvetica', 'bold');
         doc.setFontSize(10);
-        doc.setTextColor(100, 100, 100);
-        doc.setFont("helvetica", "normal");
-        doc.text(`Generated: ${new Date().toLocaleString()}`, pageWidth/2, 22, { align: "center" });
-        
-        doc.setDrawColor(200, 200, 200);
-        doc.line(margin, 25, pageWidth - margin, 25);
-
-        // Sort products within category by barcode (numeric sort for GEN-001 style)
-        const catProducts = groupedProducts[cat].sort((a, b) => 
-            a.barcode.localeCompare(b.barcode, undefined, { numeric: true, sensitivity: 'base' })
-        );
-
-        // --- Product Loop ---
-        for (let index = 0; index < catProducts.length; index += 1) {
-            const product = catProducts[index];
-            // Check for Page Break
-            if (y + cardHeight > pageHeight - margin) {
-                doc.addPage();
-                y = margin;
-                x = margin; // Reset X on new page
-            }
-
-            // --- Draw Card Container ---
-            doc.setDrawColor(230, 230, 230); // Light gray border
-            doc.setFillColor(255, 255, 255); // White background
-            doc.roundedRect(x, y, cardWidth, cardHeight, 3, 3, 'FD');
-
-            // --- Image ---
-            const imgSize = 30; 
-            const imgX = x + (cardWidth - imgSize) / 2;
-            const imgY = y + 5;
-            
-            try {
-                const pdfImageSource = await getPdfImageSource(product.image);
-                if (pdfImageSource) {
-                    const formatMatch = pdfImageSource.match(/^data:image\/(png|jpeg|jpg)/i);
-                const format =
-                  formatMatch?.[1]?.toLowerCase() === 'png'
-                    ? 'PNG'
-                    : 'JPEG';
-                doc.addImage(pdfImageSource, format, imgX, imgY, imgSize, imgSize, undefined, 'FAST');
-                } else {
-                     // Placeholder
-                     doc.setFillColor(245, 245, 245);
-                     doc.rect(imgX, imgY, imgSize, imgSize, 'F');
-                     doc.setFontSize(8);
-                     doc.setTextColor(150, 150, 150);
-                     doc.text("No Image", imgX + imgSize/2, imgY + imgSize/2, { align: "center" });
-                }
-            } catch (e) {
-                 doc.setFillColor(245, 245, 245);
-                 doc.rect(imgX, imgY, imgSize, imgSize, 'F');
-            }
-
-            // --- Text Content Base Y ---
-            const textStartY = imgY + imgSize + 5; 
-            
-            // Product Name (Bold, Dark)
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(10);
-            doc.setTextColor(20, 20, 20);
-            // Truncate name if too long
-            const titleLines = doc.splitTextToSize(product.name, cardWidth - 6);
-            doc.text(titleLines[0], x + 3, textStartY);
-            
-            // Barcode (Gray, Smaller)
-            const codeY = textStartY + 4;
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
-            doc.setTextColor(100, 100, 100);
-            doc.text(product.barcode, x + 3, codeY); 
-
-            // --- Customer Mode Layout ---
-            const priceY = codeY + 8; // 8mm below code line
-            
-            // Price
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(12);
-            doc.setTextColor(0, 0, 0);
-            doc.text(`Rs.${product.sellPrice}`, x + 3, priceY);
-            
-            // Stock Badge
-            const inStock = product.stock > 0;
-            const badgeText = inStock ? "In Stock" : "Out of Stock";
-            const badgeWidth = doc.getTextWidth(badgeText) + 6;
-            const badgeX = x + cardWidth - badgeWidth - 3;
-            const badgeRectY = priceY - 5; 
-            
-            if (inStock) {
-                doc.setFillColor(209, 250, 229);
-                doc.setTextColor(6, 95, 70); 
-            } else {
-                doc.setFillColor(254, 226, 226);
-                doc.setTextColor(185, 28, 28);
-            }
-            
-            doc.roundedRect(badgeX, badgeRectY, badgeWidth, 7, 2, 2, 'F');
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "bold");
-            doc.text(badgeText, badgeX + 3, priceY);
-
-            // --- Grid Logic ---
-            x += cardWidth + colGap;
-            
-            if ((index + 1) % cols === 0) {
-                x = margin;
-                y += cardHeight + rowGap;
-            }
+        doc.setTextColor(20, 20, 20);
+        for (const line of safeNameLines) {
+          doc.text(line, textBlockX, textY);
+          textY += textLineHeight;
         }
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8.5);
+        doc.setTextColor(90, 90, 90);
+        for (const line of infoLines) {
+          doc.text(line, textBlockX, textY);
+          textY += textLineHeight;
+        }
+
+        y += cardHeight + rowGap;
+      }
     }
-    
+
     doc.save(`customer-catalog-${categoryFilter}.pdf`);
   };
 

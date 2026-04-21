@@ -50,6 +50,28 @@ export class AppConfigService {
     return this.env.FEATURE_FLAG_PRODUCTS_ENABLED;
   }
 
+  get featureFlagFinanceV2SummaryEnabled(): boolean {
+    return this.env.FEATURE_FLAG_FINANCE_V2_SUMMARY_ENABLED;
+  }
+
+  get financeV2AllowedConsumers(): string[] {
+    return this.env.FINANCE_V2_ALLOWED_CONSUMERS.split(',')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+
+  get financeV2UsageLogEnabled(): boolean {
+    return this.env.FINANCE_V2_USAGE_LOG_ENABLED;
+  }
+
+  get financeV2DiffLogEnabled(): boolean {
+    return this.env.FINANCE_V2_DIFF_LOG_ENABLED;
+  }
+
+  get financeV2DiffAlertThreshold(): number {
+    return this.env.FINANCE_V2_DIFF_ALERT_THRESHOLD;
+  }
+
   get mongodbUri(): string {
     return this.env.MONGODB_URI;
   }

@@ -1,0 +1,61 @@
+{
+  "name": "finance_parity_read_scenario_v1",
+  "storeId": "store-finance-parity-v1",
+  "window": {
+    "dateFrom": "2026-04-01T00:00:00.000Z",
+    "dateTo": "2030-01-01T00:00:00.000Z"
+  },
+  "customers": [
+    {
+      "name": "Parity Customer",
+      "phone": "+1-555-7777",
+      "email": null,
+      "notes": null,
+      "dueBalance": 85,
+      "storeCreditBalance": 12
+    }
+  ],
+  "transactions": [
+    {
+      "type": "sale",
+      "transactionDate": "2026-04-10T09:00:00.000Z",
+      "settlement": { "cashPaid": 60, "onlinePaid": 20, "creditDue": 20, "storeCreditUsed": 0, "paymentMethod": "mixed" },
+      "totals": { "subtotal": 100, "discount": 0, "tax": 0, "grandTotal": 100 }
+    },
+    {
+      "type": "payment",
+      "transactionDate": "2026-04-11T09:00:00.000Z",
+      "settlement": { "cashPaid": 25, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" },
+      "totals": { "subtotal": 25, "discount": 0, "tax": 0, "grandTotal": 25 }
+    },
+    {
+      "type": "return",
+      "transactionDate": "2026-04-12T09:00:00.000Z",
+      "settlement": { "cashPaid": 15, "onlinePaid": 0, "creditDue": 5, "storeCreditUsed": 0, "paymentMethod": "return" },
+      "totals": { "subtotal": 15, "discount": 0, "tax": 0, "grandTotal": 15 }
+    }
+  ],
+  "expected": {
+    "summary": {
+      "grossSales": 100,
+      "salesReturns": 15,
+      "netSales": 85,
+      "cashIn": 85,
+      "cashOut": 15,
+      "onlineIn": 20,
+      "onlineOut": 0,
+      "creditDueNet": -10
+    },
+    "paymentMix": {
+      "inflowTotal": 105,
+      "outflowTotal": 15,
+      "netOverall": 90
+    },
+    "semantics": {
+      "expensesSource": "available_not_applied",
+      "sessionsSource": "available_not_applied",
+      "deleteCompensationsSource": "available_not_applied",
+      "updateCorrectionsSource": "available_not_applied"
+    }
+  }
+}

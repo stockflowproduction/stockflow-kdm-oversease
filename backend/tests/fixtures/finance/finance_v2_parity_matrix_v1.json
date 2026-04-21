@@ -1,0 +1,167 @@
+{
+  "scenarios": [
+    {
+      "name": "cash_sale_only",
+      "window": { "dateFrom": "2026-06-01T00:00:00.000Z", "dateTo": "2026-06-01T23:59:59.000Z" },
+      "actions": [
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-06-01T10:00:00.000Z",
+          "settlement": { "cashPaid": 100, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" },
+          "totals": { "subtotal": 100, "discount": 0, "tax": 0, "grandTotal": 100 }
+        }
+      ],
+      "expected": { "expensesTotal": 0, "operatingNetBeforeCorrections": 100, "v2ShouldEqualBaseWithoutExcluded": true }
+    },
+    {
+      "name": "credit_sale_unpaid",
+      "window": { "dateFrom": "2026-06-02T00:00:00.000Z", "dateTo": "2026-06-02T23:59:59.000Z" },
+      "actions": [
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-06-02T09:00:00.000Z",
+          "settlement": { "cashPaid": 0, "onlinePaid": 0, "creditDue": 200, "storeCreditUsed": 0, "paymentMethod": "credit" },
+          "totals": { "subtotal": 200, "discount": 0, "tax": 0, "grandTotal": 200 }
+        }
+      ],
+      "expected": { "expensesTotal": 0, "operatingNetBeforeCorrections": 0, "v2ShouldEqualBaseWithoutExcluded": true }
+    },
+    {
+      "name": "partial_payment_day",
+      "window": { "dateFrom": "2026-06-03T00:00:00.000Z", "dateTo": "2026-06-03T23:59:59.000Z" },
+      "actions": [
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-06-03T09:00:00.000Z",
+          "settlement": { "cashPaid": 50, "onlinePaid": 0, "creditDue": 150, "storeCreditUsed": 0, "paymentMethod": "mixed" },
+          "totals": { "subtotal": 200, "discount": 0, "tax": 0, "grandTotal": 200 }
+        },
+        {
+          "op": "tx_create",
+          "type": "payment",
+          "transactionDate": "2026-06-03T12:00:00.000Z",
+          "settlement": { "cashPaid": 80, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" },
+          "totals": { "subtotal": 80, "discount": 0, "tax": 0, "grandTotal": 80 }
+        }
+      ],
+      "expected": { "expensesTotal": 0, "operatingNetBeforeCorrections": 130, "v2ShouldEqualBaseWithoutExcluded": true }
+    },
+    {
+      "name": "return_day",
+      "window": { "dateFrom": "2026-06-04T00:00:00.000Z", "dateTo": "2026-06-04T23:59:59.000Z" },
+      "actions": [
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-06-04T09:00:00.000Z",
+          "settlement": { "cashPaid": 120, "onlinePaid": 30, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "mixed" },
+          "totals": { "subtotal": 150, "discount": 0, "tax": 0, "grandTotal": 150 }
+        },
+        {
+          "op": "tx_create",
+          "type": "return",
+          "transactionDate": "2026-06-04T14:00:00.000Z",
+          "settlement": { "cashPaid": 20, "onlinePaid": 10, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "return" },
+          "totals": { "subtotal": 30, "discount": 0, "tax": 0, "grandTotal": 30 }
+        }
+      ],
+      "expected": { "expensesTotal": 0, "operatingNetBeforeCorrections": 150, "v2ShouldEqualBaseWithoutExcluded": true }
+    },
+    {
+      "name": "sale_plus_expense_day",
+      "window": { "dateFrom": "2026-06-05T00:00:00.000Z", "dateTo": "2026-06-05T23:59:59.000Z" },
+      "actions": [
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-06-05T09:00:00.000Z",
+          "settlement": { "cashPaid": 70, "onlinePaid": 30, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "mixed" },
+          "totals": { "subtotal": 100, "discount": 0, "tax": 0, "grandTotal": 100 }
+        },
+        {
+          "op": "expense_create",
+          "title": "Packing",
+          "amount": 25,
+          "category": "Ops",
+          "occurredAt": "2026-06-05T15:00:00.000Z"
+        }
+      ],
+      "expected": { "expensesTotal": 25, "operatingNetBeforeCorrections": 75, "v2ShouldEqualBaseWithoutExcluded": true }
+    },
+    {
+      "name": "mixed_payment_day",
+      "window": { "dateFrom": "2026-06-06T00:00:00.000Z", "dateTo": "2026-06-06T23:59:59.000Z" },
+      "actions": [
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-06-06T10:00:00.000Z",
+          "settlement": { "cashPaid": 60, "onlinePaid": 40, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "mixed" },
+          "totals": { "subtotal": 100, "discount": 0, "tax": 0, "grandTotal": 100 }
+        },
+        {
+          "op": "tx_create",
+          "type": "payment",
+          "transactionDate": "2026-06-06T18:00:00.000Z",
+          "settlement": { "cashPaid": 0, "onlinePaid": 50, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "online" },
+          "totals": { "subtotal": 50, "discount": 0, "tax": 0, "grandTotal": 50 }
+        }
+      ],
+      "expected": { "expensesTotal": 0, "operatingNetBeforeCorrections": 150, "v2ShouldEqualBaseWithoutExcluded": true }
+    },
+    {
+      "name": "legacy_incomplete_fallback",
+      "window": { "dateFrom": "2026-06-07T00:00:00.000Z", "dateTo": "2026-06-07T23:59:59.000Z" },
+      "actions": [
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-05-01T10:00:00.000Z",
+          "settlement": { "cashPaid": 999, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" },
+          "totals": { "subtotal": 999, "discount": 0, "tax": 0, "grandTotal": 999 }
+        },
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-06-07T10:00:00.000Z",
+          "settlement": { "cashPaid": 30, "onlinePaid": 0, "creditDue": 20, "storeCreditUsed": 0, "paymentMethod": "mixed" },
+          "totals": { "subtotal": 50, "discount": 0, "tax": 0, "grandTotal": 50 }
+        }
+      ],
+      "expected": { "expensesTotal": 0, "operatingNetBeforeCorrections": 30, "v2ShouldEqualBaseWithoutExcluded": true }
+    },
+    {
+      "name": "excluded_domains_present_no_leak",
+      "window": { "dateFrom": "2026-06-08T00:00:00.000Z", "dateTo": "2026-06-08T23:59:59.000Z" },
+      "actions": [
+        {
+          "op": "tx_create",
+          "type": "sale",
+          "transactionDate": "2026-06-08T10:00:00.000Z",
+          "settlement": { "cashPaid": 100, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" },
+          "totals": { "subtotal": 100, "discount": 0, "tax": 0, "grandTotal": 100 }
+        },
+        {
+          "op": "session_create",
+          "openingBalance": 200,
+          "status": "closed",
+          "startTime": "2026-06-08T08:00:00.000Z",
+          "endTime": "2026-06-08T20:00:00.000Z",
+          "closingBalance": 300
+        },
+        { "op": "delete_comp_create", "transactionId": "tx-d", "amount": 50, "mode": "cash_refund" },
+        {
+          "op": "update_corr_create",
+          "originalTransactionId": "tx-u",
+          "updatedTransactionId": "tx-u",
+          "changeTags": ["settlement_changed"],
+          "delta": { "grossSales": 20, "salesReturn": 0, "netSales": 20, "cashIn": 20, "cashOut": 0, "onlineIn": 0, "onlineOut": 0, "currentDueEffect": -20, "currentStoreCreditEffect": 0, "cogsEffect": 0, "grossProfitEffect": 0, "netProfitEffect": 0 }
+        }
+      ],
+      "expected": { "expensesTotal": 0, "operatingNetBeforeCorrections": 100, "v2ShouldEqualBaseWithoutExcluded": true }
+    }
+  ]
+}

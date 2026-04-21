@@ -1,4 +1,26 @@
 import { Module } from '@nestjs/common';
 
-@Module({})
+import { AuthModule } from '../auth/auth.module';
+import { CashSessionsModule } from '../cash-sessions/cash-sessions.module';
+import { CustomersModule } from '../customers/customers.module';
+import { ExpensesModule } from '../expenses/expenses.module';
+import { FinanceArtifactsModule } from '../finance-artifacts/finance-artifacts.module';
+import { TenancyModule } from '../tenancy/tenancy.module';
+import { TransactionsModule } from '../transactions/transactions.module';
+import { FinanceController } from './finance.controller';
+import { FinanceService } from './finance.service';
+
+@Module({
+  imports: [
+    AuthModule,
+    TenancyModule,
+    TransactionsModule,
+    CustomersModule,
+    ExpensesModule,
+    CashSessionsModule,
+    FinanceArtifactsModule,
+  ],
+  controllers: [FinanceController],
+  providers: [FinanceService],
+})
 export class FinanceModule {}

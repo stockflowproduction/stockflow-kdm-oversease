@@ -1,0 +1,104 @@
+{
+  "scenarios": [
+    {
+      "name": "mixed_settlement_visibility",
+      "window": { "dateFrom": "2026-04-01T00:00:00.000Z", "dateTo": "2030-01-01T00:00:00.000Z" },
+      "actions": [
+        {
+          "op": "create",
+          "type": "sale",
+          "transactionDate": "2026-04-10T09:00:00.000Z",
+          "settlement": { "cashPaid": 90, "onlinePaid": 30, "creditDue": 30, "storeCreditUsed": 0, "paymentMethod": "mixed" },
+          "totals": { "subtotal": 150, "discount": 0, "tax": 0, "grandTotal": 150 }
+        },
+        {
+          "op": "create",
+          "type": "payment",
+          "transactionDate": "2026-04-11T09:00:00.000Z",
+          "settlement": { "cashPaid": 20, "onlinePaid": 10, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "mixed" },
+          "totals": { "subtotal": 30, "discount": 0, "tax": 0, "grandTotal": 30 }
+        },
+        {
+          "op": "create",
+          "type": "return",
+          "transactionDate": "2026-04-12T09:00:00.000Z",
+          "settlement": { "cashPaid": 10, "onlinePaid": 5, "creditDue": 5, "storeCreditUsed": 0, "paymentMethod": "return" },
+          "totals": { "subtotal": 15, "discount": 0, "tax": 0, "grandTotal": 15 }
+        }
+      ],
+      "expected": {
+        "summary": { "grossSales": 150, "salesReturns": 15, "netSales": 135, "cashIn": 110, "cashOut": 10, "onlineIn": 40, "onlineOut": 5 },
+        "paymentMix": { "overall": 135 }
+      }
+    },
+    {
+      "name": "deletion_heavy_visibility",
+      "window": { "dateFrom": "2026-04-01T00:00:00.000Z", "dateTo": "2030-01-01T00:00:00.000Z" },
+      "actions": [
+        {
+          "op": "create",
+          "id": "sale-a",
+          "type": "sale",
+          "transactionDate": "2026-04-14T09:00:00.000Z",
+          "settlement": { "cashPaid": 40, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" },
+          "totals": { "subtotal": 40, "discount": 0, "tax": 0, "grandTotal": 40 }
+        },
+        {
+          "op": "create",
+          "id": "sale-b",
+          "type": "sale",
+          "transactionDate": "2026-04-15T09:00:00.000Z",
+          "settlement": { "cashPaid": 60, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" },
+          "totals": { "subtotal": 60, "discount": 0, "tax": 0, "grandTotal": 60 }
+        },
+        {
+          "op": "delete",
+          "targetId": "sale-a",
+          "reason": "cleanup-a"
+        },
+        {
+          "op": "delete",
+          "targetId": "sale-b",
+          "reason": "cleanup-b"
+        }
+      ],
+      "expected": {
+        "reconciliation": { "liveCount": 0, "deletedCount": 2 },
+        "correctionsOverview": { "deletedEvents": 2 }
+      }
+    },
+    {
+      "name": "correction_heavy_visibility",
+      "window": { "dateFrom": "2026-04-01T00:00:00.000Z", "dateTo": "2030-01-01T00:00:00.000Z" },
+      "actions": [
+        {
+          "op": "create",
+          "id": "payment-a",
+          "type": "payment",
+          "transactionDate": "2026-04-16T09:00:00.000Z",
+          "settlement": { "cashPaid": 75, "onlinePaid": 0, "creditDue": 0, "storeCreditUsed": 0, "paymentMethod": "cash" },
+          "totals": { "subtotal": 75, "discount": 0, "tax": 0, "grandTotal": 75 }
+        },
+        {
+          "op": "update",
+          "targetId": "payment-a",
+          "note": "edit-1"
+        },
+        {
+          "op": "update",
+          "targetId": "payment-a",
+          "note": "edit-2"
+        },
+        {
+          "op": "delete",
+          "targetId": "payment-a",
+          "reason": "cleanup"
+        }
+      ],
+      "expected": {
+        "correctionsOverview": { "updatedEvents": 2, "deletedEvents": 1 },
+        "correctionsArtifacts": { "deletedTotal": 1, "auditTotal": 4 }
+      }
+    }
+  ]
+}
