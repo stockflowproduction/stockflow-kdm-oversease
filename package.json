@@ -11,7 +11,16 @@
     "migrate-images": "node scripts/migrate-images-to-cloudinary.js",
     "backfill:customer-product-stats": "node scripts/backfill-customer-product-stats.js",
     "verify:customer-product-stats-backfill": "node scripts/verify-customer-product-stats-backfill.js",
-    "verify:image-migration-status": "node scripts/verify-image-migration-status.js"
+    "verify:image-migration-status": "node scripts/verify-image-migration-status.js",
+    "migration:phase3f:export": "node --experimental-strip-types migration/phase3f/export-firestore-store.ts",
+    "migration:phase3f:transform": "node --experimental-strip-types migration/phase3f/transform-store-snapshot.ts",
+    "migration:phase3f:validate": "node --experimental-strip-types migration/phase3f/validate-migration-snapshot.ts",
+    "migration:phase3f:report": "node --experimental-strip-types migration/phase3f/generate-dry-run-report.ts",
+    "migration:phase3f:import": "node --experimental-strip-types migration/phase3f/import-mongo-store.ts",
+    "migration:phase3f:validate-import": "node --experimental-strip-types migration/phase3f/validate-mongo-import.ts",
+    "migration:phase3f:rollback": "node --experimental-strip-types migration/phase3f/rollback-mongo-import.ts",
+    "migration:phase3f:run-cycle": "node --experimental-strip-types migration/phase3f/run-full-migration-cycle.ts",
+    "migration:check": "node --experimental-strip-types migration/phase3f/ci-migration-check.ts"
   },
   "dependencies": {
     "@google/genai": "^1.31.0",

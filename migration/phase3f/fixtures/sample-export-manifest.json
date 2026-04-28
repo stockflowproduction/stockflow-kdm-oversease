@@ -1,0 +1,20 @@
+{
+  "uid": "sample-store",
+  "startedAt": "2026-04-26T00:00:00.000Z",
+  "finishedAt": "2026-04-26T00:00:05.000Z",
+  "includeAudit": true,
+  "source": "firestore",
+  "files": {
+    "snapshot": "raw-firestore-snapshot.json",
+    "manifest": "export-manifest.json"
+  },
+  "counts": {
+    "products": 2,
+    "customers": 1,
+    "transactions": 5,
+    "deletedTransactions": 1,
+    "customerProductStats": 1,
+    "operationCommits": 1,
+    "auditEvents": 1
+  }
+}

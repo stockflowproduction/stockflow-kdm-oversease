@@ -27,6 +27,9 @@ const groupBy = <T,>(arr: T[], keyFn: (item: T) => string) => arr.reduce<Record<
 
 const safe = (value: unknown) => (Number.isFinite(value) ? Number(value) : 0);
 
+const getTxType = (tx: Transaction) => String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+const isSaleLikeTx = (tx: Transaction) => getTxType(tx) === 'sale' || getTxType(tx) === 'historical_reference';
+
 const resolveBuyPriceForItem = (
   item: CartItem,
   txDate: string,
@@ -118,7 +121,7 @@ export default function Financial() {
 
   const model = useMemo(() => {
     const productsById = new Map(data.products.map(product => [product.id, product]));
-    const sales = filtered.filter(t => t.type === 'sale');
+    const sales = filtered.filter(t => isSaleLikeTx(t));
     const returns = filtered.filter(t => t.type === 'return');
     const payments = filtered.filter(t => t.type === 'payment');
     const expenses = (data.expenses || []).filter(e => inRange(e.createdAt, start, end));
@@ -166,13 +169,13 @@ export default function Financial() {
     const topCustomersByDue = [...receivableCustomers].sort((a, b) => safe(b.totalDue) - safe(a.totalDue)).slice(0, 10);
 
     const cashCollectedToday = filtered
-      .filter(t => t.type === 'sale' && inRange(t.date, startOfDay(now), now))
+      .filter(t => isSaleLikeTx(t) && inRange(t.date, startOfDay(now), now))
       .reduce((s, t) => s + getSaleSettlementBreakdown(t).cashPaid, 0);
     const onlineCollectedToday = filtered
-      .filter(t => t.type === 'sale' && inRange(t.date, startOfDay(now), now))
+      .filter(t => isSaleLikeTx(t) && inRange(t.date, startOfDay(now), now))
       .reduce((s, t) => s + getSaleSettlementBreakdown(t).onlinePaid, 0);
     const outstandingCreditSales = filtered
-      .filter(t => t.type === 'sale')
+      .filter(t => isSaleLikeTx(t))
       .reduce((s, t) => s + getSaleSettlementBreakdown(t).creditDue, 0);
 
     const cashIn = sales.reduce((s, t) => s + getSaleSettlementBreakdown(t).cashPaid, 0) + payments.filter(t => t.paymentMethod !== 'Online').reduce((s, t) => s + Math.abs(safe(t.total)), 0);
@@ -205,7 +208,7 @@ export default function Financial() {
     const dayKeys = Object.keys(byDayMap).sort().slice(-30);
     const revenueProfitTrend = dayKeys.map((d) => {
       const dayTx = byDayMap[d];
-      const daySales = dayTx.filter(t => t.type === 'sale');
+      const daySales = dayTx.filter(t => isSaleLikeTx(t));
       const dayReturns = dayTx.filter(t => t.type === 'return');
       const dayRevenue = daySales.reduce((s, t) => s + Math.abs(safe(t.total)), 0);
       const dayProfit = daySales.reduce((s, t) => s + t.items.reduce((ss, i) => ss + marginForItem(i, t.date, productsById), 0), 0) - dayReturns.reduce((s, t) => s + Math.abs(t.items.reduce((ss, i) => ss + marginForItem(i, t.date, productsById), 0)), 0);
@@ -215,7 +218,7 @@ export default function Financial() {
     });
 
     const recentCollections = payments.slice().sort((a, b) => +new Date(b.date) - +new Date(a.date)).slice(0, 8);
-    const creditSalesToday = filtered.filter(t => t.type === 'sale' && inRange(t.date, startOfDay(now), now)).reduce((s, t) => s + getSaleSettlementBreakdown(t).creditDue, 0);
+    const creditSalesToday = filtered.filter(t => isSaleLikeTx(t) && inRange(t.date, startOfDay(now), now)).reduce((s, t) => s + getSaleSettlementBreakdown(t).creditDue, 0);
 
     const returnProductMap = groupBy(returns.flatMap(t => t.items.map(i => ({ name: i.name, qty: safe(i.quantity), value: safe(i.sellPrice) * safe(i.quantity) }))), r => r.name);
     const mostReturnedProducts = Object.entries(returnProductMap).map(([product, rows]) => ({

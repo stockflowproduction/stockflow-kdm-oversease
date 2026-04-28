@@ -1,0 +1,12 @@
+risk_id,title,domain,description,likelihood,impact,status,mitigation,next_validation
+R-101,Transactions windowed data KPI drift,Transactions,Windowed loading can mislead totals during parity/cutover comparisons,Medium,High,Open,Use explicit full-window mode for parity and mark KPI scope,Window-scope parity tests
+R-102,historical_reference semantic mismatch,Cross-finance-analytics,Sale-like handling may diverge between frontend and backend implementations,Medium,High,Open,Freeze enum semantics and add invariant fixtures,Sale-like aggregation regression suite
+R-103,buy-price cost-basis drift,Transactions-exports-analytics,Cost source resolution item/history/product may not match backend read model,High,High,Open,Lock cost-basis contract and provenance flags,Line-level export parity tests
+R-104,frontend-backend schema drift,Platform,Contracts and local runtime objects diverge during staggered migration,High,High,Open,Versioned DTO governance and compatibility checks,Contract snapshot CI
+R-105,ProductAnalytics client-side performance,ProductAnalytics,Large datasets are aggregated client-side and can stall UI,Medium,Medium,Open,Introduce backend read model planning and bounded queries,Performance benchmark before cutover
+R-106,Sales rounding boundary regression,Sales-Finance,Whole-money settlement boundary may regress if backend logic diverges,Medium,High,Open,Keep do-not-break invariant and settlement fixtures,Mixed-settlement regression matrix
+R-107,backend not yet primary,Migration,Most modules still rely on Firestore/local runtime creating dual-path risk,High,High,Open,Incremental page/domain adoption order with rollback flags,Adoption gate checklist
+R-108,dual-source inconsistency,Transactions,Firestore and backend datasets may diverge during shadow phase,High,High,Open,Keep shadow compare and mismatch reason telemetry active,Burn-in parity monitoring
+R-109,procurement backend incompleteness,Procurement,Freight/PurchasePanel flows remain frontend-primary despite backend module scaffold,Medium,High,Open,Define procurement API contracts + lifecycle parity plan,Procurement scenario suite
+R-110,data migration tooling gap,Phase3,Export/import/validation scripts for full production snapshot are incomplete,High,High,Open,Prioritize migration script planning and dry-run checks,Firestone->Mongo dry-run report
+R-111,version-update workflow confusion,Ops-Deployment,Frontend version prompt may conflict with staged backend rollout windows,Low,Medium,Open,Include version/update behavior in deployment playbook,Release rehearsal checklist

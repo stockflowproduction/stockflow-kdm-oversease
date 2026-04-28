@@ -24,6 +24,34 @@ type TransactionFinanceEffect = {
     onlineCollection: number;
 };
 
+export type ProductAnalyticsExportRow = {
+    productId: string;
+    productName: string;
+    barcode: string;
+    category: string;
+    qtySold: number;
+    qtyReturned: number;
+    netQty: number;
+    revenue: number;
+    cogs: number;
+    grossProfit: number;
+    avgSellPrice: number;
+    avgCostPrice: number;
+    marginPercent: number;
+    transactionCount: number;
+    uniqueCustomers: number;
+    firstSaleDate: string;
+    lastSaleDate: string;
+};
+
+export type ProductAnalyticsDetailExport = {
+    summary: Array<Record<string, string | number>>;
+    variationBreakdown: Array<Record<string, string | number>>;
+    transactionTraceability: Array<Record<string, string | number>>;
+    dailyTrend: Array<Record<string, string | number>>;
+    monthlyTrend: Array<Record<string, string | number>>;
+};
+
 const txTime = (tx: Transaction) => new Date(tx.date).getTime();
 
 const buildTransactionEffects = (transactions: Transaction[]) => {
@@ -101,6 +129,42 @@ const downloadExcel = (workbook: XLSX.WorkBook, fileName: string) => {
     XLSX.writeFile(workbook, `${fileName}.xlsx`);
 };
 
+export const exportProductAnalyticsToExcel = (rows: ProductAnalyticsExportRow[]) => {
+    const worksheet = XLSX.utils.json_to_sheet(rows.map((row) => ({
+        'Product ID': row.productId,
+        'Product Name': row.productName,
+        'Barcode': row.barcode,
+        'Category': row.category,
+        'Qty Sold': row.qtySold,
+        'Qty Returned': row.qtyReturned,
+        'Net Qty': row.netQty,
+        'Revenue': row.revenue,
+        'COGS': row.cogs,
+        'Gross Profit': row.grossProfit,
+        'Avg Sell Price': row.avgSellPrice,
+        'Avg Cost Price': row.avgCostPrice,
+        'Margin %': row.marginPercent,
+        'Transaction Count': row.transactionCount,
+        'Unique Customers': row.uniqueCustomers,
+        'First Sale Date': row.firstSaleDate,
+        'Last Sale Date': row.lastSaleDate,
+    })));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Filtered Product Analytics');
+    downloadExcel(workbook, `Product_Analytics_${new Date().toISOString().slice(0, 10)}`);
+};
+
+export const exportSelectedProductAnalyticsToExcel = (payload: ProductAnalyticsDetailExport, productName: string) => {
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(payload.summary), 'Product Summary');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(payload.variationBreakdown), 'Variation Breakdown');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(payload.transactionTraceability), 'Transaction Traceability');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(payload.dailyTrend), 'Daily Trend');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(payload.monthlyTrend), 'Monthly Trend');
+    const safeName = (productName || 'Product').replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'Product';
+    downloadExcel(workbook, `Product_Detail_${safeName}_${new Date().toISOString().slice(0, 10)}`);
+};
+
 /**
  * Export Products/Inventory to Excel
  */
@@ -153,6 +217,7 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
     const { customers, products } = loadData();
     const customerPhoneById = new Map((customers || []).map(customer => [customer.id, customer.phone || '']));
     const productsById = new Map((products || []).map(product => [product.id, product]));
+
     type BuyPriceSource = 'item' | 'history' | 'current' | 'none';
     const buyPriceSourceCounts: Record<BuyPriceSource, number> = {
         item: 0,
@@ -165,6 +230,7 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
     const resolveBuyPriceForExport = (item: CartItem, txDate: string): { buyPrice: number; source: BuyPriceSource } => {
         const direct = Number.isFinite(item.buyPrice) ? Number(item.buyPrice) : 0;
         if (direct > 0) return { buyPrice: direct, source: 'item' };
+
         const product = productsById.get(item.id);
         if (!product) return { buyPrice: 0, source: 'none' };
 
@@ -184,143 +250,71 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
 
     transactions.forEach((t) => {
         const fx = effects.get(t.id);
-        const items = Array.isArray(t.items) ? t.items : [];
-        const billNumber = `BILL-${t.id.slice(-6)}`;
+        const items = Array.isArray(t.items) && t.items.length > 0 ? t.items : [null];
         const customerPhone = t.customerId ? (customerPhoneById.get(t.customerId) || '') : '';
-        const txSubtotal = t.subtotal || Math.abs(t.total);
+        const billNumber = `BILL-${t.id.slice(-6)}`;
 
-        if (items.length <= 1) {
-            const item = items[0];
+        items.forEach((item, index) => {
+            const product = item ? productsById.get(item.id) : undefined;
             const resolvedBuy = item ? resolveBuyPriceForExport(item, t.date) : { buyPrice: 0, source: 'none' as BuyPriceSource };
-            const qty = item?.quantity || 0;
-            const sellPrice = item?.sellPrice || 0;
+            const qty = item ? Number(item.quantity || 0) : 0;
+            const sellPrice = item ? Number(item.sellPrice || 0) : 0;
             const lineRevenue = qty * sellPrice;
             const lineCost = qty * resolvedBuy.buyPrice;
             const lineProfit = lineRevenue - lineCost;
-            buyPriceSourceCounts[resolvedBuy.source] += item ? 1 : 0;
-            totalExportedLineProfit += lineProfit;
-            const lineTotal = item ? ((item.sellPrice || 0) * (item.quantity || 0) - (item.discountAmount || 0)) : 0;
+
+            if (item) {
+                buyPriceSourceCounts[resolvedBuy.source] += 1;
+                totalExportedLineProfit += lineProfit;
+            }
+
             data.push({
-                'Row Type': 'SINGLE',
+                'Row Type': item ? 'ITEM' : 'TX_ONLY',
+                'Transaction ID': t.id,
                 'Transaction Number': t.id,
                 'Bill Number': billNumber,
-                'Parent Transaction': '',
-                'Line No': item ? '1/1' : '',
+                'Parent Transaction': t.id,
+                'Line No': item ? `${index + 1}/${items.length}` : '',
                 'Date': new Date(t.date).toLocaleString(),
-                'Type': t.type.toUpperCase(),
-                'Customer Name': t.customerName || 'Walk-in',
+                'Type': String((t as Transaction & { type?: string }).type || '').toUpperCase(),
+                'Customer ID': t.customerId || '',
                 'Customer Phone': customerPhone,
+                'Customer Name': t.customerName || 'Walk-in',
+                'Payment Method': t.paymentMethod || 'Cash',
+                'Product ID': item?.id || '',
                 'Product Name': item?.name || '',
+                'Product Barcode': product?.barcode || item?.barcode || '',
                 'Variant': item?.selectedVariant || (item ? NO_VARIANT : ''),
                 'Color': item?.selectedColor || (item ? NO_COLOR : ''),
-                'Qty': item?.quantity || 0,
-                'Unit Price (₹)': item?.sellPrice || 0,
+                'Quantity': qty,
+                'Qty': qty,
+                'Unit Sell Price': sellPrice,
+                'Unit Price (₹)': sellPrice,
+                'Buy Price': resolvedBuy.buyPrice,
                 'Buy Price (₹)': resolvedBuy.buyPrice,
                 'Buy Price Source': resolvedBuy.source,
-                'Line Revenue (₹)': lineRevenue,
-                'Line Cost (₹)': lineCost,
-                'Line Profit (₹)': lineProfit,
-                'Line Total (₹)': lineTotal,
-                'Subtotal (₹)': txSubtotal,
-                'Discount (₹)': t.discount || 0,
-                'Tax (₹)': t.tax || 0,
-                'Total (₹)': t.total,
-                'Payment Method': t.paymentMethod || 'Cash',
-                'Cash Paid (₹)': fx?.cashPaid || 0,
-                'Online Paid (₹)': fx?.onlinePaid || 0,
-                'Credit Due (₹)': fx?.creditDue || 0,
-                'Store Credit Used (₹)': fx?.storeCreditUsed || 0,
-                'Return Mode': fx?.returnMode || '',
-                'Cash Refund (₹)': fx?.cashRefund || 0,
-                'Online Refund (₹)': fx?.onlineRefund || 0,
-                'Due Reduction (₹)': fx?.dueReduction || 0,
-                'Store Credit Created (₹)': fx?.storeCreditCreated || 0,
-            });
-            return;
-        }
-
-        data.push({
-            'Row Type': 'PARENT',
-            'Transaction Number': t.id,
-            'Bill Number': billNumber,
-            'Parent Transaction': '',
-            'Line No': `0/${items.length}`,
-            'Date': new Date(t.date).toLocaleString(),
-            'Type': t.type.toUpperCase(),
-            'Customer Name': t.customerName || 'Walk-in',
-            'Customer Phone': customerPhone,
-            'Product Name': '[Transaction Summary]',
-            'Variant': '',
-            'Color': '',
-            'Qty': '',
-            'Unit Price (₹)': '',
-            'Buy Price (₹)': '',
-            'Buy Price Source': '',
-            'Line Revenue (₹)': '',
-            'Line Cost (₹)': '',
-            'Line Profit (₹)': '',
-            'Line Total (₹)': '',
-            'Subtotal (₹)': txSubtotal,
-            'Discount (₹)': t.discount || 0,
-            'Tax (₹)': t.tax || 0,
-            'Total (₹)': t.total,
-            'Payment Method': t.paymentMethod || 'Cash',
-            'Cash Paid (₹)': fx?.cashPaid || 0,
-            'Online Paid (₹)': fx?.onlinePaid || 0,
-            'Credit Due (₹)': fx?.creditDue || 0,
-            'Store Credit Used (₹)': fx?.storeCreditUsed || 0,
-            'Return Mode': fx?.returnMode || '',
-            'Cash Refund (₹)': fx?.cashRefund || 0,
-            'Online Refund (₹)': fx?.onlineRefund || 0,
-            'Due Reduction (₹)': fx?.dueReduction || 0,
-            'Store Credit Created (₹)': fx?.storeCreditCreated || 0,
-        });
-
-        items.forEach((item, index) => {
-            const resolvedBuy = resolveBuyPriceForExport(item, t.date);
-            buyPriceSourceCounts[resolvedBuy.source] += 1;
-            const lineRevenue = (item.sellPrice || 0) * (item.quantity || 0);
-            const lineCost = resolvedBuy.buyPrice * (item.quantity || 0);
-            const lineProfit = lineRevenue - lineCost;
-            totalExportedLineProfit += lineProfit;
-            const lineSubtotal = (item.sellPrice || 0) * (item.quantity || 0);
-            const lineDiscount = item.discountAmount || 0;
-            const lineTotal = lineSubtotal - lineDiscount;
-            data.push({
-                'Row Type': 'ITEM',
-                'Transaction Number': '',
-                'Bill Number': '',
-                'Parent Transaction': t.id,
-                'Line No': `${index + 1}/${items.length}`,
-                'Date': '',
-                'Type': '',
-                'Customer Name': '',
-                'Customer Phone': '',
-                'Product Name': item.name,
-                'Variant': item.selectedVariant || NO_VARIANT,
-                'Color': item.selectedColor || NO_COLOR,
-                'Qty': item.quantity,
-                'Unit Price (₹)': item.sellPrice || 0,
-                'Buy Price (₹)': resolvedBuy.buyPrice,
-                'Buy Price Source': resolvedBuy.source,
-                'Line Revenue (₹)': lineRevenue,
-                'Line Cost (₹)': lineCost,
-                'Line Profit (₹)': lineProfit,
-                'Line Total (₹)': lineTotal,
-                'Subtotal (₹)': lineSubtotal,
-                'Discount (₹)': lineDiscount,
-                'Tax (₹)': '',
-                'Total (₹)': lineTotal,
-                'Payment Method': '',
-                'Cash Paid (₹)': '',
-                'Online Paid (₹)': '',
-                'Credit Due (₹)': '',
-                'Store Credit Used (₹)': '',
-                'Return Mode': '',
-                'Cash Refund (₹)': '',
-                'Online Refund (₹)': '',
-                'Due Reduction (₹)': '',
-                'Store Credit Created (₹)': '',
+                'Item Discount': item?.discountAmount || 0,
+                'Tax Rate': Number(t.taxRate || 0),
+                'Tax Label': t.taxLabel || '',
+                'Subtotal': Number(t.subtotal || Math.abs(t.total || 0)),
+                'Discount': Number(t.discount || 0),
+                'Tax': Number(t.tax || 0),
+                'Total': Number(t.total || 0),
+                'Amount': Math.abs(Number(t.total || 0)),
+                'Sale Cash Paid': Number(fx?.cashPaid || 0),
+                'Sale Online Paid': Number(fx?.onlinePaid || 0),
+                'Sale Credit Due': Number(fx?.creditDue || 0),
+                'Store Credit Used': Number(fx?.storeCreditUsed || 0),
+                'Return Handling Mode': fx?.returnMode || '',
+                'Notes': t.notes || '',
+                'Line Revenue': lineRevenue,
+                'Line Cost': lineCost,
+                'Line Profit': lineProfit,
+                'Line Total (₹)': lineRevenue - Number(item?.discountAmount || 0),
+                'Cash Refund (₹)': Number(fx?.cashRefund || 0),
+                'Online Refund (₹)': Number(fx?.onlineRefund || 0),
+                'Due Reduction (₹)': Number(fx?.dueReduction || 0),
+                'Store Credit Created (₹)': Number(fx?.storeCreditCreated || 0),
             });
         });
     });
@@ -336,44 +330,6 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
         { Metric: 'Total exported line profit (₹)', Value: totalExportedLineProfit },
     ]);
     XLSX.utils.book_append_sheet(workbook, summarySheet, 'Audit_Summary');
-
-    const wscols = [
-        { wch: 10 }, // Row Type
-        { wch: 18 }, // Transaction Number
-        { wch: 12 }, // Bill Number
-        { wch: 18 }, // Parent Transaction
-        { wch: 8 }, // Line No
-        { wch: 20 }, // Date
-        { wch: 10 }, // Type
-        { wch: 22 }, // Customer Name
-        { wch: 16 }, // Customer Phone
-        { wch: 30 }, // Product Name
-        { wch: 16 }, // Variant
-        { wch: 16 }, // Color
-        { wch: 8 }, // Qty
-        { wch: 12 }, // Unit Price
-        { wch: 12 }, // Buy Price
-        { wch: 14 }, // Buy Price Source
-        { wch: 14 }, // Line Revenue
-        { wch: 12 }, // Line Cost
-        { wch: 12 }, // Line Profit
-        { wch: 12 }, // Line Total
-        { wch: 12 }, // Subtotal
-        { wch: 12 }, // Discount
-        { wch: 12 }, // Tax
-        { wch: 12 }, // Total
-        { wch: 14 }, // Payment Method
-        { wch: 12 }, // Cash Paid
-        { wch: 12 }, // Online Paid
-        { wch: 12 }, // Credit Due
-        { wch: 14 }, // Store Credit Used
-        { wch: 12 }, // Return Mode
-        { wch: 12 }, // Cash Refund
-        { wch: 12 }, // Online Refund
-        { wch: 12 }, // Due Reduction
-        { wch: 16 }, // Store Credit Created
-    ];
-    worksheet['!cols'] = wscols;
 
     downloadExcel(workbook, `Transactions_Report_${new Date().toISOString().split('T')[0]}`);
 };

@@ -24,6 +24,7 @@ import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, 
 import { onAuthStateChanged } from 'firebase/auth';
 import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
 import { financeLog } from './financeLogger';
+import { roundMoneyWhole } from './numberFormat';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -301,6 +302,11 @@ export const clampCreditDueAmount = (value: number) => {
   if (rounded > 0 && rounded < MICRO_CREDIT_DUE_THRESHOLD) return 0;
   return rounded;
 };
+const toWholeMoney = (value: number) => roundMoneyWhole(toFiniteNumber(value, 0));
+const getWholePayableAfterStoreCredit = (transaction: Transaction) =>
+  Math.max(0, toWholeMoney(Math.abs(toFiniteNumber(transaction.total, 0)) - getRequestedStoreCreditUsed(transaction)));
+const getWholePaidNow = (cashPaid: number, onlinePaid: number) => Math.max(0, toWholeMoney(cashPaid + onlinePaid));
+
 const logMoney = (value: unknown) => roundCurrency(toFiniteNumber(value, 0));
 const RETURN_HANDLING_MODES = ['reduce_due', 'refund_cash', 'refund_online', 'store_credit'] as const;
 type ReturnHandlingMode = typeof RETURN_HANDLING_MODES[number];
@@ -363,32 +369,20 @@ const deriveLegacySaleSettlement = (
 export const getSaleSettlementBreakdown = (transaction: Transaction): { cashPaid: number; onlinePaid: number; creditDue: number } => {
   if (transaction.type !== 'sale') return { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
 
-  const payableAfterStoreCredit = Math.max(0, Math.abs(toFiniteNumber(transaction.total, 0)) - getRequestedStoreCreditUsed(transaction));
+  const payableAfterStoreCreditWhole = getWholePayableAfterStoreCredit(transaction);
   if (!transaction.saleSettlement) {
-    return deriveLegacySaleSettlement(transaction.paymentMethod, payableAfterStoreCredit);
+    return deriveLegacySaleSettlement(transaction.paymentMethod, payableAfterStoreCreditWhole);
   }
 
-  let cashPaid = toFiniteNonNegative(transaction.saleSettlement.cashPaid);
-  let onlinePaid = toFiniteNonNegative(transaction.saleSettlement.onlinePaid);
-  let creditDue = toFiniteNonNegative(transaction.saleSettlement.creditDue);
-
-  const paidNow = cashPaid + onlinePaid;
-  if (paidNow > payableAfterStoreCredit) {
-    const scale = payableAfterStoreCredit <= 0 ? 0 : (payableAfterStoreCredit / paidNow);
-    cashPaid = roundCurrency(cashPaid * scale);
-    onlinePaid = roundCurrency(onlinePaid * scale);
-    creditDue = roundCurrency(Math.max(0, payableAfterStoreCredit - cashPaid - onlinePaid));
-  } else {
-    const remainingAfterImmediate = Math.max(0, payableAfterStoreCredit - paidNow);
-    creditDue = roundCurrency(Math.min(creditDue, remainingAfterImmediate));
-    creditDue = roundCurrency(creditDue + Math.max(0, remainingAfterImmediate - creditDue));
-  }
-  creditDue = clampCreditDueAmount(creditDue);
+  const cashPaid = roundCurrency(toFiniteNonNegative(transaction.saleSettlement.cashPaid));
+  const onlinePaid = roundCurrency(toFiniteNonNegative(transaction.saleSettlement.onlinePaid));
+  const paidNowWhole = getWholePaidNow(cashPaid, onlinePaid);
+  const creditDueWhole = clampCreditDueAmount(Math.max(0, payableAfterStoreCreditWhole - paidNowWhole));
 
   return {
-    cashPaid: roundCurrency(cashPaid),
-    onlinePaid: roundCurrency(onlinePaid),
-    creditDue,
+    cashPaid,
+    onlinePaid,
+    creditDue: creditDueWhole,
   };
 };
 const getTransactionTimeHint = (transaction: Transaction) => {
@@ -2976,12 +2970,22 @@ const assertTransactionFinancials = (transaction: Transaction) => {
     }
     const storeCreditUsed = getRequestedStoreCreditUsed(transaction);
     const expectedPayable = Math.max(0, Math.abs(transaction.total) - storeCreditUsed);
+    const expectedPayableWhole = Math.max(0, toWholeMoney(expectedPayable));
     const settlementTotal = cashPaid + onlinePaid + creditDue;
-    if (Math.abs(settlementTotal - expectedPayable) > MONEY_EPSILON) {
-      console.warn('[FIN][GUARD][INVALID_SETTLEMENT_TOTAL]', { txId: transaction.id, expectedPayable, settlementTotal });
-      failValidation('INVALID_SALE_SETTLEMENT_TOTAL', 'Sale settlement must match payable after store credit.', {
+    const settlementTotalWhole = Math.max(0, toWholeMoney(settlementTotal));
+    if (settlementTotalWhole !== expectedPayableWhole) {
+      console.warn('[FIN][GUARD][INVALID_SETTLEMENT_TOTAL]', {
+        txId: transaction.id,
         expectedPayable,
+        expectedPayableWhole,
         settlementTotal,
+        settlementTotalWhole,
+      });
+      failValidation('INVALID_SALE_SETTLEMENT_TOTAL', 'Sale settlement must match payable after store credit under whole-money rule.', {
+        expectedPayable,
+        expectedPayableWhole,
+        settlementTotal,
+        settlementTotalWhole,
         saleSettlement: transaction.saleSettlement,
       });
     }

@@ -6,7 +6,7 @@ import { getCurrentUser, logout } from './services/auth';
 import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
-import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3 } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 
@@ -20,6 +20,7 @@ const Finance = lazy(() => import('./pages/Finance'));
 const Financial = lazy(() => import('./pages/Financial'));
 const FreightBooking = lazy(() => import('./pages/FreightBooking'));
 const PurchasePanel = lazy(() => import('./pages/PurchasePanel'));
+const ProductAnalytics = lazy(() => import('./pages/ProductAnalytics'));
 
 // --- Components ---
 
@@ -221,6 +222,7 @@ export default function App() {
             <NavItem to="/" icon={LayoutDashboard} label="Inventory" />
             <NavItem to="/sales" icon={ShoppingCart} label="POS System" />
             <NavItem to="/transactions" icon={ArrowRightLeft} label="Transactions" />
+            <NavItem to="/dashboard" icon={BarChart3} label="Product Analytics" />
             <NavItem to="/customers" icon={Users} label="Customers" />
             <NavItem to="/pdf" icon={FileText} label="Reports" />
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
@@ -289,6 +291,12 @@ export default function App() {
                               </div>
                               <span className="font-medium text-sm">Reports</span>
                          </Link>
+                         <Link to="/dashboard" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                              <div className="p-3 bg-indigo-100 text-indigo-600 rounded-full mb-2">
+                                  <BarChart3 className="w-6 h-6" />
+                              </div>
+                              <span className="font-medium text-sm">Product Analytics</span>
+                         </Link>
                          <Link to="/finance" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-emerald-100 text-emerald-600 rounded-full mb-2">
                                   <Landmark className="w-6 h-6" />
@@ -337,6 +345,7 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />
                 <Route path="/transactions" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Transactions /></ProtectedRoute>} />
+                <Route path="/dashboard" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><ProductAnalytics /></ProtectedRoute>} />
                 <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
                 <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />

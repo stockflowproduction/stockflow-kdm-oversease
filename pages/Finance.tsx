@@ -85,6 +85,9 @@ const dateKeyFromDate = (date: Date) => {
 const todayISO = () => dateKeyFromDate(new Date());
 
 
+const getTxType = (tx: Transaction) => String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+const isSaleLikeTx = (tx: Transaction) => getTxType(tx) === 'sale' || getTxType(tx) === 'historical_reference';
+
 const isSameDay = (iso: string, dateKey: string) => dateKeyFromDate(new Date(iso)) === dateKey;
 
 const monthKeyOf = (iso: string) => {
@@ -281,7 +284,7 @@ const accumulateCanonicalReturnEffects = (transactionsAsc: Transaction[], scoped
   return transactionsAsc.reduce((acc, tx, index) => {
     const amount = Math.abs(tx.total || 0);
     const historical = transactionsAsc.slice(0, index);
-    if (tx.type === 'sale') {
+    if (isSaleLikeTx(tx)) {
       const settlement = getSaleSettlementBreakdown(tx);
       const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
       runningDue = Math.max(0, runningDue + settlement.creditDue);
@@ -325,7 +328,7 @@ const buildCanonicalFinanceBreakdown = (
     const txTime = resolveTransactionTimeForSession(transaction);
     return Number.isFinite(txTime) && txTime >= windowStart && txTime <= windowEnd;
   });
-  const sales = scopedTransactions.filter(t => t.type === 'sale');
+  const sales = scopedTransactions.filter(t => isSaleLikeTx(t));
   const returns = scopedTransactions.filter(t => t.type === 'return');
   const sortedTransactionsAsc = [...transactions]
     .sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
@@ -407,7 +410,7 @@ const getSessionCashTotals = (
     return expTime >= start && expTime <= end;
   });
 
-  const saleSettlementTotals = aggregateSaleSettlementContributions(scopedTransactions.filter(t => t.type === 'sale'));
+  const saleSettlementTotals = aggregateSaleSettlementContributions(scopedTransactions.filter(t => isSaleLikeTx(t)));
   const cashSales = saleSettlementTotals.cashPaid;
   const sortedTransactionsAsc = [...transactions].sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
   const scopedReturnIds = new Set<string>(scopedTransactions.filter(t => t.type === 'return').map(t => t.id));
@@ -1039,7 +1042,7 @@ export default function Finance() {
         const cogsAmount = getTxCogs(original);
         const dueDelta = (deleted.afterImpact?.customerDue || 0) - (deleted.beforeImpact?.customerDue || 0);
         const storeCreditDelta = (deleted.afterImpact?.customerStoreCredit || 0) - (deleted.beforeImpact?.customerStoreCredit || 0);
-        const settlement = original.type === 'sale' ? getSaleSettlementBreakdown(original) : { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
+        const settlement = isSaleLikeTx(original) ? getSaleSettlementBreakdown(original) : { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
         const historicalTransactions = scopedCashbookTransactions
           .filter(candidate => resolveTransactionTimeForSession(candidate) < resolveTransactionTimeForSession(original)
             || (resolveTransactionTimeForSession(candidate) === resolveTransactionTimeForSession(original) && candidate.id !== original.id))
@@ -1050,7 +1053,7 @@ export default function Finance() {
         const deleteCompensationAmount = roundMoney(Math.max(0, Number(deleted.deleteCompensationAmount || 0)));
         const deleteCompensationMode = deleted.deleteCompensationMode;
         const storeCreditCompensationDelta = deleteCompensationMode === 'store_credit' ? deleteCompensationAmount : 0;
-        const saleReversal = original.type === 'sale';
+        const saleReversal = isSaleLikeTx(original);
         const returnReversal = original.type === 'return';
         rows.push({
           id: `deleted-${deleted.id}`,
@@ -1151,7 +1154,7 @@ export default function Finance() {
       const tx = event.tx;
       const txAmount = Math.abs(tx.total || 0);
       const cogsAmount = getTxCogs(tx);
-      if (tx.type === 'sale') {
+      if (isSaleLikeTx(tx)) {
         const settlement = getSaleSettlementBreakdown(tx);
         const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
         runningDue = Math.max(0, runningDue + settlement.creditDue);

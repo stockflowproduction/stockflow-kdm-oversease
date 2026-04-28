@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "exportedAt": "2026-04-26T00:00:00.000Z",
+    "uid": "sample-store",
+    "includeAudit": true,
+    "readOnly": true,
+    "phase": "3F"
+  },
+  "user": {
+    "id": "sample-store",
+    "uid": "sample-store",
+    "email": "owner@example.com",
+    "name": "Sample Owner",
+    "createdAt": "2026-01-01T00:00:00.000Z"
+  },
+  "store": {
+    "id": "sample-store",
+    "profile": { "storeName": "Sample Store" },
+    "categories": ["General", "Accessories"],
+    "expenses": [
+      { "id": "e1", "title": "Rent", "amount": 1000, "category": "Operations", "createdAt": "2026-02-01T00:00:00.000Z" }
+    ],
+    "cashSessions": [
+      { "id": "cs1", "status": "closed", "openingBalance": 500, "closingBalance": 800, "startTime": "2026-02-01T09:00:00.000Z", "endTime": "2026-02-01T21:00:00.000Z" }
+    ],
+    "deleteCompensations": [
+      { "id": "dc1", "transactionId": "t5", "customerId": "c1", "amount": 50, "mode": "cash_refund", "createdAt": "2026-02-01T22:00:00.000Z" }
+    ],
+    "updatedTransactionEvents": [
+      { "id": "uc1", "originalTransactionId": "t1", "updatedTransactionId": "t1u", "changeTags": ["price_change"], "delta": { "grossSales": 10 }, "updatedAt": "2026-02-01T23:00:00.000Z" }
+    ],
+    "freightInquiries": [
+      { "id": "fi1", "status": "confirmed", "productName": "Procurement Item", "lines": [{ "id": "l1", "productName": "Procurement Item", "quantity": 100 }] }
+    ],
+    "freightConfirmedOrders": [
+      { "id": "fco1", "status": "confirmed", "sourceInquiryId": "fi1", "lines": [{ "id": "l1", "productName": "Procurement Item", "quantity": 100 }] }
+    ],
+    "freightPurchases": [
+      { "id": "fp1", "status": "approved", "sourceConfirmedOrderId": "fco1", "lines": [{ "id": "l1", "productName": "Procurement Item", "quantity": 100 }] }
+    ],
+    "purchaseOrders": [
+      { "id": "po1", "partyId": "pp1", "status": "ordered", "lines": [{ "id": "pol1", "productName": "Procurement Item", "quantity": 100, "unitCost": 20, "totalCost": 2000 }] }
+    ],
+    "purchaseParties": [
+      { "id": "pp1", "name": "Vendor A", "phone": "8888888888" }
+    ],
+    "purchaseReceiptPostings": [
+      { "id": "pr1", "sourcePurchaseId": "fp1", "postedAt": "2026-02-03T10:00:00.000Z", "deltas": [{ "lineId": "l1", "productId": "p2", "quantityDelta": 100 }] }
+    ]
+  },
+  "subcollections": {
+    "products": [
+      {
+        "id": "p1",
+        "name": "Product A",
+        "barcode": "ABC-001",
+        "category": "General",
+        "buyPrice": 40,
+        "sellPrice": 100,
+        "stock": 10,
+        "stockByVariantColor": [{ "variant": "64GB", "color": "Black", "stock": 4 }],
+        "purchaseHistory": [{ "id": "ph1", "date": "2026-01-20T00:00:00.000Z", "variant": "64GB", "color": "Black", "quantity": 50, "unitPrice": 40 }]
+      },
+      {
+        "id": "p2",
+        "name": "Product B",
+        "barcode": "ABC-002",
+        "category": "Accessories",
+        "buyPrice": 20,
+        "sellPrice": 60,
+        "stock": 100,
+        "stockByVariantColor": [{ "variant": "Standard", "color": "Blue", "stock": 100 }],
+        "purchaseHistory": [{ "id": "ph2", "date": "2026-01-10T00:00:00.000Z", "variant": "Standard", "color": "Blue", "quantity": 200, "unitPrice": 20 }]
+      }
+    ],
+    "customers": [
+      {
+        "id": "c1",
+        "name": "Customer One",
+        "phone": "9999999999",
+        "totalDue": 25,
+        "storeCredit": 10
+      }
+    ],
+    "transactions": [
+      {
+        "id": "t1",
+        "type": "sale",
+        "date": "2026-02-01T10:00:00.000Z",
+        "items": [{ "id": "p1", "name": "Product A", "selectedVariant": "64GB", "selectedColor": "Black", "quantity": 2, "sellPrice": 100, "buyPrice": 40 }],
+        "total": 200,
+        "saleSettlement": { "cashPaid": 150, "onlinePaid": 50, "creditDue": 0 },
+        "customerId": "c1",
+        "customerName": "Customer One"
+      },
+      {
+        "id": "t2",
+        "type": "historical_reference",
+        "date": "2026-02-01T11:00:00.000Z",
+        "items": [{ "id": "p1", "name": "Product A", "selectedVariant": "64GB", "selectedColor": "Black", "quantity": 1, "sellPrice": 100, "buyPrice": 40 }],
+        "total": 100,
+        "saleSettlement": { "cashPaid": 100, "onlinePaid": 0, "creditDue": 0 }
+      },
+      {
+        "id": "t3",
+        "type": "historical_reference",
+        "date": "2026-02-01T12:00:00.000Z",
+        "items": [{ "id": "p2", "name": "Product B", "selectedVariant": "Standard", "selectedColor": "Blue", "quantity": 2, "sellPrice": 60 }],
+        "total": 120,
+        "saleSettlement": { "cashPaid": 120, "onlinePaid": 0, "creditDue": 0 }
+      },
+      {
+        "id": "t4",
+        "type": "return",
+        "date": "2026-02-01T13:00:00.000Z",
+        "items": [{ "id": "p1", "name": "Product A", "selectedVariant": "64GB", "selectedColor": "Black", "quantity": 1, "sellPrice": 100, "buyPrice": 40 }],
+        "total": 100,
+        "saleSettlement": { "cashPaid": 0, "onlinePaid": 100, "creditDue": 0 },
+        "customerId": "c1",
+        "customerName": "Customer One"
+      },
+      {
+        "id": "t5",
+        "type": "payment",
+        "date": "2026-02-01T14:00:00.000Z",
+        "items": [],
+        "total": 50,
+        "saleSettlement": { "cashPaid": 50, "onlinePaid": 0, "creditDue": 0 },
+        "customerId": "c1",
+        "customerName": "Customer One"
+      }
+    ],
+    "deletedTransactions": [
+      {
+        "id": "d1",
+        "originalTransactionId": "t5",
+        "deletedAt": "2026-02-01T22:00:00.000Z",
+        "deleteReason": "mistake",
+        "originalTransaction": { "id": "t5", "type": "payment", "total": 50 }
+      }
+    ],
+    "customerProductStats": [
+      { "customerId": "c1", "productId": "p1", "soldQty": 3, "returnedQty": 1, "updatedAt": "2026-02-01T23:00:00.000Z" }
+    ],
+    "operationCommits": [
+      { "id": "oc1", "type": "processTransaction", "status": "committed" }
+    ],
+    "auditEvents": [
+      { "id": "a1", "operation": "CREATE", "createdAt": "2026-02-01T10:00:01.000Z" }
+    ]
+  }
+}
