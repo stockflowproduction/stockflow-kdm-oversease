@@ -24,21 +24,22 @@
   },
   "dependencies": {
     "@google/genai": "^1.31.0",
+    "cloudinary": "^2.5.1",
     "clsx": "^2.1.1",
     "firebase": "^12.6.0",
+    "firebase-admin": "^12.7.0",
     "html5-qrcode": "^2.3.8",
     "jsbarcode": "^3.11.6",
     "jspdf": "^3.0.4",
     "jspdf-autotable": "^5.0.2",
     "lucide-react": "^0.556.0",
+    "mongodb": "^7.2.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-qr-code": "^2.0.18",
     "react-router-dom": "^7.10.1",
     "tailwind-merge": "^3.4.0",
-    "xlsx": "^0.18.5",
-    "cloudinary": "^2.5.1",
-    "firebase-admin": "^12.7.0"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

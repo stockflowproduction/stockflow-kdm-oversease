@@ -1,0 +1,16 @@
+[
+  {
+    "migrationBatchId": "client-migration-test-003",
+    "env": "staging",
+    "snapshotPath": "migration/phase3f/out/client-migration-test-003/mongo-ready-snapshot.json",
+    "dbName": "stockflow_staging_test",
+    "createdAt": "2026-04-29T09:08:43.791Z"
+  },
+  {
+    "migrationBatchId": "client-migration-test-004",
+    "env": "staging",
+    "snapshotPath": "migration/phase3f/out/client-migration-test-003/mongo-ready-snapshot.json",
+    "dbName": "stockflow_staging_test",
+    "createdAt": "2026-04-29T09:13:41.618Z"
+  }
+]
