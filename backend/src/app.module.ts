@@ -18,6 +18,7 @@ import { ReportsModule } from './modules/reports/reports.module';
 import { TenancyModule } from './modules/tenancy/tenancy.module';
 import { TransactionsModule } from './modules/transactions/transactions.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
+import { DevModule } from './dev/dev.module';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { UploadsModule } from './modules/uploads/uploads.module';
     ProcurementModule,
     ReportsModule,
     UploadsModule,
+    DevModule,
   ],
 })
 export class AppModule {}
