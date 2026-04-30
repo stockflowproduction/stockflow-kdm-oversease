@@ -50,6 +50,10 @@ export const envSchema = z.object({
     .string()
     .default('false')
     .transform((v) => v.toLowerCase() === 'true'),
+  SHADOW_COMPARE: z
+    .string()
+    .default('false')
+    .transform((v) => v.toLowerCase() === 'true'),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

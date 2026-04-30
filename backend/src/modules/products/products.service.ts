@@ -48,30 +48,53 @@ export class ProductsService {
   }
 
   async list(storeId: string, query: ListProductsQueryDto): Promise<ProductDto[]> {
+    const startedAt = Date.now();
     if (this.config?.useMongoReads && this.mongoRepository) {
-      this.logger.log('[MONGO_READ] Products fetched from Mongo');
-      const all = await this.mongoRepository.findAll(storeId);
-      const includeArchived = Boolean(query.includeArchived);
-      const category = query.category?.trim().toLowerCase();
-      const search = query.q?.trim().toLowerCase();
+      try {
+        const all = await this.mongoRepository.findAll(storeId);
+        const filtered = this.applyFilters(all, query);
+        this.logReadResult('SUCCESS', 'mongo', 'products', filtered.length, Date.now() - startedAt);
 
-      return all
-        .filter((p) => includeArchived || !p.isArchived)
-        .filter((p) => (category ? p.category.toLowerCase() === category : true))
-        .filter((p) => {
-          if (!search) return true;
-          return p.name.toLowerCase().includes(search) || p.barcode.toLowerCase().includes(search);
-        })
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        if (this.config.shadowCompare) {
+          const firestore = await this.repository.findMany(storeId, query);
+          this.logShadowDiff('products', filtered, firestore);
+        }
+        return filtered;
+      } catch (error) {
+        const latency = Date.now() - startedAt;
+        this.logReadResult('ERROR', 'mongo', 'products', 0, latency, error instanceof Error ? error.message : String(error));
+        const fallback = await this.repository.findMany(storeId, query);
+        this.logReadResult('FALLBACK', 'firestore', 'products', fallback.length, Date.now() - startedAt);
+        return fallback;
+      }
     }
 
-    return this.repository.findMany(storeId, query);
+    const items = await this.repository.findMany(storeId, query);
+    this.logReadResult('SUCCESS', 'firestore', 'products', items.length, Date.now() - startedAt);
+    return items;
   }
 
   async getById(storeId: string, id: string): Promise<ProductDto> {
-    const product = this.config?.useMongoReads && this.mongoRepository
-      ? await this.mongoRepository.findById(storeId, id)
-      : await this.repository.findById(storeId, id);
+    const startedAt = Date.now();
+    let product: ProductDto | null = null;
+    if (this.config?.useMongoReads && this.mongoRepository) {
+      try {
+        product = await this.mongoRepository.findById(storeId, id);
+        this.logReadResult('SUCCESS', 'mongo', 'products', product ? 1 : 0, Date.now() - startedAt);
+        if (this.config.shadowCompare) {
+          const firestoreProduct = await this.repository.findById(storeId, id);
+          this.logShadowDiff('products', product ? [product] : [], firestoreProduct ? [firestoreProduct] : []);
+        }
+      } catch (error) {
+        this.logReadResult('ERROR', 'mongo', 'products', 0, Date.now() - startedAt, error instanceof Error ? error.message : String(error));
+        product = await this.repository.findById(storeId, id);
+        this.logReadResult('FALLBACK', 'firestore', 'products', product ? 1 : 0, Date.now() - startedAt);
+      }
+    } else {
+      product = await this.repository.findById(storeId, id);
+      this.logReadResult('SUCCESS', 'firestore', 'products', product ? 1 : 0, Date.now() - startedAt);
+    }
+
     if (!product) {
       throw new NotFoundException({
         code: AuthTenantErrorCode.PRODUCT_NOT_FOUND,
@@ -177,6 +200,42 @@ export class ProductsService {
           ],
         });
       }
+    }
+  }
+
+  private applyFilters(all: ProductDto[], query: ListProductsQueryDto): ProductDto[] {
+    const includeArchived = Boolean(query.includeArchived);
+    const category = query.category?.trim().toLowerCase();
+    const search = query.q?.trim().toLowerCase();
+    return all
+      .filter((p) => includeArchived || !p.isArchived)
+      .filter((p) => (category ? p.category.toLowerCase() === category : true))
+      .filter((p) => {
+        if (!search) return true;
+        return p.name.toLowerCase().includes(search) || p.barcode.toLowerCase().includes(search);
+      })
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  private logReadResult(
+    state: 'SUCCESS' | 'FALLBACK' | 'ERROR',
+    source: 'mongo' | 'firestore',
+    collection: string,
+    count: number,
+    latencyMs: number,
+    error?: string,
+  ): void {
+    const payload = { source, collection, count, latencyMs, ...(error ? { error } : {}) };
+    this.logger.log(`[MONGO][READ][${state}] ${JSON.stringify(payload)}`);
+  }
+
+  private logShadowDiff(collection: string, mongoItems: Array<{ id: string }>, firestoreItems: Array<{ id: string }>): void {
+    const mongoIds = new Set(mongoItems.map((x) => x.id));
+    const firestoreIds = new Set(firestoreItems.map((x) => x.id));
+    const missingInMongo = [...firestoreIds].filter((id) => !mongoIds.has(id));
+    const extraInMongo = [...mongoIds].filter((id) => !firestoreIds.has(id));
+    if (mongoItems.length !== firestoreItems.length || missingInMongo.length > 0 || extraInMongo.length > 0) {
+      this.logger.warn(`[MONGO][READ][SHADOW_MISMATCH] ${JSON.stringify({ collection, mongoCount: mongoItems.length, firestoreCount: firestoreItems.length, missingInMongo: missingInMongo.length, extraInMongo: extraInMongo.length })}`);
     }
   }
 }

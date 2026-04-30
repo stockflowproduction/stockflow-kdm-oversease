@@ -29,3 +29,11 @@ This folder contains the migration-safe NestJS backend foundation.
 1. Products + customers suites execute and remain green in CI-capable environment.
 2. Transaction read contracts reviewed and accepted.
 3. Mutation fixture plan approved before any write-path implementation.
+
+## Mongo parity check (Windows/PowerShell)
+- Standard run:
+  - `npm run verify:mongo:parity -- --storeId=<storeId> --mongoUri=<uri> --dbName=<db> --sampleSize=50`
+- Snapshot baseline mode:
+  - `npm run verify:mongo:parity -- --storeId=<storeId> --mongoUri=<uri> --dbName=<db> --baselineSnapshot=<path-to-mongo-ready-snapshot.json> --sampleSize=50`
+- If SRV DNS lookup fails on some environments, run with DNS overrides:
+  - `npm run verify:mongo:parity -- --storeId=<storeId> --mongoUri=<mongodb+srv-uri> --dbName=<db> --baselineSnapshot=<path> --dnsServers=8.8.8.8,1.1.1.1 --dnsResultOrder=ipv4first --sampleSize=50`

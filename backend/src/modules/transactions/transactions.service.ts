@@ -50,25 +50,35 @@ export class TransactionsService {
   ) {}
 
   async list(storeId: string, query: ListTransactionsQueryDto): Promise<TransactionListResponseDto> {
+    const startedAt = Date.now();
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 25;
 
     if (this.config?.useMongoReads && this.mongoTransactionsRepository) {
-      this.logger.log('[MONGO_READ] Transactions fetched from Mongo');
-      const all = await this.mongoTransactionsRepository.findAll(storeId);
-      const filtered = this.applyTransactionFilters(all, query);
-      const start = (page - 1) * pageSize;
-      const end = start + pageSize;
+      try {
+        const all = await this.mongoTransactionsRepository.findAll(storeId);
+        const filtered = this.applyTransactionFilters(all, query);
+        this.logReadResult('SUCCESS', 'mongo', 'transactions', filtered.length, Date.now() - startedAt);
+        if (this.config.shadowCompare) {
+          const base = await this.repository.findMany(storeId, query);
+          this.logShadowDiff('transactions', filtered, base.items);
+        }
+        const start = (page - 1) * pageSize;
+        const end = start + pageSize;
 
-      return {
-        items: filtered.slice(start, end),
-        page,
-        pageSize,
-        total: filtered.length,
-      };
+        return { items: filtered.slice(start, end), page, pageSize, total: filtered.length };
+      } catch (error) {
+        this.logReadResult('ERROR', 'mongo', 'transactions', 0, Date.now() - startedAt, error instanceof Error ? error.message : String(error));
+        const { items, total } = await this.repository.findMany(storeId, query);
+        this.logReadResult('FALLBACK', 'firestore', 'transactions', total, Date.now() - startedAt);
+        const start = (page - 1) * pageSize;
+        const end = start + pageSize;
+        return { items: items.slice(start, end), page, pageSize, total };
+      }
     }
 
     const { items, total } = await this.repository.findMany(storeId, query);
+    this.logReadResult('SUCCESS', 'firestore', 'transactions', total, Date.now() - startedAt);
     const start = (page - 1) * pageSize;
     const end = start + pageSize;
 
@@ -81,9 +91,30 @@ export class TransactionsService {
   }
 
   async getById(storeId: string, id: string): Promise<TransactionResponseDto> {
-    const transaction = this.config?.useMongoReads && this.mongoTransactionsRepository
-      ? await this.mongoTransactionsRepository.findById(storeId, id)
-      : await this.repository.findById(storeId, id);
+    const startedAt = Date.now();
+    let transaction: TransactionDto | null = null;
+    if (this.config?.useMongoReads && this.mongoTransactionsRepository) {
+      try {
+        transaction = await this.mongoTransactionsRepository.findById(storeId, id);
+        this.logReadResult('SUCCESS', 'mongo', 'transactions', transaction ? 1 : 0, Date.now() - startedAt);
+        if (this.config.shadowCompare) {
+          const firestoreTransaction = await this.repository.findById(storeId, id);
+          this.logShadowDiff(
+            'transactions',
+            transaction ? [transaction] : [],
+            firestoreTransaction ? [firestoreTransaction] : [],
+          );
+        }
+      } catch (error) {
+        this.logReadResult('ERROR', 'mongo', 'transactions', 0, Date.now() - startedAt, error instanceof Error ? error.message : String(error));
+        transaction = await this.repository.findById(storeId, id);
+        this.logReadResult('FALLBACK', 'firestore', 'transactions', transaction ? 1 : 0, Date.now() - startedAt);
+      }
+    } else {
+      transaction = await this.repository.findById(storeId, id);
+      this.logReadResult('SUCCESS', 'firestore', 'transactions', transaction ? 1 : 0, Date.now() - startedAt);
+    }
+
     if (!transaction) {
       throw new NotFoundException({
         code: AuthTenantErrorCode.TRANSACTION_NOT_FOUND,
@@ -96,10 +127,27 @@ export class TransactionsService {
 
   async listDeleted(storeId: string): Promise<DeletedTransactionListResponseDto> {
     if (this.config?.useMongoReads && this.mongoDeletedTransactionsRepository) {
-      return { items: await this.mongoDeletedTransactionsRepository.findAll(storeId) };
+      const startedAt = Date.now();
+      try {
+        const mongoItems = await this.mongoDeletedTransactionsRepository.findAll(storeId);
+        this.logReadResult('SUCCESS', 'mongo', 'deletedTransactions', mongoItems.length, Date.now() - startedAt);
+        if (this.config.shadowCompare) {
+          const firestoreItems = await this.repository.findDeleted(storeId);
+          this.logShadowDiff('deletedTransactions', mongoItems, firestoreItems);
+        }
+        return { items: mongoItems };
+      } catch (error) {
+        this.logReadResult('ERROR', 'mongo', 'deletedTransactions', 0, Date.now() - startedAt, error instanceof Error ? error.message : String(error));
+        const fallback = await this.repository.findDeleted(storeId);
+        this.logReadResult('FALLBACK', 'firestore', 'deletedTransactions', fallback.length, Date.now() - startedAt);
+        return { items: fallback };
+      }
     }
 
-    return { items: await this.repository.findDeleted(storeId) };
+    const startedAt = Date.now();
+    const items = await this.repository.findDeleted(storeId);
+    this.logReadResult('SUCCESS', 'firestore', 'deletedTransactions', items.length, Date.now() - startedAt);
+    return { items };
   }
 
   async listAuditEvents(
@@ -531,6 +579,30 @@ export class TransactionsService {
         code: AuthTenantErrorCode.TRANSACTION_MUTATION_IDEMPOTENCY_KEY_REQUIRED,
         message: 'X-Idempotency-Key header is required for mutation endpoints.',
       });
+    }
+  }
+
+  private logReadResult(
+    state: 'SUCCESS' | 'FALLBACK' | 'ERROR',
+    source: 'mongo' | 'firestore',
+    collection: string,
+    count: number,
+    latencyMs: number,
+    error?: string,
+  ): void {
+    const payload = { source, collection, count, latencyMs, ...(error ? { error } : {}) };
+    this.logger.log(`[MONGO][READ][${state}] ${JSON.stringify(payload)}`);
+  }
+
+  private logShadowDiff(collection: string, mongoItems: Array<{ id: string }>, firestoreItems: Array<{ id: string }>): void {
+    const mongoIds = new Set(mongoItems.map((x) => x.id));
+    const firestoreIds = new Set(firestoreItems.map((x) => x.id));
+    const missingInMongo = [...firestoreIds].filter((id) => !mongoIds.has(id));
+    const extraInMongo = [...mongoIds].filter((id) => !firestoreIds.has(id));
+    if (mongoItems.length !== firestoreItems.length || missingInMongo.length > 0 || extraInMongo.length > 0) {
+      this.logger.warn(
+        `[MONGO][READ][SHADOW_MISMATCH] ${JSON.stringify({ collection, mongoCount: mongoItems.length, firestoreCount: firestoreItems.length, missingInMongo: missingInMongo.length, extraInMongo: extraInMongo.length })}`,
+      );
     }
   }
 

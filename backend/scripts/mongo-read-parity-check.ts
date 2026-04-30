@@ -1,4 +1,5 @@
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import dns from 'node:dns';
 import { resolve } from 'node:path';
 
 import { MongoClient } from 'mongodb';
@@ -22,7 +23,27 @@ import { TransactionsService } from '../src/modules/transactions/transactions.se
 import { IdempotencyService } from '../src/infrastructure/idempotency/idempotency.service';
 import { FinanceArtifactsRepository } from '../src/modules/finance-artifacts/finance-artifacts.repository';
 
-type Options = { storeId: string; mongoUri: string; dbName: string; sampleSize: number };
+type BaselineMode = 'service' | 'snapshot';
+
+type SnapshotBaseline = {
+  products: ProductDto[];
+  customers: CustomerDto[];
+  transactions: TransactionDto[];
+  deletedTransactions: DeletedTransactionDto[];
+};
+
+type Options = {
+  storeId: string;
+  mongoUri: string;
+  dbName: string;
+  sampleSize: number;
+  baselineSnapshot?: string;
+  dnsServers?: string[];
+  dnsResultOrder?: 'ipv4first' | 'ipv6first' | 'verbatim';
+};
+
+const USAGE =
+  'Usage: --storeId <id> --mongoUri <uri> --dbName <db> [--sampleSize 50] [--baselineSnapshot <path-to-mongo-ready-snapshot.json>] [--dnsServers 8.8.8.8,1.1.1.1] [--dnsResultOrder ipv4first|ipv6first|verbatim]';
 
 function parseArgs(argv: string[]): Options {
   const args = new Map<string, string>();
@@ -45,12 +66,33 @@ function parseArgs(argv: string[]): Options {
   const mongoUri = args.get('--mongoUri');
   const dbName = args.get('--dbName');
   const sampleSize = Number(args.get('--sampleSize') ?? '50');
+  const baselineSnapshot = args.get('--baselineSnapshot');
+  const dnsServersRaw = args.get('--dnsServers');
+  const dnsServers = dnsServersRaw
+    ? dnsServersRaw
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean)
+    : undefined;
+  const dnsResultOrderRaw = args.get('--dnsResultOrder');
+  const dnsResultOrder =
+    dnsResultOrderRaw && ['ipv4first', 'ipv6first', 'verbatim'].includes(dnsResultOrderRaw)
+      ? (dnsResultOrderRaw as Options['dnsResultOrder'])
+      : undefined;
 
   if (!storeId || !mongoUri || !dbName) {
-    throw new Error('Usage: --storeId <id> --mongoUri <uri> --dbName <db> [--sampleSize 50]');
+    throw new Error(USAGE);
   }
 
-  return { storeId, mongoUri, dbName, sampleSize: Number.isFinite(sampleSize) ? sampleSize : 50 };
+  return {
+    storeId,
+    mongoUri,
+    dbName,
+    sampleSize: Number.isFinite(sampleSize) ? sampleSize : 50,
+    baselineSnapshot,
+    dnsServers,
+    dnsResultOrder,
+  };
 }
 
 function sampleDiff<T>(base: T[], mongo: T[], fields: string[], sampleSize: number): Array<{ id: string; field: string; baseline: unknown; mongo: unknown }> {
@@ -72,6 +114,20 @@ function sampleDiff<T>(base: T[], mongo: T[], fields: string[], sampleSize: numb
   return result;
 }
 
+
+
+function loadBaselineSnapshot(snapshotPath: string): SnapshotBaseline {
+  const raw = readFileSync(resolve(process.cwd(), snapshotPath), 'utf8');
+  const parsed = JSON.parse(raw) as Partial<SnapshotBaseline>;
+
+  const products = Array.isArray(parsed.products) ? parsed.products : [];
+  const customers = Array.isArray(parsed.customers) ? parsed.customers : [];
+  const transactions = Array.isArray(parsed.transactions) ? parsed.transactions : [];
+  const deletedTransactions = Array.isArray(parsed.deletedTransactions) ? parsed.deletedTransactions : [];
+
+  return { products, customers, transactions, deletedTransactions };
+}
+
 function sumRevenue(items: TransactionDto[]): number {
   return items
     .filter((x) => x.type === 'sale' || x.type === 'payment' || x.type === 'adjustment')
@@ -79,6 +135,11 @@ function sumRevenue(items: TransactionDto[]): number {
 }
 
 async function run(): Promise<void> {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log(USAGE);
+    return;
+  }
+
   console.log('[PARITY][START]');
   let opts: Options;
   try {
@@ -110,13 +171,30 @@ async function run(): Promise<void> {
     idDiff: {},
     financialDiff: {},
     sampleDiff: {},
+    baselineMode: (opts.baselineSnapshot ? 'snapshot' : 'service') as BaselineMode,
+    baselineSnapshot: opts.baselineSnapshot ?? null,
+    dnsServersApplied: [] as string[],
+    dnsResultOrder: opts.dnsResultOrder ?? null,
+    mongoUriMode: opts.mongoUri.startsWith('mongodb+srv://') ? 'srv' : 'direct',
+    connectionStatus: 'not_connected',
   };
 
   let client: MongoClient | null = null;
 
   try {
+    if (opts.dnsServers && opts.dnsServers.length > 0) {
+      dns.setServers(opts.dnsServers);
+      report.dnsServersApplied = dns.getServers();
+    }
+    if (opts.dnsResultOrder) {
+      dns.setDefaultResultOrder(opts.dnsResultOrder);
+      report.dnsResultOrder = opts.dnsResultOrder;
+    }
+
+    report.connectionStatus = 'connecting';
     client = new MongoClient(opts.mongoUri);
     await client.connect();
+    report.connectionStatus = 'connected';
     const db = client.db(opts.dbName);
 
     const mongoDbServiceLike = { getDb: () => db } as any;
@@ -139,10 +217,23 @@ async function run(): Promise<void> {
     const cq: ListCustomersQueryDto = {};
     const tq: ListTransactionsQueryDto = { page: 1, pageSize: 100000 };
 
-    const baselineProducts = await productsService.list(opts.storeId, pq);
-    const baselineCustomers = await customersService.list(opts.storeId, cq);
-    const baselineTransactions = (await transactionsService.list(opts.storeId, tq)).items;
-    const baselineDeleted = (await transactionsService.listDeleted(opts.storeId)).items;
+    let baselineProducts: ProductDto[];
+    let baselineCustomers: CustomerDto[];
+    let baselineTransactions: TransactionDto[];
+    let baselineDeleted: DeletedTransactionDto[];
+
+    if (opts.baselineSnapshot) {
+      const snapshot = loadBaselineSnapshot(opts.baselineSnapshot);
+      baselineProducts = snapshot.products;
+      baselineCustomers = snapshot.customers;
+      baselineTransactions = snapshot.transactions;
+      baselineDeleted = snapshot.deletedTransactions;
+    } else {
+      baselineProducts = await productsService.list(opts.storeId, pq);
+      baselineCustomers = await customersService.list(opts.storeId, cq);
+      baselineTransactions = (await transactionsService.list(opts.storeId, tq)).items;
+      baselineDeleted = (await transactionsService.listDeleted(opts.storeId)).items;
+    }
 
     const mongoProductsData = await mongoProducts.findAll(opts.storeId);
     const mongoCustomersData = await mongoCustomers.findAll(opts.storeId);
@@ -156,6 +247,13 @@ async function run(): Promise<void> {
       transactions: { baseline: baselineTransactions.length, mongo: mongoTransactionsData.length },
       deletedTransactions: { baseline: baselineDeleted.length, mongo: mongoDeletedData.length },
     };
+
+    const hasLikelyEmptyServiceBaseline =
+      report.baselineMode === 'service' &&
+      Object.values(report.counts).some((x: any) => x.baseline === 0 && x.mongo > 0);
+    if (hasLikelyEmptyServiceBaseline) {
+      report.warnings.push('Service baseline appears empty while Mongo has data. Try --baselineSnapshot=<path-to-mongo-ready-snapshot.json>.');
+    }
 
     console.log('[PARITY][IDS]');
     const idDiff = (base: Array<{ id: string }>, mongo: Array<{ id: string }>) => {
@@ -231,7 +329,12 @@ async function run(): Promise<void> {
     report.decision = report.blockers.length > 0 ? 'NO-GO' : 'GO';
   } catch (error) {
     report.decision = 'NO-GO';
-    report.blockers.push(`Parity check failed: ${error instanceof Error ? error.message : String(error)}`);
+    report.connectionStatus = 'failed';
+    const errorText = error instanceof Error ? error.message : String(error);
+    report.blockers.push(`Parity check failed: ${errorText}`);
+    if (errorText.includes('querySrv ECONNREFUSED')) {
+      report.warnings.push('Retry with --dnsServers=8.8.8.8,1.1.1.1 --dnsResultOrder=ipv4first');
+    }
   } finally {
     if (client) {
       await client.close();

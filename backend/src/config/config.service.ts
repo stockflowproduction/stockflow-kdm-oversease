@@ -103,6 +103,9 @@ export class AppConfigService {
   get useMongoReads(): boolean {
     return this.env.USE_MONGO_READS;
   }
-}
 
+  get shadowCompare(): boolean {
+    return this.env.SHADOW_COMPARE;
+  }
+}
 
