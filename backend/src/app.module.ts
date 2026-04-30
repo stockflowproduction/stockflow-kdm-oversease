@@ -20,6 +20,8 @@ import { TransactionsModule } from './modules/transactions/transactions.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { DevModule } from './dev/dev.module';
 
+const enableDevRoutes = process.env.ENABLE_DEV_ROUTES?.toLowerCase() === 'true';
+
 @Module({
   imports: [
     ConfigModule,
@@ -40,7 +42,7 @@ import { DevModule } from './dev/dev.module';
     ProcurementModule,
     ReportsModule,
     UploadsModule,
-    DevModule,
+    ...(enableDevRoutes ? [DevModule] : []),
   ],
 })
 export class AppModule {}

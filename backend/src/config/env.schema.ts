@@ -54,6 +54,10 @@ export const envSchema = z.object({
     .string()
     .default('false')
     .transform((v) => v.toLowerCase() === 'true'),
+  ENABLE_DEV_ROUTES: z
+    .string()
+    .default('false')
+    .transform((v) => v.toLowerCase() === 'true'),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

@@ -107,5 +107,10 @@ export class AppConfigService {
   get shadowCompare(): boolean {
     return this.env.SHADOW_COMPARE;
   }
+
+  get enableDevRoutes(): boolean {
+    return this.env.ENABLE_DEV_ROUTES;
+  }
 }
+
 
