@@ -14,6 +14,7 @@ import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/exc
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile } from '../services/importExcel';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
+import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
 export default function Transactions() {
   type BackendShadowTransaction = {
@@ -754,8 +755,8 @@ export default function Transactions() {
       isPayment,
       itemCount,
       typeLabel: isSale ? (txType === 'historical_reference' ? 'HIST' : 'SALE') : isReturn ? 'RETURN' : 'PAYMENT',
-      typeVariant: isSale ? 'success' : isReturn ? 'destructive' : 'secondary',
-      amountClass: isSale ? 'text-green-600' : isReturn ? 'text-red-600' : 'text-emerald-700',
+      typeVariant: 'outline',
+      amountClass: isSale ? 'text-green-700' : isReturn ? 'text-red-700' : 'text-blue-700',
     };
   }), [paginatedTransactions]);
   const deletedTotalPages = useMemo(
@@ -1740,7 +1741,7 @@ export default function Transactions() {
                                             </div>
                                         </td>
                                         <td className="px-4 py-3">
-                                            <Badge variant={typeVariant} className="text-[9px] font-bold px-1.5 h-4">
+                                            <Badge variant={typeVariant} className={`text-[9px] font-bold px-1.5 h-4 ${getPaymentStatusColorClass(isReturn ? 'return' : isPayment ? 'payment against due' : (getDisplayPaymentMethod(tx) === 'Credit' ? 'credit due' : getDisplayPaymentMethod(tx)))}`}>
                                                 {typeLabel}
                                             </Badge>
                                         </td>

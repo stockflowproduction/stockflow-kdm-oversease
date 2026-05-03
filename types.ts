@@ -55,6 +55,8 @@ export interface Customer {
   id: string;
   name: string;
   phone: string;
+  gstName?: string;
+  gstNumber?: string;
   totalSpend: number;
   totalDue: number;
   storeCredit?: number;
@@ -77,6 +79,10 @@ export interface Transaction {
   type: 'sale' | 'return' | 'payment';
   customerId?: string;
   customerName?: string;
+  customerPhone?: string;
+  gstName?: string;
+  gstNumber?: string;
+  gstApplied?: boolean;
   subtotal?: number;
   discount?: number;
   tax?: number;
@@ -443,9 +449,18 @@ export interface PurchaseOrder {
 
 export interface ExpenseActivity {
   id: string;
-  action: 'add_expense' | 'delete_expense' | 'add_category' | 'delete_category';
+  action: 'add_expense' | 'delete_expense' | 'add_category' | 'delete_category' | 'cash_addition' | 'cash_withdrawal';
   message: string;
   createdAt: string;
+}
+
+export interface CashAdjustment {
+  id: string;
+  type: 'cash_addition' | 'cash_withdrawal';
+  amount: number;
+  note?: string;
+  createdAt: string;
+  sessionId?: string;
 }
 
 
@@ -546,6 +561,7 @@ export interface AppState {
   expenses?: Expense[];
   expenseCategories?: string[];
   expenseActivities?: ExpenseActivity[];
+  cashAdjustments?: CashAdjustment[];
   freightInquiries?: FreightInquiry[];
   freightConfirmedOrders?: FreightConfirmedOrder[];
   freightPurchases?: FreightPurchase[];

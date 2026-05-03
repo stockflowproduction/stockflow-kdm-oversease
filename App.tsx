@@ -9,6 +9,7 @@ import { loadData } from './services/storage';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3 } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
+import { NewUiPreviewBanner } from './components/NewUiPreviewBanner';
 
 const Admin = lazy(() => import('./pages/Admin'));
 const Sales = lazy(() => import('./pages/Sales'));
@@ -341,6 +342,7 @@ export default function App() {
         {/* Main Content */}
         <main className="flex-1 overflow-auto bg-background">
           <div className="h-full p-4 md:p-8 pb-20 md:pb-8 max-w-7xl mx-auto">
+            <NewUiPreviewBanner />
             <Suspense fallback={<div className="h-full flex items-center justify-center text-sm text-muted-foreground">Loading page…</div>}>
               <Routes>
                 <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />

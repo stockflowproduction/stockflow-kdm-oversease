@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input,
 import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
+import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
 export default function Customers() {
   const CUSTOMERS_PAGE_SIZE = 15;
@@ -52,8 +53,8 @@ export default function Customers() {
   const [collectPaymentError, setCollectPaymentError] = useState<string | null>(null);
   const [customerEditError, setCustomerEditError] = useState<string | null>(null);
   
-  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '' });
-  const [customerEditForm, setCustomerEditForm] = useState({ name: '', phone: '' });
+  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', gstName: '', gstNumber: '' });
+  const [customerEditForm, setCustomerEditForm] = useState({ name: '', phone: '', gstName: '', gstNumber: '' });
   
   // Upfront Order Form State
   const [upfrontOrderForm, setUpfrontOrderForm] = useState({
@@ -203,7 +204,7 @@ export default function Customers() {
 
   const openCustomerEditor = (customer: Customer) => {
     setEditingCustomer(customer);
-    setCustomerEditForm({ name: customer.name, phone: customer.phone });
+    setCustomerEditForm({ name: customer.name, phone: customer.phone, gstName: customer.gstName || '', gstNumber: customer.gstNumber || '' });
     setCustomerEditError(null);
   };
 
@@ -255,6 +256,8 @@ export default function Customers() {
 
     const name = customerEditForm.name.trim();
     const phone = customerEditForm.phone.trim();
+    const gstName = customerEditForm.gstName.trim();
+    const gstNumber = customerEditForm.gstNumber.trim();
 
     if (!name || !phone) {
       setCustomerEditError('Name and phone number are required.');
@@ -266,6 +269,8 @@ export default function Customers() {
         ...editingCustomer,
         name,
         phone,
+        gstName: gstName || undefined,
+        gstNumber: gstNumber || undefined,
       };
       const nextCustomers = updateCustomer(updatedCustomer);
       setCustomers(nextCustomers);
@@ -394,6 +399,8 @@ export default function Customers() {
           id: Date.now().toString(),
           name: name,
           phone: rawPhone,
+          gstName: newCustomer.gstName.trim() || undefined,
+          gstNumber: newCustomer.gstNumber.trim() || undefined,
           totalSpend: 0,
           totalDue: 0,
           visitCount: 0,
@@ -404,7 +411,7 @@ export default function Customers() {
           addCustomer(customer);
           refreshData();
           setIsAddModalOpen(false);
-          setNewCustomer({ name: '', phone: '' });
+          setNewCustomer({ name: '', phone: '', gstName: '', gstNumber: '' });
       } catch (error) {
           console.error('[customers] add customer failed', error);
           const message = error instanceof Error ? error.message : 'Failed to create customer. Please try again.';
@@ -811,10 +818,13 @@ export default function Customers() {
                   />
                 </td>
                 <td className="p-3 font-medium">{customer.name}</td>
-                <td className="p-3">{customer.phone}</td>
+                <td className="p-3">
+                  <div>{customer.phone}</div>
+                  <div className="text-[11px] text-muted-foreground">{customer.gstNumber ? `GST: ${customer.gstNumber}` : 'GST details not added'}</div>
+                </td>
                 <td className="p-3">{customer.visitCount}</td>
                 <td className="p-3">₹{formatMoneyWhole(customer.totalSpend)}</td>
-                <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>₹{formatMoneyWhole(customer.totalDue)}</td>
+                <td className={`p-3 font-semibold ${customer.totalDue > 0 ? 'text-orange-700' : 'text-green-700'}`}>₹{formatMoneyWhole(customer.totalDue)}</td>
                 <td className={`p-3 font-semibold ${(customer.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-muted-foreground'}`}>₹{formatMoneyWhole(customer.storeCredit || 0)}</td>
                 <td className="p-3">{new Date(customer.lastVisit).toLocaleDateString()}</td>
                 <td className="p-3">
@@ -865,6 +875,14 @@ export default function Customers() {
                         <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Phone Number</Label>
                         <Input placeholder="9876543210" value={newCustomer.phone} onChange={e => setNewCustomer({...newCustomer, phone: e.target.value})} />
                       </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">GST Name (Optional)</Label>
+                        <Input placeholder="Registered GST name" value={newCustomer.gstName} onChange={e => setNewCustomer({...newCustomer, gstName: e.target.value})} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">GST Number (Optional)</Label>
+                        <Input placeholder="GST number" value={newCustomer.gstNumber} onChange={e => setNewCustomer({...newCustomer, gstNumber: e.target.value.toUpperCase()})} />
+                      </div>
                       <Button className="w-full h-11 shadow-lg bg-primary hover:bg-primary/90 font-bold" onClick={handleAddCustomerSubmit}>
                           Create Profile
                       </Button>
@@ -898,6 +916,14 @@ export default function Customers() {
                         <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Phone Number</Label>
                         <Input value={customerEditForm.phone} onChange={e => setCustomerEditForm(prev => ({ ...prev, phone: e.target.value }))} />
                       </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">GST Name (Optional)</Label>
+                        <Input value={customerEditForm.gstName} onChange={e => setCustomerEditForm(prev => ({ ...prev, gstName: e.target.value }))} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">GST Number (Optional)</Label>
+                        <Input value={customerEditForm.gstNumber} onChange={e => setCustomerEditForm(prev => ({ ...prev, gstNumber: e.target.value.toUpperCase() }))} />
+                      </div>
                       <div className="flex gap-2">
                         <Button variant="outline" className="flex-1" onClick={closeCustomerEditor}>Cancel</Button>
                         <Button variant="outline" className="flex-1" onClick={() => handleSaveCustomerEdit(true)}>
@@ -925,6 +951,10 @@ export default function Customers() {
                                         {viewingCustomer.totalSpend >= highValueThreshold && <Badge className="bg-amber-100 text-amber-800 border-amber-200">VIP</Badge>}
                                     </CardTitle>
                                     <div className="text-sm text-muted-foreground flex items-center gap-2 mt-2"><Phone className="w-3 h-3" /> {viewingCustomer.phone}</div>
+                                    <div className="mt-2 rounded-lg border bg-muted/20 px-2 py-1 text-xs">
+                                      <div><span className="font-semibold">GST Name:</span> {viewingCustomer.gstName || 'Not added'}</div>
+                                      <div><span className="font-semibold">GST Number:</span> {viewingCustomer.gstNumber || 'Not added'}</div>
+                                    </div>
                                 </div>
                           </div>
                           <div className="flex gap-1">
@@ -933,9 +963,9 @@ export default function Customers() {
                           </div>
                       </div>
                       <div className="flex gap-3 mt-6">
-                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'}`}>
-                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-red-600' : 'text-emerald-600'}`}>Current Dues</div>
-                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(viewingCustomerCanonical?.totalDue || 0)}</div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-orange-700' : 'text-green-700'}`}>Current Dues</div>
+                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-orange-700' : 'text-green-700'}`}>₹{formatMoneyWhole(viewingCustomerCanonical?.totalDue || 0)}</div>
                            </div>
                            <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
                                <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>Store Credit</div>
@@ -983,13 +1013,13 @@ export default function Customers() {
                                   return (
                                     <div key={tx.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group cursor-pointer" onClick={() => tx.type !== 'payment' && setSelectedTx(tx)}>
                                         <div className="flex items-center gap-3">
-                                            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-sm ${tx.type === 'payment' ? 'bg-emerald-100 text-emerald-700' : isSplitSale ? 'bg-amber-100 text-amber-700' : (tx.paymentMethod === 'Credit' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-700')}`}>
+                                            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-sm ${tx.type === 'payment' ? 'bg-blue-100 text-blue-700' : isSplitSale ? 'bg-orange-100 text-orange-700' : (tx.paymentMethod === 'Credit' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700')}`}>
                                                 {tx.type === 'payment' ? <Wallet className="w-5 h-5" /> : isSplitSale ? <CreditCard className="w-5 h-5" /> : (tx.paymentMethod === 'Credit' ? <AlertCircle className="w-5 h-5" /> : <Package className="w-5 h-5" />)}
                                             </div>
                                             <div>
                                                 <div className="flex items-center gap-2">
                                                     <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">#{tx.id.slice(-6)}</span>
-                                                    <Badge variant={tx.type === 'payment' ? 'success' : isSplitSale ? 'outline' : (tx.paymentMethod === 'Credit' ? 'destructive' : 'secondary')} className="h-4 px-1.5 text-[9px] font-extrabold uppercase">
+                                                    <Badge variant="outline" className={`h-4 px-1.5 text-[9px] font-extrabold uppercase ${getPaymentStatusColorClass(tx.type === 'payment' ? 'payment against due' : tx.type === 'return' ? 'return' : tx.paymentMethod === 'Credit' ? 'credit due' : tx.paymentMethod || 'cash')}`}>
                                                         {tx.type}
                                                     </Badge>
                                                 </div>
@@ -1010,7 +1040,7 @@ export default function Customers() {
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-3 text-right">
-                                            <div className={`text-sm sm:text-base font-black ${tx.type === 'payment' ? 'text-emerald-700' : isSplitSale ? 'text-amber-700' : (tx.paymentMethod === 'Credit' ? 'text-red-700' : 'text-slate-900')}`}>
+                                            <div className={`text-sm sm:text-base font-black ${tx.type === 'payment' ? 'text-blue-700' : isSplitSale ? 'text-orange-700' : (tx.paymentMethod === 'Credit' ? 'text-orange-700' : 'text-green-700')}`}>
                                                 {tx.type === 'payment' ? '-' : ''}₹{formatMoneyPrecise(Math.abs(tx.total))}
                                             </div>
                                             {tx.type !== 'payment' && (

@@ -11,6 +11,21 @@ type ReceiptPaymentDetails = {
     changeReturned?: number;
 };
 
+const isMeaningfulOptionValue = (value?: string, kind: 'variant' | 'color' = 'variant') => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized || normalized === '-') return false;
+    if (kind === 'variant' && (normalized === 'no variant' || normalized === String(NO_VARIANT || '').trim().toLowerCase())) return false;
+    if (kind === 'color' && (normalized === 'no color' || normalized === String(NO_COLOR || '').trim().toLowerCase())) return false;
+    return true;
+};
+
+const formatInvoiceItemName = (item: { name?: string; selectedVariant?: string; selectedColor?: string }) => {
+    const parts = [String(item.name || '').trim()].filter(Boolean);
+    if (isMeaningfulOptionValue(item.selectedVariant, 'variant')) parts.push(String(item.selectedVariant).trim());
+    if (isMeaningfulOptionValue(item.selectedColor, 'color')) parts.push(String(item.selectedColor).trim());
+    return parts.join(' - ');
+};
+
 const getPdfImageSource = async (image: string | undefined): Promise<string | null> => {
     if (!image) return null;
     if (image.startsWith('data:image')) return image;
@@ -32,7 +47,7 @@ const getPdfImageSource = async (image: string | undefined): Promise<string | nu
 
 export const generateProductCatalogPDF = async (
     products: Product[],
-    options?: { fileName?: string; generatedLabel?: string },
+    options?: { fileName?: string; generatedLabel?: string; groupByCategory?: boolean; showInStockPrices?: boolean; showOutOfStockPrices?: boolean },
 ) => {
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.getHeight();
@@ -72,7 +87,8 @@ export const generateProductCatalogPDF = async (
         doc.line(margin, headerBottomY, pageWidth - margin, headerBottomY);
     };
 
-    const groupedProducts = products.reduce<Record<string, Product[]>>((acc, product) => {
+    const sortedFlatProducts = [...products].sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' }));
+    const groupedProducts = sortedFlatProducts.reduce<Record<string, Product[]>>((acc, product) => {
         const normalized = (product.category || '').trim() || 'Uncategorized';
         if (!acc[normalized]) acc[normalized] = [];
         acc[normalized].push(product);
@@ -82,10 +98,10 @@ export const generateProductCatalogPDF = async (
     const sortedCategories = Object.keys(groupedProducts).sort((a, b) =>
         a.localeCompare(b, undefined, { sensitivity: 'base' }),
     );
-
-    for (let categoryIndex = 0; categoryIndex < sortedCategories.length; categoryIndex += 1) {
-        const categoryName = sortedCategories[categoryIndex];
-        const categoryProducts = [...groupedProducts[categoryName]].sort((a, b) => {
+    const categoryLoop = options?.groupByCategory === false ? ['All Products'] : sortedCategories;
+    for (let categoryIndex = 0; categoryIndex < categoryLoop.length; categoryIndex += 1) {
+        const categoryName = categoryLoop[categoryIndex];
+        const categoryProducts = options?.groupByCategory === false ? sortedFlatProducts : [...groupedProducts[categoryName]].sort((a, b) => {
             const normalizedA = (a.name || '').trim().toLowerCase();
             const normalizedB = (b.name || '').trim().toLowerCase();
             const nameCompare = normalizedA.localeCompare(normalizedB, undefined, { sensitivity: 'base' });
@@ -177,8 +193,10 @@ export const generateProductCatalogPDF = async (
                 doc.setFont('helvetica', 'normal');
                 doc.setFontSize(10.5);
                 doc.setTextColor(55, 65, 81);
-                const priceText = `${formatMoneyWhole(product.sellPrice)} INR`;
-                doc.text(priceText, x + cardWidth / 2, textY + 1, { align: 'center' });
+                const stock = Number(product.stock || 0);
+                const showPrice = stock > 0 ? (options?.showInStockPrices !== false) : Boolean(options?.showOutOfStockPrices);
+                const priceText = showPrice ? `${formatMoneyWhole(product.sellPrice)} INR` : '';
+                if (priceText) doc.text(priceText, x + cardWidth / 2, textY + 1, { align: 'center' });
             }
         }
     }
@@ -188,6 +206,15 @@ export const generateProductCatalogPDF = async (
 
 export const generateReceiptPDF = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
     const { profile } = loadData();
+    const sanitizeHeaderText = (value?: string) => {
+      const raw = String(value || '');
+      const cleaned = raw
+        .replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
+        .replace(/\uFFFD/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return cleaned;
+    };
     
     if (profile.invoiceFormat === 'thermal') {
         printThermalInvoice(transaction, customers, paymentDetails);
@@ -223,13 +250,19 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     
     doc.setFontSize(8);
     doc.setFont("helvetica", "normal");
+    const cleanAddress1 = sanitizeHeaderText(profile.addressLine1);
+    const cleanAddress2 = sanitizeHeaderText(profile.addressLine2);
+    const cleanPhone = sanitizeHeaderText(profile.phone);
+    const cleanEmail = sanitizeHeaderText(profile.email);
+    const cleanGstin = sanitizeHeaderText(profile.gstin);
+    const cleanState = sanitizeHeaderText(profile.state);
     const headerLines = [
-        profile.addressLine1,
-        profile.addressLine2,
-        `Phone no.: ${profile.phone}`,
-        `Email: ${profile.email}`,
-        `GSTIN: ${profile.gstin}`,
-        `State: ${profile.state}`
+        cleanAddress1,
+        cleanAddress2,
+        cleanPhone ? `Phone no.: ${cleanPhone}` : '',
+        cleanEmail ? `Email: ${cleanEmail}` : '',
+        cleanGstin ? `GSTIN: ${cleanGstin}` : '',
+        cleanState ? `State: ${cleanState}` : ''
     ].filter(Boolean);
     doc.text(headerLines, 14, 22);
 
@@ -247,8 +280,15 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     doc.setFont("helvetica", "bold");
     doc.text(transaction.customerName || "Walk-in Customer", 14, 62);
     doc.setFont("helvetica", "normal");
-    const customerPhone = customers.find(c => c.id === transaction.customerId)?.phone || "Walk-in";
+    const customerPhone = transaction.customerPhone || customers.find(c => c.id === transaction.customerId)?.phone || "Walk-in";
     doc.text(`Contact No.: ${customerPhone}`, 14, 68);
+    const gstDetailsStartY = 74;
+    let tableStartY = 75;
+    if (transaction.gstApplied) {
+      doc.text(`GST Name: ${transaction.gstName || '-'}`, 14, gstDetailsStartY);
+      doc.text(`GST Number: ${transaction.gstNumber || '-'}`, 14, gstDetailsStartY + 6);
+      tableStartY = 87;
+    }
 
     doc.setFontSize(10);
     doc.setFont("helvetica", "bold");
@@ -261,7 +301,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     // --- Items Table ---
     const tableData = transaction.items.map((item, idx) => [
         idx + 1,
-        `${item.name} - ${item.selectedVariant || NO_VARIANT} - ${item.selectedColor || NO_COLOR}`,
+        formatInvoiceItemName(item),
         item.hsn || "-",
         item.quantity,
         `Rs. ${formatMoneyPrecise(item.sellPrice)}`,
@@ -270,7 +310,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     ]);
 
     autoTable(doc, {
-        startY: 75,
+        startY: tableStartY,
         head: [['#', 'Item name', 'HSN/SAC', 'Quantity', 'Price/Unit', 'Discount', 'Amount']],
         body: tableData,
         theme: 'grid',

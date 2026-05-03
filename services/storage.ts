@@ -18,6 +18,7 @@ import {
   DeletedTransactionRecord,
   DeleteCompensationRecord,
   UpdatedTransactionRecord,
+  CashAdjustment,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
@@ -138,6 +139,7 @@ const getEntityCounts = (state: AppState) => ({
   freightConfirmedOrders: state.freightConfirmedOrders.length,
   freightPurchases: state.freightPurchases.length,
   purchaseReceiptPostings: state.purchaseReceiptPostings.length,
+  cashAdjustments: (state.cashAdjustments || []).length,
   purchaseParties: (state.purchaseParties || []).length,
   purchaseOrders: (state.purchaseOrders || []).length,
 });
@@ -1569,6 +1571,7 @@ const initialData: AppState = {
   expenses: [],
   expenseCategories: ['General'],
   expenseActivities: [],
+  cashAdjustments: [],
   freightInquiries: [],
   freightConfirmedOrders: [],
   freightPurchases: [],
@@ -1881,6 +1884,7 @@ const syncFromCloud = async () => {
                     expenses: cloudData.expenses || [],
                     expenseCategories: cloudData.expenseCategories || ['General'],
                     expenseActivities: cloudData.expenseActivities || [],
+                    cashAdjustments: cloudData.cashAdjustments || [],
                     freightInquiries: cloudData.freightInquiries || [],
                     freightConfirmedOrders: cloudData.freightConfirmedOrders || [],
                     freightPurchases: cloudData.freightPurchases || [],

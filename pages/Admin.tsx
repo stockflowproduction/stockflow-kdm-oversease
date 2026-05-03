@@ -10,6 +10,7 @@ import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCir
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel } from '../services/excel';
 import { generateProductCatalogPDF } from '../services/pdf';
+import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
 
@@ -67,7 +68,12 @@ export default function Admin() {
     colors: [] as string[],
     stockByVariantColor: [] as Array<{ variant: string; color: string; stock: number; buyPrice?: number | ''; sellPrice?: number | ''; totalPurchase?: number | ''; totalSold?: number | '' }>,
     variantInput: '',
-    colorInput: ''
+    colorInput: '',
+    supplierName: '',
+    supplierTotalPayable: '',
+    supplierTotalPaid: '',
+    supplierPaymentMethod: '',
+    supplierNote: ''
   };
   const [formData, setFormData] = useState<any>(emptyProductForm);
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -78,6 +84,8 @@ export default function Admin() {
   
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isCatalogOptionsOpen, setIsCatalogOptionsOpen] = useState(false);
+  const [purchaseParties, setPurchaseParties] = useState<Array<{ id: string; name: string }>>([]);
 
   const refreshData = () => {
     const data = loadData();
@@ -86,6 +94,7 @@ export default function Admin() {
     setStoreName(data.profile.storeName || 'StockFlow');
     setVariantsMaster(data.variantsMaster || []);
     setColorsMaster(data.colorsMaster || []);
+    setPurchaseParties(getPurchaseParties().map((party) => ({ id: party.id, name: party.name })));
   };
 
   useEffect(() => {
@@ -314,6 +323,33 @@ export default function Admin() {
         setError("Please fill in all required fields marked with *");
         return;
     }
+    const hasManualStock = formData.stock !== '' && formData.stock !== null && formData.stock !== undefined;
+    if (!hasCombos && !hasManualStock) {
+      setError('Opening stock is required.');
+      return;
+    }
+    const openingStockValue = toNonNegativeNumber(formData.stock);
+    const totalPurchaseBlank = formData.totalPurchase === '' || formData.totalPurchase === null || formData.totalPurchase === undefined;
+    const effectiveTotalPurchase = totalPurchaseBlank && openingStockValue > 0 ? openingStockValue : formData.totalPurchase;
+    if (effectiveTotalPurchase === '' || effectiveTotalPurchase === null || effectiveTotalPurchase === undefined || Number(effectiveTotalPurchase) < 0 || !Number.isFinite(Number(effectiveTotalPurchase))) {
+      setError('Total purchase is required and must be a number ≥ 0.');
+      return;
+    }
+    const supplierName = String(formData.supplierName || '').trim();
+    const supplierPayableRaw = formData.supplierTotalPayable;
+    const supplierPaidRaw = formData.supplierTotalPaid;
+    const supplierMethod = String(formData.supplierPaymentMethod || '').trim();
+    const supplierNote = String(formData.supplierNote || '').trim();
+    const supplierSectionTouched = supplierName !== '' || supplierPayableRaw !== '' || supplierPaidRaw !== '' || supplierMethod !== '' || supplierNote !== '';
+    const supplierPayable = supplierPayableRaw === '' ? 0 : Number(supplierPayableRaw);
+    const supplierPaid = supplierPaidRaw === '' ? 0 : Number(supplierPaidRaw);
+    if (supplierSectionTouched) {
+      if (!supplierName) return setError('Party / supplier name is required when supplier details are entered.');
+      if (!Number.isFinite(supplierPayable) || supplierPayable < 0) return setError('Total payable must be a valid number ≥ 0.');
+      if (!Number.isFinite(supplierPaid) || supplierPaid < 0) return setError('Total paid must be a valid number ≥ 0.');
+      if (supplierPaid > supplierPayable) return setError('Total paid cannot exceed total payable.');
+      if (supplierPaid > 0 && !supplierMethod) return setError('Payment method is required when total paid is greater than zero.');
+    }
     setError(null);
 
     const totalComboStock = hasCombos
@@ -331,7 +367,7 @@ export default function Admin() {
       hsn: formData.hsn || '',
       buyPrice: hasCombos ? toNonNegativeNumber(editingProduct?.buyPrice) : toNonNegativeNumber(formData.buyPrice),
       sellPrice: hasCombos ? toNonNegativeNumber(editingProduct?.sellPrice) : toNonNegativeNumber(formData.sellPrice),
-      totalPurchase: parseOptionalNonNegative(formData.totalPurchase),
+      totalPurchase: parseOptionalNonNegative(effectiveTotalPurchase),
       totalSold: parseOptionalNonNegative(formData.totalSold),
       stock: totalComboStock,
       variants: hasCombos ? (formData.variants || []) : [],
@@ -356,7 +392,69 @@ export default function Admin() {
         updated = await updateProduct(productPayload);
         setProducts(updated);
       } else {
+        if (supplierSectionTouched) {
+          const now = new Date().toISOString();
+          const remainingDue = Math.max(0, Number((supplierPayable - supplierPaid).toFixed(2)));
+          productPayload.purchaseHistory = [
+            {
+              id: `ph-admin-create-${Date.now()}`,
+              date: now,
+              variant: NO_VARIANT,
+              color: NO_COLOR,
+              quantity: toNonNegativeNumber(formData.stock),
+              unitPrice: toNonNegativeNumber(formData.buyPrice),
+              previousStock: 0,
+              previousBuyPrice: 0,
+              nextBuyPrice: toNonNegativeNumber(formData.buyPrice),
+              notes: supplierNote || `Source: admin_product_create`,
+              reference: `Supplier:${supplierName} | Payable:${supplierPayable.toFixed(2)} | Paid:${supplierPaid.toFixed(2)} | Due:${remainingDue.toFixed(2)} | Method:${supplierMethod || 'n/a'} | Source:admin_product_create`,
+            },
+          ];
+        }
         updated = await addProduct(productPayload);
+        if (supplierSectionTouched) {
+          const existingParty = getPurchaseParties().find((p) => p.name.toLowerCase() === supplierName.toLowerCase());
+          const party = existingParty || await createPurchaseParty({ name: supplierName });
+          if (supplierPayable > 0) {
+            const now = new Date().toISOString();
+            const order: PurchaseOrder = {
+              id: `po-admin-create-${Date.now()}`,
+              partyId: party.id,
+              partyName: party.name,
+              partyPhone: party.phone,
+              partyGst: party.gst,
+              partyLocation: party.location,
+              status: 'received',
+              orderDate: now,
+              notes: supplierNote || 'Admin product creation',
+              lines: [{
+                id: `line-admin-create-${Date.now()}`,
+                sourceType: 'inventory',
+                productId: productPayload.id,
+                productName: productPayload.name,
+                category: productPayload.category,
+                image: productPayload.image,
+                variant: NO_VARIANT,
+                color: NO_COLOR,
+                quantity: openingStockValue,
+                unitCost: toNonNegativeNumber(formData.buyPrice),
+                totalCost: supplierPayable,
+              }],
+              totalQuantity: openingStockValue,
+              totalAmount: supplierPayable,
+              paymentHistory: supplierPaid > 0 ? [{
+                id: `pop-admin-create-${Date.now()}`,
+                paidAt: now,
+                amount: supplierPaid,
+                method: supplierMethod === 'cash' ? 'cash' : 'online',
+                note: supplierNote || 'Admin product creation',
+              }] : [],
+              createdAt: now,
+              updatedAt: now,
+            };
+            await createPurchaseOrder(order);
+          }
+        }
         setProducts(updated);
       }
       if (keepOpenForNext) {
@@ -1114,10 +1212,7 @@ export default function Admin() {
   };
 
   const handleDownloadCategoryPDF = async () => {
-    await generateProductCatalogPDF(filteredProducts, {
-      fileName: `customer-catalog-${categoryFilter}.pdf`,
-      generatedLabel: `${new Date().toLocaleString()} | Filter: ${categoryFilter}`,
-    });
+    setIsCatalogOptionsOpen(true);
   };
 
   const handleExport = (format: 'pdf' | 'excel') => {
@@ -1532,7 +1627,7 @@ export default function Admin() {
                       </div>
 
                       <div className="space-y-2">
-                        <Label>Total Purchase <span className="text-muted-foreground">(Optional)</span></Label>
+                        <Label>Total Purchase *</Label>
                         <Input type="number" min="0" value={formData.totalPurchase ?? ''} onChange={e => setFormData({ ...formData, totalPurchase: e.target.value })} placeholder="0" />
                       </div>
 
@@ -1541,8 +1636,31 @@ export default function Admin() {
                         <Input type="number" min="0" value={formData.totalSold ?? ''} onChange={e => setFormData({ ...formData, totalSold: e.target.value })} placeholder="0" />
                       </div>
                     </div>
-                    <p className="text-[11px] text-muted-foreground">Suggested stock: {getSuggestedStock(formData.totalPurchase, formData.totalSold)} (Total Purchase - Total Sold)</p>
+                    <p className="text-[11px] text-muted-foreground">Opening Stock = current available stock. Total Purchase = lifetime/recorded purchased quantity. Suggested stock: {getSuggestedStock(formData.totalPurchase, formData.totalSold)} (Total Purchase - Total Sold)</p>
                 </div>
+                {!editingProduct && (
+                  <div className="space-y-4 rounded-xl border p-4 bg-muted/10">
+                    <h4 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Supplier / Purchase Details (optional)</h4>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2 col-span-2">
+                        <Label>Party / Supplier</Label>
+                        <Input list="admin-supplier-party-list" value={formData.supplierName ?? ''} onChange={e => setFormData({ ...formData, supplierName: e.target.value })} placeholder="Select or type supplier name" />
+                        <datalist id="admin-supplier-party-list">
+                          {purchaseParties.map((party) => <option key={party.id} value={party.name} />)}
+                        </datalist>
+                      </div>
+                      <div className="space-y-2"><Label>Total Payable</Label><Input type="number" min="0" value={formData.supplierTotalPayable ?? ''} onChange={e => setFormData({ ...formData, supplierTotalPayable: e.target.value })} placeholder="0" /></div>
+                      <div className="space-y-2"><Label>Total Paid</Label><Input type="number" min="0" value={formData.supplierTotalPaid ?? ''} onChange={e => setFormData({ ...formData, supplierTotalPaid: e.target.value })} placeholder="0" /></div>
+                      <div className="space-y-2">
+                        <Label>Payment Method</Label>
+                        <Select value={formData.supplierPaymentMethod || ''} onValueChange={value => setFormData({ ...formData, supplierPaymentMethod: value })}>
+                          <option value="">Select</option><option value="cash">Cash</option><option value="credit">Credit</option><option value="bank">Bank</option>
+                        </Select>
+                      </div>
+                      <div className="space-y-2"><Label>Note / Reference</Label><Input value={formData.supplierNote ?? ''} onChange={e => setFormData({ ...formData, supplierNote: e.target.value })} placeholder="Optional" /></div>
+                    </div>
+                  </div>
+                )}
                 </div>
                 
                 <div className="pt-2">
@@ -1682,6 +1800,25 @@ export default function Admin() {
           </Card>
         </div>
       )}
+      <CustomerCatalogOptionsModal
+        isOpen={isCatalogOptionsOpen}
+        onClose={() => setIsCatalogOptionsOpen(false)}
+        products={filteredProducts}
+        onGenerate={async (opts: CustomerCatalogOptions) => {
+          const filtered = filteredProducts
+            .filter(p => opts.selectedCategories.includes((p.category || 'Uncategorized').trim() || 'Uncategorized'))
+            .filter(p => opts.includeOutOfStock || Number(p.stock || 0) > 0)
+            .sort((a, b) => a.name.localeCompare(b.name));
+          await generateProductCatalogPDF(filtered, {
+            fileName: `customer-catalog-${categoryFilter}.pdf`,
+            generatedLabel: `${new Date().toLocaleString()} | Filter: ${categoryFilter}`,
+            groupByCategory: opts.groupByCategory,
+            showInStockPrices: opts.showInStockPrices,
+            showOutOfStockPrices: opts.showOutOfStockPrices,
+          });
+          setIsCatalogOptionsOpen(false);
+        }}
+      />
 
       {viewingProduct && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">

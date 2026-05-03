@@ -9,12 +9,14 @@ import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel, exportDetailedSalesToExcel } from '../services/excel';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { generateProductCatalogPDF } from '../services/pdf';
+import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 
 export default function Reports() {
   const [products, setProducts] = useState(loadData().products);
   const [transactions, setTransactions] = useState(loadData().transactions);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [reportType, setReportType] = useState<'internal' | 'customer' | 'detailed_sales'>('internal');
+  const [isCatalogOptionsOpen, setIsCatalogOptionsOpen] = useState(false);
 
   useEffect(() => {
     const refreshData = () => {
@@ -66,12 +68,7 @@ export default function Reports() {
         // We could add PDF later if needed, but Excel is better for analysis
         return;
     }
-    if (reportType === 'customer') {
-      await generateProductCatalogPDF(products, {
-        fileName: 'stockflow-customer-report.pdf',
-      });
-      return;
-    }
+    if (reportType === 'customer') return;
     const doc = new jsPDF();
     const pageHeight = doc.internal.pageSize.getHeight();
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -243,6 +240,7 @@ export default function Reports() {
 
   const handleExport = (format: 'pdf' | 'excel') => {
       if (format === 'pdf') {
+          if (reportType === 'customer') { setIsExportModalOpen(false); setIsCatalogOptionsOpen(true); return; }
           void generatePDF(reportType);
       } else {
           if (reportType === 'detailed_sales') {
@@ -324,6 +322,18 @@ export default function Reports() {
         onClose={() => setIsExportModalOpen(false)} 
         onExport={handleExport}
         title={reportType === 'internal' ? "Export Internal Audit Report" : reportType === 'customer' ? "Export Customer Catalog" : "Export Detailed Sales Report"}
+      />
+      <CustomerCatalogOptionsModal
+        isOpen={isCatalogOptionsOpen}
+        onClose={() => setIsCatalogOptionsOpen(false)}
+        products={products}
+        onGenerate={async (opts: CustomerCatalogOptions) => {
+          const filtered = products
+            .filter(p => opts.selectedCategories.includes((p.category || 'Uncategorized').trim() || 'Uncategorized'))
+            .filter(p => opts.includeOutOfStock || Number(p.stock || 0) > 0);
+          await generateProductCatalogPDF(filtered, { fileName: 'stockflow-customer-report.pdf', groupByCategory: opts.groupByCategory, showInStockPrices: opts.showInStockPrices, showOutOfStockPrices: opts.showOutOfStockPrices });
+          setIsCatalogOptionsOpen(false);
+        }}
       />
     </div>
   );

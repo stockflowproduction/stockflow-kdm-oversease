@@ -6,13 +6,14 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
 import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
-import { loadData, processTransaction, addCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft } from '../services/storage';
+import { loadData, processTransaction, addCustomer, updateCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft } from '../services/storage';
 import { generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
 import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle, Printer, Package, FileText, Keyboard, ChevronRight, ChevronUp, Percent, Settings2, UserPlus, UserSearch, UserMinus } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from '../services/numberFormat';
+import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
 const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromMoneyCents = (value: number) => value / 100;
@@ -126,11 +127,42 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
 };
 
 export default function Sales() {
+  type InvoiceCart = { id: string; label: string; items: CartItem[]; createdAt: string; updatedAt: string };
+  const POS_CARTS_STORAGE_KEY = 'stockflow_pos_invoice_carts_v1';
+  const createEmptyInvoiceCart = (index = 1): InvoiceCart => ({ id: `invoice-${Date.now()}-${Math.floor(Math.random() * 100000)}`, label: `Invoice ${index}`, items: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  const loadInvoiceCarts = (): { carts: InvoiceCart[]; activeCartId: string } => {
+    try {
+      const raw = localStorage.getItem(POS_CARTS_STORAGE_KEY);
+      if (!raw) {
+        const cart = createEmptyInvoiceCart(1);
+        return { carts: [cart], activeCartId: cart.id };
+      }
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed?.carts) || !parsed?.activeCartId) throw new Error('bad');
+      const carts = parsed.carts.filter((c: any) => c && typeof c.id === 'string' && typeof c.label === 'string' && Array.isArray(c.items)).slice(0, 5);
+      if (!carts.length) throw new Error('bad');
+      const active = carts.some((c: InvoiceCart) => c.id === parsed.activeCartId) ? parsed.activeCartId : carts[0].id;
+      return { carts, activeCartId: active };
+    } catch {
+      const cart = createEmptyInvoiceCart(1);
+      return { carts: [cart], activeCartId: cart.id };
+    }
+  };
   type ReturnHandlingMode = 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
   const POS_PRODUCTS_PER_PAGE = 10;
   const RETURN_TRANSACTIONS_PER_PAGE = 10;
   const [products, setProducts] = useState<Product[]>([]);
-  const [cart, setCart] = useState<CartItem[]>([]);
+  const initialCarts = loadInvoiceCarts();
+  const [invoiceCarts, setInvoiceCarts] = useState<InvoiceCart[]>(initialCarts.carts);
+  const [activeCartId, setActiveCartId] = useState<string>(initialCarts.activeCartId);
+  const cart = useMemo(() => invoiceCarts.find(c => c.id === activeCartId)?.items || [], [invoiceCarts, activeCartId]);
+  const persistInvoiceCarts = (carts: InvoiceCart[], activeId: string) => {
+    localStorage.setItem(POS_CARTS_STORAGE_KEY, JSON.stringify({ carts, activeCartId: activeId }));
+  };
+  const setActiveCartItems = (updater: (items: CartItem[]) => CartItem[]) => {
+    setInvoiceCarts(prev => prev.map(c => c.id === activeCartId ? { ...c, items: updater(c.items), updatedAt: new Date().toISOString() } : c));
+  };
+  useEffect(() => { persistInvoiceCarts(invoiceCarts, activeCartId); }, [invoiceCarts, activeCartId]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [searchParams] = useSearchParams();
@@ -155,12 +187,16 @@ export default function Sales() {
   const [customerSearch, setCustomerSearch] = useState('');
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
+  const [invoiceGstName, setInvoiceGstName] = useState('');
+  const [invoiceGstNumber, setInvoiceGstNumber] = useState('');
   
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [storeCreditMode, setStoreCreditMode] = useState<'none' | 'full' | 'custom'>('none');
   const [customStoreCreditUse, setCustomStoreCreditUse] = useState('');
   const [cashPaidInput, setCashPaidInput] = useState('');
   const [onlinePaidInput, setOnlinePaidInput] = useState('');
+  const [cashReceivedInput, setCashReceivedInput] = useState('');
+  const [cashReceivedDirty, setCashReceivedDirty] = useState(false);
   const [returnHandlingMode, setReturnHandlingMode] = useState<ReturnHandlingMode>('refund_cash');
   const [transactionCashDetails, setTransactionCashDetails] = useState<{ cashReceived: number; changeReturned: number } | null>(null);
   
@@ -270,7 +306,7 @@ export default function Sales() {
 
   useEffect(() => {
     const mode = searchParams.get('mode');
-    if (mode === 'return') { setIsReturnMode(true); setCart([]); }
+    if (mode === 'return') { setIsReturnMode(true); setActiveCartItems(() => []); }
     else { setIsReturnMode(false); }
   }, [searchParams]);
 
@@ -300,7 +336,7 @@ export default function Sales() {
       }
       if (detail.phase === 'error') {
         if (pendingCheckoutRef.current?.transactionId === detail.transactionId) {
-          setCart(pendingCheckoutRef.current.cart);
+          setActiveCartItems(() => pendingCheckoutRef.current?.cart || []);
           pendingCheckoutRef.current = null;
         }
         setTransactionSyncStatus({ phase: 'error', message: detail.error || detail.message || 'Transaction sync failed. Data was rolled back.' });
@@ -315,6 +351,24 @@ export default function Sales() {
     productHasCombinationStock(product)
       ? getAvailableStockForCombination(product, variant, color)
       : Math.max(0, product.stock || 0);
+
+  const reservationErrorMessage = 'Available stock is reserved in other open invoices. Reduce quantity or close another invoice to add this product.';
+  const getCartItemStockKey = (productId: string, variant?: string, color?: string) => lineKey(productId, variant, color);
+  const getReservedQtyInOtherCarts = (productId: string, variant?: string, color?: string, currentActiveCartId = activeCartId) => {
+    const key = getCartItemStockKey(productId, variant, color);
+    return invoiceCarts.reduce((sum, cartRow) => {
+      if (!cartRow || cartRow.id === currentActiveCartId || !Array.isArray(cartRow.items)) return sum;
+      return sum + cartRow.items.reduce((inner, item) => {
+        if (!item || getCartItemStockKey(String(item.id), item.selectedVariant, item.selectedColor) !== key) return inner;
+        return inner + Math.max(0, Number(item.quantity) || 0);
+      }, 0);
+    }, 0);
+  };
+  const getAvailableQtyForActiveCart = (product: Product, variant?: string, color?: string, currentActiveCartId = activeCartId) => {
+    const actualStock = getLineAvailableStock(product, variant, color);
+    const reservedInOtherCarts = getReservedQtyInOtherCarts(String(product.id), variant, color, currentActiveCartId);
+    return Math.max(0, actualStock - reservedInOtherCarts);
+  };
 
   const customerById = useMemo(() => new Map(customers.map((customer) => [customer.id, customer])), [customers]);
   const productById = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
@@ -426,14 +480,26 @@ export default function Sales() {
     addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
   };
   const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
-    setCart(prev => {
+    setActiveCartItems(prev => {
         const existing = prev.find(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR));
         if (existing) {
             const newQty = existing.quantity + qty;
             if (newQty <= 0) return prev.filter(item => lineKey(item.id, item.selectedVariant, item.selectedColor) !== lineKey(product.id, selectedVariant, selectedColor));
+            const actualStock = getLineAvailableStock(product, selectedVariant, selectedColor);
+            const availableStock = getAvailableQtyForActiveCart(product, selectedVariant, selectedColor);
+            if (newQty > availableStock) {
+              setCartError(actualStock > 0 && availableStock !== actualStock ? reservationErrorMessage : `Stock limit: ${availableStock}`);
+              return prev;
+            }
             return prev.map(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
+        const actualStock = getLineAvailableStock(product, selectedVariant, selectedColor);
+        const availableStock = getAvailableQtyForActiveCart(product, selectedVariant, selectedColor);
+        if (qty > availableStock) {
+          setCartError(actualStock > 0 && availableStock !== actualStock ? reservationErrorMessage : `Stock limit: ${availableStock}`);
+          return prev;
+        }
         return [...prev, {
           ...product,
           buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
@@ -453,18 +519,22 @@ export default function Sales() {
       const product = products.find(p => p.id === id);
       if (!item || !product) return;
       const newQty = item.quantity + delta;
-      if (newQty <= 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
+      if (newQty <= 0) { setActiveCartItems(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
       if (delta > 0) {
           if (isReturnMode) {
             const sold = getReturnableQty(id, variant, color);
             if (sold < newQty) { setCartError(`Max return: ${sold}`); return; }
           }
           else {
-            const availableStock = getLineAvailableStock(product, variant, color);
-            if (availableStock < newQty) { setCartError(`Stock limit: ${availableStock}`); return; }
+            const actualStock = getLineAvailableStock(product, variant, color);
+            const availableStock = getAvailableQtyForActiveCart(product, variant, color);
+            if (availableStock < newQty) {
+              setCartError(actualStock > 0 && availableStock !== actualStock ? reservationErrorMessage : `Stock limit: ${availableStock}`);
+              return;
+            }
           }
       }
-      setCart(prev => prev.map(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key ? { ...i, quantity: newQty } : i));
+      setActiveCartItems(prev => prev.map(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key ? { ...i, quantity: newQty } : i));
   };
 
   const setManualQuantity = (id: string, value: string, variant?: string, color?: string) => {
@@ -475,23 +545,27 @@ export default function Sales() {
       if (!item || !product) return;
 
       if (num < 0) return;
-      if (num === 0) { setCart(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
+      if (num === 0) { setActiveCartItems(prev => prev.filter(i => lineKey(i.id, i.selectedVariant, i.selectedColor) !== key)); return; }
 
       if (isReturnMode) {
           const sold = getReturnableQty(id, variant, color);
           if (sold < num) { setCartError(`Max return: ${sold}`); return; }
       } else {
-          const availableStock = getLineAvailableStock(product, variant, color);
-          if (availableStock < num) { setCartError(`Stock limit: ${availableStock}`); return; }
+          const actualStock = getLineAvailableStock(product, variant, color);
+          const availableStock = getAvailableQtyForActiveCart(product, variant, color);
+          if (availableStock < num) {
+            setCartError(actualStock > 0 && availableStock !== actualStock ? reservationErrorMessage : `Stock limit: ${availableStock}`);
+            return;
+          }
       }
 
-      setCart(prev => prev.map(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key ? { ...i, quantity: num } : i));
+      setActiveCartItems(prev => prev.map(i => lineKey(i.id, i.selectedVariant, i.selectedColor) === key ? { ...i, quantity: num } : i));
   };
 
   const updatePrice = (id: string, value: string, variant?: string, color?: string) => {
       const num = value === '' ? 0 : parseFloat(value);
       if (isNaN(num) || num < 0) return;
-      setCart(prev => prev.map(i => {
+      setActiveCartItems(prev => prev.map(i => {
           if (lineKey(i.id, i.selectedVariant, i.selectedColor) !== lineKey(id, variant, color)) return i;
           // Recalculate discount if it was percentage based, or just keep amount
           const newGross = num * i.quantity;
@@ -508,7 +582,7 @@ export default function Sales() {
 
   const updateDiscount = (id: string, val: string | number, type: 'percent' | 'amount', variant?: string, color?: string) => {
       const numVal = parseFloat(val.toString()) || 0;
-      setCart(prev => prev.map(i => {
+      setActiveCartItems(prev => prev.map(i => {
           if (lineKey(i.id, i.selectedVariant, i.selectedColor) !== lineKey(id, variant, color)) return i;
           let newPercent = i.discountPercent || 0;
           let newAmount = i.discountAmount || 0;
@@ -541,8 +615,21 @@ export default function Sales() {
       setSelectedTransactionDate('');
       setStoreCreditMode('none');
       setCustomStoreCreditUse('');
-      setCashPaidInput('');
+      const defaultCheckout = buildCheckoutMoney({
+        cartItems: cart,
+        taxRate: selectedTax.value,
+        returnMode: false,
+        storeCreditRequested: 0,
+        availableStoreCreditAmount: 0,
+        hasCustomer: false,
+        cashInput: '0',
+        onlineInput: '0',
+      });
+      const defaultCashToCollect = Math.max(0, Number(defaultCheckout.remainingPayableWhole || 0));
+      setCashPaidInput(defaultCashToCollect.toString());
       setOnlinePaidInput('');
+      setCashReceivedInput(defaultCashToCollect.toString());
+      setCashReceivedDirty(false);
       setIsCustomerModalOpen(true);
   };
 
@@ -560,6 +647,7 @@ export default function Sales() {
       setCheckoutError(null);
       if (!validateOpenShiftForPos()) return;
       let finalCustomer = selectedCustomer;
+      const isGstApplied = !isReturnMode && Number(selectedTax.value || 0) > 0;
 
       if (customerTab === 'new') {
           const nameTrimmed = newCustomerName.trim();
@@ -609,6 +697,25 @@ export default function Sales() {
               setCheckoutError(error instanceof Error ? error.message : 'Failed to create customer. Please try again.');
               return;
           }
+      }
+      if (isGstApplied) {
+        if (!finalCustomer) {
+          setCheckoutError('GST invoice requires selecting or creating a customer (walking customer not allowed).');
+          return;
+        }
+        const finalName = (finalCustomer.name || '').trim();
+        const finalPhone = (finalCustomer.phone || '').trim();
+        const finalGstName = invoiceGstName.trim();
+        const finalGstNumber = invoiceGstNumber.trim();
+        if (!finalName) return setCheckoutError('GST invoice requires customer name.');
+        if (!finalPhone) return setCheckoutError('GST invoice requires customer phone.');
+        if (!finalGstName) return setCheckoutError('GST invoice requires GST name.');
+        if (!finalGstNumber) return setCheckoutError('GST invoice requires GST number.');
+        if ((finalCustomer.gstName || '').trim() !== finalGstName || (finalCustomer.gstNumber || '').trim() !== finalGstNumber) {
+          const updated = updateCustomer({ ...finalCustomer, gstName: finalGstName, gstNumber: finalGstNumber });
+          finalCustomer = updated.find(c => c.id === finalCustomer!.id) || { ...finalCustomer, gstName: finalGstName, gstNumber: finalGstNumber };
+          setSelectedCustomer(finalCustomer);
+        }
       }
 
       if (isReturnMode && finalCustomer) {
@@ -680,9 +787,11 @@ export default function Sales() {
 
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && cashPaid > 0) {
+          const safeCashReceived = Math.max(0, Number(cashReceivedInput || 0));
+          const changeReturned = Math.max(0, safeCashReceived - cashPaid);
           currentCashDetails = {
-              cashReceived: cashPaid,
-              changeReturned: 0
+              cashReceived: Number.isFinite(safeCashReceived) ? safeCashReceived : cashPaid,
+              changeReturned: Number.isFinite(changeReturned) ? changeReturned : 0
           };
       }
 
@@ -690,6 +799,10 @@ export default function Sales() {
           id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount,
           taxRate: selectedTax.value, taxLabel: selectedTax.label, date: buildEffectiveTransactionDate(), type: isReturnMode ? 'return' : 'sale',
           customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod: resolvedPaymentMethod, storeCreditUsed: appliedStoreCredit,
+          customerPhone: finalCustomer?.phone,
+          gstName: isReturnMode ? undefined : (invoiceGstName.trim() || finalCustomer?.gstName),
+          gstNumber: isReturnMode ? undefined : (invoiceGstNumber.trim() || finalCustomer?.gstNumber),
+          gstApplied: isReturnMode ? false : isGstApplied,
           returnHandlingMode: isReturnMode ? returnHandlingMode : undefined,
           saleSettlement: isReturnMode ? undefined : {
             cashPaid,
@@ -706,13 +819,17 @@ export default function Sales() {
         
         // Cleanup
         setIsCustomerModalOpen(false); 
-        setCart([]); 
+        setActiveCartItems(() => []);
         setSelectedCustomer(null);
         setNewCustomerName('');
         setNewCustomerPhone('');
         setCustomerSearch('');
+        setInvoiceGstName('');
+        setInvoiceGstNumber('');
         setCashPaidInput('');
         setOnlinePaidInput('');
+        setCashReceivedInput('');
+        setCashReceivedDirty(false);
         setReturnHandlingMode('refund_cash');
         setStoreCreditMode('none');
         setCustomStoreCreditUse('');
@@ -738,7 +855,6 @@ export default function Sales() {
       exportInvoiceToExcel(transactionComplete);
     }
   };
-
   const availableStoreCredit = Math.max(0, Number(selectedCustomer?.storeCredit || 0));
   const checkoutPreview = buildCheckoutMoney({
     cartItems: cart,
@@ -765,6 +881,10 @@ export default function Sales() {
   const maxApplicableStoreCredit = checkoutPreview.maxApplicableStoreCredit;
   const cashPaidValue = checkoutPreview.cashPaid;
   const onlinePaidValue = checkoutPreview.onlinePaid;
+  const cashReceivedValue = Math.max(0, Number(cashReceivedInput || 0));
+  const cashToCollectValue = Math.max(0, Number(cashPaidValue || 0));
+  const cashChangeValue = Math.max(0, cashReceivedValue - cashToCollectValue);
+  const cashShortfallValue = Math.max(0, cashToCollectValue - cashReceivedValue);
 
   const categories = ['All', ...Array.from(new Set(products.map((p) => p.category || 'Uncategorized')))];
   const filteredProducts = products.filter(p => {
@@ -1062,8 +1182,8 @@ export default function Sales() {
               />
             </div>
             <div className={`grid gap-2 ${isReturnMode ? 'grid-cols-5' : 'grid-cols-2'}`}>
-              <Button variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setCart([]); }}>Sales</Button>
-              <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setCart([]); }}>Return</Button>
+              <Button variant={!isReturnMode ? 'default' : 'outline'} onClick={() => { setIsReturnMode(false); setActiveCartItems(() => []); }}>Sales</Button>
+              <Button variant={isReturnMode ? 'default' : 'outline'} className={isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} onClick={() => { setIsReturnMode(true); setActiveCartItems(() => []); }}>Return</Button>
               {isReturnMode && (
                 <>
                   <select className="h-9 rounded-md border border-input bg-background pl-3 pr-9 text-sm" value={returnDateFilter} onChange={e => setReturnDateFilter(e.target.value as 'all' | '30d' | '90d')}>
@@ -1202,9 +1322,29 @@ export default function Sales() {
           <div>
             <h2 className="text-sm font-semibold">{isReturnMode ? 'Return Guidance' : 'Cart'}</h2>
             <p className="text-xs text-muted-foreground">{isReturnMode ? 'Select bill → Make Return → review popup' : `${cart.length} items`}</p>
+            {!isReturnMode && (
+              <div className="flex items-center gap-1 overflow-auto">
+                {invoiceCarts.map((c) => <Button key={c.id} size="sm" variant={c.id === activeCartId ? 'default' : 'outline'} onClick={() => setActiveCartId(c.id)}>{c.label} ({c.items.length})</Button>)}
+                <Button size="sm" variant="outline" disabled={invoiceCarts.length >= 5} onClick={() => {
+                  if (invoiceCarts.length >= 5) return setCartError('Maximum 5 invoice carts allowed.');
+                  const next = createEmptyInvoiceCart(invoiceCarts.length + 1);
+                  setInvoiceCarts(prev => [...prev, next]);
+                  setActiveCartId(next.id);
+                }}>+ Create New Invoice</Button>
+                {invoiceCarts.length > 1 && <Button size="sm" variant="ghost" onClick={() => {
+                  const active = invoiceCarts.find(c => c.id === activeCartId);
+                  if (!active) return;
+                  if (active.items.length > 0 && !window.confirm(`Close ${active.label}? Items in cart will be discarded.`)) return;
+                  let nextCarts = invoiceCarts.filter(c => c.id !== activeCartId);
+                  if (!nextCarts.length) nextCarts = [createEmptyInvoiceCart(1)];
+                  setInvoiceCarts(nextCarts);
+                  setActiveCartId(nextCarts[0].id);
+                }}>Close</Button>}
+              </div>
+            )}
           </div>
           {!isReturnMode && cart.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => setCart([])}>Clear</Button>
+            <Button variant="outline" size="sm" onClick={() => setActiveCartItems(() => [])}>Clear</Button>
           )}
         </div>
 
@@ -1453,11 +1593,37 @@ export default function Sales() {
                     <p className="text-xs font-bold uppercase text-muted-foreground">Settlement Split</p>
                     <div className="space-y-1.5">
                       <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Paid</Label>
-                      <Input type="number" min="0" step="0.01" placeholder="0.00" value={cashPaidInput} onChange={(e) => { setCashPaidInput(e.target.value); setCheckoutError(null); }} />
+                      <Input type="number" min="0" step="0.01" placeholder="0.00" value={cashPaidInput} onChange={(e) => {
+                        const nextValue = e.target.value;
+                        setCashPaidInput(nextValue);
+                        if (!cashReceivedDirty) setCashReceivedInput(nextValue);
+                        setCheckoutError(null);
+                      }} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Received</Label>
+                      <Input type="number" min="0" step="0.01" placeholder="0.00" value={cashReceivedInput} onChange={(e) => {
+                        setCashReceivedInput(e.target.value);
+                        setCashReceivedDirty(true);
+                        setCheckoutError(null);
+                      }} />
                     </div>
                     <div className="space-y-1.5">
                       <Label className="text-[11px] font-bold uppercase text-muted-foreground">Online Paid</Label>
                       <Input type="number" min="0" step="0.01" placeholder="0.00" value={onlinePaidInput} onChange={(e) => { setOnlinePaidInput(e.target.value); setCheckoutError(null); }} />
+                    </div>
+                    <div className="rounded border bg-white p-2 text-xs space-y-1">
+                      <div className="flex justify-between"><span>Cash to collect</span><span className="font-semibold">₹{formatMoneyPrecise(cashToCollectValue)}</span></div>
+                      <div className="flex justify-between"><span>Cash received</span><span className="font-semibold">₹{formatMoneyPrecise(cashReceivedValue)}</span></div>
+                      {cashToCollectValue === 0 ? (
+                        <div className="text-muted-foreground">No cash collection required.</div>
+                      ) : cashChangeValue > 0 ? (
+                        <div className={`font-semibold ${getPaymentStatusColorClass('cash').replace('bg-green-50 border-green-200 ', '')}`}>Change to return: ₹{formatMoneyPrecise(cashChangeValue)}</div>
+                      ) : cashShortfallValue > 0 ? (
+                        <div className={`font-semibold ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}>Amount still needed: ₹{formatMoneyPrecise(cashShortfallValue)}</div>
+                      ) : (
+                        <div className={`font-semibold ${getPaymentStatusColorClass('cash').replace('bg-green-50 border-green-200 ', '')}`}>Exact cash received.</div>
+                      )}
                     </div>
                     <div className="text-xs space-y-1 border-t pt-2">
                       <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{formatMoneyWhole(checkoutPreview.settlementPaidNowWhole)}</span></div>
@@ -1499,7 +1665,7 @@ export default function Sales() {
                     {customerSearch && !selectedCustomer && filteredCustomers.length > 0 && (
                       <div className="border rounded-lg max-h-40 overflow-auto divide-y">
                         {filteredCustomers.map(c => (
-                          <div key={c.id} className="p-3 hover:bg-muted cursor-pointer transition-colors" onClick={() => {setSelectedCustomer(c); setCustomerSearch('');}}>
+                          <div key={c.id} className="p-3 hover:bg-muted cursor-pointer transition-colors" onClick={() => {setSelectedCustomer(c); setInvoiceGstName(c.gstName || ''); setInvoiceGstNumber(c.gstNumber || ''); setCustomerSearch('');}}>
                             <p className="text-sm font-bold">{c.name}</p>
                             <p className="text-xs text-muted-foreground">{c.phone}</p>
                           </div>
@@ -1516,14 +1682,22 @@ export default function Sales() {
                           </div>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
-                          <Button variant="secondary" className="h-10 text-xs font-bold" onClick={() => { setCustomerSearch(''); completeCheckout(); }}>Skip & Pay</Button>
+                          <Button variant="secondary" className="h-10 text-xs font-bold" onClick={() => { setCustomerSearch(''); completeCheckout(); }} disabled={Number(selectedTax.value || 0) > 0}>Skip & Pay</Button>
                           <Button variant="outline" className="h-10 text-xs font-bold" onClick={() => setCustomerTab('new')}>Create New</Button>
                         </div>
                       </div>
                     )}
+                    {!isReturnMode && selectedCustomer && Number(selectedTax.value || 0) > 0 && (
+                      <div className="space-y-2 rounded-lg border p-3 bg-muted/10">
+                        <Label className="text-[11px] font-bold uppercase text-muted-foreground">GST Name</Label>
+                        <Input value={invoiceGstName} onChange={e => setInvoiceGstName(e.target.value)} placeholder="GST registered name" />
+                        <Label className="text-[11px] font-bold uppercase text-muted-foreground">GST Number</Label>
+                        <Input value={invoiceGstNumber} onChange={e => setInvoiceGstNumber(e.target.value.toUpperCase())} placeholder="GST number" />
+                      </div>
+                    )}
                   </div>
                 ) : (
-                  <div className="space-y-3">
+                    <div className="space-y-3">
                     <div className="space-y-1.5">
                       <Label className="text-[11px] font-bold uppercase text-muted-foreground">Full Name</Label>
                       <Input placeholder="John Doe" value={newCustomerName} onChange={e => {setNewCustomerName(e.target.value); setCheckoutError(null);}} />
@@ -1532,6 +1706,12 @@ export default function Sales() {
                       <Label className="text-[11px] font-bold uppercase text-muted-foreground">Phone Number</Label>
                       <Input placeholder="Exactly 10 digits" value={newCustomerPhone} onChange={e => {setNewCustomerPhone(e.target.value); setCheckoutError(null);}} />
                     </div>
+                    {!isReturnMode && Number(selectedTax.value || 0) > 0 && (
+                      <div className="space-y-3">
+                        <div className="space-y-1.5"><Label className="text-[11px] font-bold uppercase text-muted-foreground">GST Name</Label><Input value={invoiceGstName} onChange={e => setInvoiceGstName(e.target.value)} placeholder="GST registered name" /></div>
+                        <div className="space-y-1.5"><Label className="text-[11px] font-bold uppercase text-muted-foreground">GST Number</Label><Input value={invoiceGstNumber} onChange={e => setInvoiceGstNumber(e.target.value.toUpperCase())} placeholder="GST number" /></div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1569,7 +1749,7 @@ export default function Sales() {
                       <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
                       <div className="flex justify-between"><span>Cash Paid</span><span>₹{formatMoneyWhole(cashPaidValue)}</span></div>
                       <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(onlinePaidValue)}</span></div>
-                      <div className="flex justify-between text-muted-foreground"><span>Credit Due to Create</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
+                      <div className={`flex justify-between ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}><span>Credit Due to Create</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
                     </div>
                   </div>
                 )}
@@ -1583,7 +1763,7 @@ export default function Sales() {
                       <Button size="sm" variant={returnHandlingMode === 'store_credit' ? 'default' : 'outline'} onClick={() => setReturnHandlingMode('store_credit')}>Store Credit</Button>
                     </div>
                     <p className="text-[11px] text-muted-foreground">
-                      {returnHandlingMode === 'refund_cash' && 'Cash outflow from drawer.'}
+                      {returnHandlingMode === 'refund_cash' && <span className={getPaymentStatusColorClass('refund').replace('bg-red-50 border-red-200 ', '')}>Cash outflow from drawer.</span>}
                       {returnHandlingMode === 'refund_online' && 'Online/bank refund (no drawer cash impact).'}
                       {returnHandlingMode === 'reduce_due' && 'Apply against customer due (customer required).'}
                       {returnHandlingMode === 'store_credit' && 'Convert to customer store credit (customer required).'}
