@@ -4,7 +4,7 @@ import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
 import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties } from '../services/storage';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -53,7 +53,7 @@ export default function Admin() {
   const [purchaseNotes, setPurchaseNotes] = useState('');
   const [purchasePartyName, setPurchasePartyName] = useState('');
   const [purchasePaidAmount, setPurchasePaidAmount] = useState('');
-  const [purchasePaymentMethod, setPurchasePaymentMethod] = useState<'cash' | 'online'>('cash');
+  const [purchasePaymentMethod, setPurchasePaymentMethod] = useState<'cash' | 'online' | 'credit'>('cash');
   const [purchasePaymentNote, setPurchasePaymentNote] = useState('');
   const [purchaseModalTab, setPurchaseModalTab] = useState<'add' | 'history'>('add');
   const [purchaseHistoryVariantFilter, setPurchaseHistoryVariantFilter] = useState('all');
@@ -70,6 +70,7 @@ export default function Admin() {
     variantInput: '',
     colorInput: '',
     supplierName: '',
+    supplierPartyId: '',
     supplierTotalPayable: '',
     supplierTotalPaid: '',
     supplierPaymentMethod: '',
@@ -86,6 +87,8 @@ export default function Admin() {
   const [isSaving, setIsSaving] = useState(false);
   const [isCatalogOptionsOpen, setIsCatalogOptionsOpen] = useState(false);
   const [purchaseParties, setPurchaseParties] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedPurchasePartyId, setSelectedPurchasePartyId] = useState('');
+  const [supplierPayableManuallyEdited, setSupplierPayableManuallyEdited] = useState(false);
 
   const refreshData = () => {
     const data = loadData();
@@ -167,6 +170,26 @@ export default function Admin() {
     return value;
   };
 
+  const handleDeletePurchaseHistoryEntry = async (historyId: string) => {
+    if (!purchaseTarget) return;
+    const entry = (purchaseTarget.purchaseHistory || []).find((h) => h.id === historyId);
+    if (!entry) return;
+    if (!entry.purchaseOrderId) {
+      alert('Cannot delete legacy purchase entry without linked order metadata.');
+      return;
+    }
+    if (!window.confirm('Reverse this purchase entry? This will reduce stock and cancel linked payable order only when safe.')) return;
+    try {
+      await reverseInventoryPurchaseHistoryEntry(purchaseTarget.id, historyId);
+      const latest = loadData().products;
+      setProducts(latest);
+      const nextTarget = latest.find((p) => p.id === purchaseTarget.id) || null;
+      setPurchaseTarget(nextTarget);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Unable to reverse purchase entry safely.');
+    }
+  };
+
   const renderPurchaseHistoryCards = (
     productName: string,
     rows: NonNullable<Product['purchaseHistory']>
@@ -198,6 +221,17 @@ export default function Admin() {
           <div className="space-y-1 text-[11px]">
             <div><span className="text-muted-foreground">Reference:</span> {h.reference || '—'}</div>
             <div><span className="text-muted-foreground">Notes:</span> {h.notes || '—'}</div>
+          </div>
+          <div className="pt-1">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!h.purchaseOrderId}
+              onClick={() => void handleDeletePurchaseHistoryEntry(h.id)}
+              title={!h.purchaseOrderId ? 'Cannot delete legacy purchase entry without linked order metadata.' : 'Reverse purchase'}
+            >
+              Delete Purchase Entry
+            </Button>
           </div>
         </div>
       ))}
@@ -348,7 +382,8 @@ export default function Admin() {
       if (!Number.isFinite(supplierPayable) || supplierPayable < 0) return setError('Total payable must be a valid number ≥ 0.');
       if (!Number.isFinite(supplierPaid) || supplierPaid < 0) return setError('Total paid must be a valid number ≥ 0.');
       if (supplierPaid > supplierPayable) return setError('Total paid cannot exceed total payable.');
-      if (supplierPaid > 0 && !supplierMethod) return setError('Payment method is required when total paid is greater than zero.');
+      if ((supplierPaid > 0 || supplierPayable > 0) && !supplierMethod) return setError('Payment method is required when payable/paid amount is entered.');
+      if (supplierMethod === 'credit' && supplierPaid > 0) return setError('Credit purchase requires total paid = 0.');
     }
     setError(null);
 
@@ -394,7 +429,10 @@ export default function Admin() {
       } else {
         if (supplierSectionTouched) {
           const now = new Date().toISOString();
-          const remainingDue = Math.max(0, Number((supplierPayable - supplierPaid).toFixed(2)));
+          const supplierPaidEffective = supplierMethod === 'credit' ? 0 : supplierPaid;
+          const remainingDue = Math.max(0, Number((supplierPayable - supplierPaidEffective).toFixed(2)));
+          
+          const linkedOrderId = `po-admin-create-${Date.now()}`;
           productPayload.purchaseHistory = [
             {
               id: `ph-admin-create-${Date.now()}`,
@@ -406,19 +444,26 @@ export default function Admin() {
               previousStock: 0,
               previousBuyPrice: 0,
               nextBuyPrice: toNonNegativeNumber(formData.buyPrice),
+              purchaseOrderId: linkedOrderId,
+              paymentMethod: (supplierMethod as 'cash' | 'online' | 'credit') || undefined,
+              paidAmount: supplierPaidEffective,
+              partyName: supplierName,
               notes: supplierNote || `Source: admin_product_create`,
-              reference: `Supplier:${supplierName} | Payable:${supplierPayable.toFixed(2)} | Paid:${supplierPaid.toFixed(2)} | Due:${remainingDue.toFixed(2)} | Method:${supplierMethod || 'n/a'} | Source:admin_product_create`,
+              reference: `Supplier:${supplierName} | Payable:${supplierPayable.toFixed(2)} | Paid:${supplierPaidEffective.toFixed(2)} | Due:${remainingDue.toFixed(2)} | Method:${supplierMethod || 'n/a'} | Source:admin_product_create`,
             },
           ];
+          (productPayload as any).__linkedOrderId = linkedOrderId;
         }
         updated = await addProduct(productPayload);
         if (supplierSectionTouched) {
-          const existingParty = getPurchaseParties().find((p) => p.name.toLowerCase() === supplierName.toLowerCase());
+          const existingParty = (formData.supplierPartyId
+            ? getPurchaseParties().find((p) => p.id === formData.supplierPartyId)
+            : undefined) || getPurchaseParties().find((p) => p.name.toLowerCase() === supplierName.toLowerCase());
           const party = existingParty || await createPurchaseParty({ name: supplierName });
           if (supplierPayable > 0) {
             const now = new Date().toISOString();
             const order: PurchaseOrder = {
-              id: `po-admin-create-${Date.now()}`,
+              id: (productPayload as any).__linkedOrderId || `po-admin-create-${Date.now()}`,
               partyId: party.id,
               partyName: party.name,
               partyPhone: party.phone,
@@ -442,7 +487,7 @@ export default function Admin() {
               }],
               totalQuantity: openingStockValue,
               totalAmount: supplierPayable,
-              paymentHistory: supplierPaid > 0 ? [{
+              paymentHistory: supplierMethod === 'credit' ? [] : supplierPaid > 0 ? [{
                 id: `pop-admin-create-${Date.now()}`,
                 paidAt: now,
                 amount: supplierPaid,
@@ -545,6 +590,31 @@ export default function Admin() {
     setSelectedPurchaseVariantKey(prev => (prev && purchaseVariantRows.some(row => row.key === prev)) ? prev : purchaseVariantRows[0].key);
   }, [purchaseTarget, purchaseVariantRows]);
 
+  useEffect(() => {
+    if (purchasePaymentMethod === 'credit' && purchasePaidAmount !== '0') {
+      setPurchasePaidAmount('0');
+    }
+  }, [purchasePaymentMethod, purchasePaidAmount]);
+
+  useEffect(() => {
+    if (editingProduct) return;
+    const stock = toNonNegativeNumber(formData.stock);
+    const totalPurchaseBlank = formData.totalPurchase === '' || formData.totalPurchase === null || formData.totalPurchase === undefined;
+    if (totalPurchaseBlank && stock > 0) {
+      setFormData((prev: any) => ({ ...prev, totalPurchase: String(stock) }));
+    }
+  }, [formData.stock, formData.totalPurchase, editingProduct]);
+
+  useEffect(() => {
+    if (editingProduct || supplierPayableManuallyEdited) return;
+    const buyPrice = toNonNegativeNumber(formData.buyPrice);
+    const openingStock = toNonNegativeNumber(formData.stock);
+    const totalPurchase = toNonNegativeNumber(formData.totalPurchase);
+    const qty = openingStock > 0 ? openingStock : totalPurchase;
+    const autoPayable = qty > 0 && buyPrice > 0 ? Number((qty * buyPrice).toFixed(2)) : 0;
+    setFormData((prev: any) => ({ ...prev, supplierTotalPayable: String(autoPayable) }));
+  }, [formData.buyPrice, formData.stock, formData.totalPurchase, editingProduct, supplierPayableManuallyEdited]);
+
   const handleAddPurchase = async () => {
     if (!purchaseTarget) return;
     const qty = toNonNegativeNumber(purchaseQty);
@@ -564,7 +634,8 @@ export default function Admin() {
     const notes = purchaseNotes.trim() || undefined;
     const partyName = purchasePartyName.trim();
     const totalAmount = Number((qty * unitPrice).toFixed(2));
-    const paidAmount = Math.max(0, Number(purchasePaidAmount) || 0);
+    const paidAmountRaw = Math.max(0, Number(purchasePaidAmount) || 0);
+    const paidAmount = purchasePaymentMethod === 'credit' ? 0 : paidAmountRaw;
     if (!partyName) {
       alert('Supplier/party name is required.');
       return;
@@ -607,6 +678,50 @@ export default function Admin() {
         })()
       : nextBuyPrice;
 
+    const existingParty = (selectedPurchasePartyId
+      ? getPurchaseParties().find((p) => p.id === selectedPurchasePartyId)
+      : undefined) || getPurchaseParties().find((p) => p.name.toLowerCase() === partyName.toLowerCase());
+    const party = existingParty || await createPurchaseParty({ name: partyName });
+    const now = new Date().toISOString();
+    const orderId = `po-admin-${Date.now()}`;
+    const line: PurchaseOrderLine = {
+      id: `line-${Date.now()}`,
+      sourceType: 'inventory',
+      productId: purchaseTarget.id,
+      productName: purchaseTarget.name,
+      category: purchaseTarget.category,
+      image: purchaseTarget.image,
+      variant: isVariantPurchase ? (selectedPurchaseVariantRow?.variant || NO_VARIANT) : NO_VARIANT,
+      color: isVariantPurchase ? (selectedPurchaseVariantRow?.color || NO_COLOR) : NO_COLOR,
+      quantity: qty,
+      unitCost: unitPrice,
+      totalCost: totalAmount,
+    };
+    const order: PurchaseOrder = {
+      id: orderId,
+      partyId: party.id,
+      partyName: party.name,
+      partyPhone: party.phone,
+      partyGst: party.gst,
+      partyLocation: party.location,
+      status: 'received',
+      orderDate: now,
+      notes,
+      lines: [line],
+      totalQuantity: qty,
+      totalAmount,
+      paymentHistory: paidAmount > 0 ? [{
+        id: `pop-init-${Date.now()}`,
+        paidAt: now,
+        amount: paidAmount,
+        method: purchasePaymentMethod === 'credit' ? 'online' : purchasePaymentMethod,
+        note: purchasePaymentNote.trim() || reference || undefined,
+      }] : [],
+      receivedQuantity: qty,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await createPurchaseOrder(order);
     const updatedProduct: Product = {
       ...purchaseTarget,
       stock: toNonNegativeNumber(purchaseTarget.stock) + qty,
@@ -624,6 +739,10 @@ export default function Admin() {
           previousStock: currentStock,
           previousBuyPrice: currentBuyPrice,
           nextBuyPrice,
+          purchaseOrderId: orderId,
+          paymentMethod: purchasePaymentMethod,
+          paidAmount,
+          partyName,
           reference,
           notes,
         },
@@ -632,47 +751,6 @@ export default function Admin() {
     };
 
     const updated = await updateProduct(updatedProduct);
-    const existingParty = getPurchaseParties().find((p) => p.name.toLowerCase() === partyName.toLowerCase());
-    const party = existingParty || await createPurchaseParty({ name: partyName });
-    const now = new Date().toISOString();
-    const line: PurchaseOrderLine = {
-      id: `line-${Date.now()}`,
-      sourceType: 'inventory',
-      productId: purchaseTarget.id,
-      productName: purchaseTarget.name,
-      category: purchaseTarget.category,
-      image: purchaseTarget.image,
-      variant: isVariantPurchase ? (selectedPurchaseVariantRow?.variant || NO_VARIANT) : NO_VARIANT,
-      color: isVariantPurchase ? (selectedPurchaseVariantRow?.color || NO_COLOR) : NO_COLOR,
-      quantity: qty,
-      unitCost: unitPrice,
-      totalCost: totalAmount,
-    };
-    const order: PurchaseOrder = {
-      id: `po-admin-${Date.now()}`,
-      partyId: party.id,
-      partyName: party.name,
-      partyPhone: party.phone,
-      partyGst: party.gst,
-      partyLocation: party.location,
-      status: 'received',
-      orderDate: now,
-      notes,
-      lines: [line],
-      totalQuantity: qty,
-      totalAmount,
-      paymentHistory: paidAmount > 0 ? [{
-        id: `pop-init-${Date.now()}`,
-        paidAt: now,
-        amount: paidAmount,
-        method: purchasePaymentMethod,
-        note: purchasePaymentNote.trim() || reference || undefined,
-      }] : [],
-      receivedQuantity: qty,
-      createdAt: now,
-      updatedAt: now,
-    };
-    await createPurchaseOrder(order);
     setProducts(updated);
     setPurchaseTarget(null);
     setPurchaseQty('');
@@ -681,6 +759,7 @@ export default function Admin() {
     setPurchaseReference('');
     setPurchaseNotes('');
     setPurchasePartyName('');
+    setSelectedPurchasePartyId('');
     setPurchasePaidAmount('');
     setPurchasePaymentMethod('cash');
     setPurchasePaymentNote('');
@@ -819,6 +898,7 @@ export default function Admin() {
   };
 
   const openModal = (product?: Product) => {
+    setSupplierPayableManuallyEdited(false);
     setError(null);
     if (product) {
       setEditingProduct(product);
@@ -851,6 +931,7 @@ export default function Admin() {
   };
 
   const closeModal = () => {
+    setSupplierPayableManuallyEdited(false);
     setIsModalOpen(false);
     setEditingProduct(null);
     setBatchEditProductIds([]);
@@ -1414,7 +1495,7 @@ export default function Admin() {
                 <td className="p-3">₹{metrics.combinedAvgBuyPrice.toFixed(2)} / ₹{metrics.combinedAvgSellPrice.toFixed(2)}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setPurchasePaidAmount(''); setPurchasePaymentMethod('cash'); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setSelectedPurchasePartyId(''); setPurchasePaidAmount(''); setPurchasePaymentMethod('cash'); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
                     <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
                     <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
@@ -1644,18 +1725,22 @@ export default function Admin() {
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-2 col-span-2">
                         <Label>Party / Supplier</Label>
-                        <Input list="admin-supplier-party-list" value={formData.supplierName ?? ''} onChange={e => setFormData({ ...formData, supplierName: e.target.value })} placeholder="Select or type supplier name" />
+                        <Input list="admin-supplier-party-list" value={formData.supplierName ?? ''} onChange={e => {
+                          const value = e.target.value;
+                          const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
+                          setFormData({ ...formData, supplierName: value, supplierPartyId: matched?.id || '' });
+                        }} placeholder="Select or type supplier name" />
                         <datalist id="admin-supplier-party-list">
                           {purchaseParties.map((party) => <option key={party.id} value={party.name} />)}
                         </datalist>
                       </div>
-                      <div className="space-y-2"><Label>Total Payable</Label><Input type="number" min="0" value={formData.supplierTotalPayable ?? ''} onChange={e => setFormData({ ...formData, supplierTotalPayable: e.target.value })} placeholder="0" /></div>
+                      <div className="space-y-2"><Label>Total Payable</Label><Input type="number" min="0" value={formData.supplierTotalPayable ?? ''} onChange={e => { setSupplierPayableManuallyEdited(true); setFormData({ ...formData, supplierTotalPayable: e.target.value }); }} placeholder="0" /><p className="text-[10px] text-muted-foreground">Auto calculated from quantity × purchase price. You can edit it.</p></div>
                       <div className="space-y-2"><Label>Total Paid</Label><Input type="number" min="0" value={formData.supplierTotalPaid ?? ''} onChange={e => setFormData({ ...formData, supplierTotalPaid: e.target.value })} placeholder="0" /></div>
                       <div className="space-y-2">
                         <Label>Payment Method</Label>
-                        <Select value={formData.supplierPaymentMethod || ''} onValueChange={value => setFormData({ ...formData, supplierPaymentMethod: value })}>
+                        <select className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm" value={formData.supplierPaymentMethod || ''} onChange={e => setFormData({ ...formData, supplierPaymentMethod: e.target.value, supplierTotalPaid: e.target.value === 'credit' ? '0' : formData.supplierTotalPaid })}>
                           <option value="">Select</option><option value="cash">Cash</option><option value="credit">Credit</option><option value="bank">Bank</option>
-                        </Select>
+                        </select>
                       </div>
                       <div className="space-y-2"><Label>Note / Reference</Label><Input value={formData.supplierNote ?? ''} onChange={e => setFormData({ ...formData, supplierNote: e.target.value })} placeholder="Optional" /></div>
                     </div>
@@ -1729,20 +1814,40 @@ export default function Admin() {
                   <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Purchase Details</div>
                   <div><Label>Purchase Quantity</Label><Input type="number" value={purchaseQty} onChange={(e) => setPurchaseQty(e.target.value)} /></div>
                   <div><Label>Purchase Unit Price</Label><Input type="number" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} /></div>
-                  <div><Label>Supplier / Party Name</Label><Input value={purchasePartyName} onChange={(e) => setPurchasePartyName(e.target.value)} /></div>
+                  <div className="space-y-1">
+                    <Label>Supplier / Party Name</Label>
+                    <Input
+                      list="purchase-party-suggestions"
+                      value={purchasePartyName}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setPurchasePartyName(value);
+                        const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
+                        setSelectedPurchasePartyId(matched?.id || '');
+                      }}
+                    />
+                    <datalist id="purchase-party-suggestions">
+                      {purchaseParties
+                        .filter((party) => party.name.toLowerCase().includes(purchasePartyName.toLowerCase()))
+                        .slice(0, 20)
+                        .map((party) => <option key={party.id} value={party.name} />)}
+                    </datalist>
+                  </div>
                   <div><Label>Reference (optional)</Label><Input value={purchaseReference} onChange={(e) => setPurchaseReference(e.target.value)} /></div>
                   <div><Label>Notes (optional)</Label><textarea value={purchaseNotes} onChange={(e) => setPurchaseNotes(e.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" rows={2} /></div>
                 </div>
                 <div className="rounded-lg border p-3 space-y-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment Details</div>
-                  <div><Label>Amount Paid Now</Label><Input type="number" value={purchasePaidAmount} onChange={(e) => setPurchasePaidAmount(e.target.value)} /></div>
+                  <div><Label>Amount Paid Now</Label><Input type="number" value={purchasePaidAmount} onChange={(e) => setPurchasePaidAmount(e.target.value)} disabled={purchasePaymentMethod === 'credit'} /></div>
                   <div>
                     <Label>Payment Method</Label>
-                    <select className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm" value={purchasePaymentMethod} onChange={(e) => setPurchasePaymentMethod(e.target.value as 'cash' | 'online')}>
+                    <select className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm" value={purchasePaymentMethod} onChange={(e) => setPurchasePaymentMethod(e.target.value as 'cash' | 'online' | 'credit')}>
                       <option value="cash">cash</option>
                       <option value="online">online</option>
+                      <option value="credit">credit</option>
                     </select>
                   </div>
+                  {purchasePaymentMethod === 'credit' && <p className="text-xs text-muted-foreground">Credit purchase creates payable due and does not affect cash.</p>}
                   <div><Label>Payment Note (optional)</Label><Input value={purchasePaymentNote} onChange={(e) => setPurchasePaymentNote(e.target.value)} /></div>
                   <div className="grid grid-cols-3 gap-2 text-xs pt-2">
                     <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">₹{(toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)).toFixed(2)}</div></div>

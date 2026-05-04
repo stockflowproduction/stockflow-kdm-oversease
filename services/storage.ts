@@ -26,6 +26,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
 import { financeLog } from './financeLogger';
 import { roundMoneyWhole } from './numberFormat';
+import { emitFinanceSnapshot } from '../utils/financeDebugLogger';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -176,6 +177,11 @@ const writeAuditEvent = async (operation: AuditOperation, payload: Record<string
   }
 };
 
+
+const shouldEmitFinanceSnapshot = (reason: string) => {
+  const r = reason.toLowerCase();
+  return ['transaction','payment','purchase','expense','cash','shift','product','freight','import','finance','customer','order'].some(k => r.includes(k));
+};
 const getProductsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'products');
 const getCustomersCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'customers');
 const getTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'transactions');
@@ -1688,14 +1694,8 @@ const buildKpiSnapshotPayload = (state: AppState, windowType: 'init' | 'after_tx
   };
 };
 
-const logKpiSnapshot = (checkpoint: 'INIT' | 'AFTER_TX_CREATE' | 'AFTER_TX_UPDATE' | 'AFTER_TX_DELETE', state: AppState) => {
-  const windowTypeMap: Record<typeof checkpoint, 'init' | 'after_tx_create' | 'after_tx_update' | 'after_tx_delete'> = {
-    INIT: 'init',
-    AFTER_TX_CREATE: 'after_tx_create',
-    AFTER_TX_UPDATE: 'after_tx_update',
-    AFTER_TX_DELETE: 'after_tx_delete',
-  };
-  console.info(`[FIN][KPI][SNAPSHOT][${checkpoint}]`, buildKpiSnapshotPayload(state, windowTypeMap[checkpoint]));
+const logKpiSnapshot = (_checkpoint: 'INIT' | 'AFTER_TX_CREATE' | 'AFTER_TX_UPDATE' | 'AFTER_TX_DELETE', _state: AppState) => {
+  // Intentionally silent: consolidated snapshots are emitted via utils/financeDebugLogger.ts.
 };
 
 const FINANCE_RECON_TRACE_ENABLED = String((import.meta as any).env?.VITE_FINANCE_RECON_TRACE || '').toLowerCase() === 'true';
@@ -2585,6 +2585,8 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
     logLoadedState(memoryState);
     emitLocalStorageUpdate();
     emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: options?.reason || 'saveData', entity: 'state', message: 'Saved.' });
+    const reason = options?.reason || 'saveData';
+    if (shouldEmitFinanceSnapshot(reason)) emitFinanceSnapshot(`after ${reason}`, data, { type: reason, source: 'saveData' });
     return;
   }
 
@@ -2599,6 +2601,8 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
       counts: getEntityCounts(data),
     });
     emitDataOpStatus({ phase: DATA_OP_PHASES.SUCCESS, op: options?.reason || 'saveData', entity: 'state', message: 'Saved.' });
+    const reason = options?.reason || 'saveData';
+    if (shouldEmitFinanceSnapshot(reason)) emitFinanceSnapshot(`after ${reason}`, data, { type: reason, source: 'saveData' });
   } catch (error) {
     memoryState = previousState;
     emitLocalStorageUpdate();
@@ -3799,6 +3803,32 @@ export const recordPurchaseOrderPayment = async (orderId: string, amount: number
   return updatePurchaseOrder(updatedOrder);
 };
 
+export const reverseInventoryPurchaseHistoryEntry = async (productId: string, purchaseHistoryId: string): Promise<Product> => {
+  const data = loadData();
+  const product = (data.products || []).find(p => p.id === productId);
+  if (!product) failValidation('PRODUCT_NOT_FOUND', 'Product not found.', { productId });
+  const history = (product.purchaseHistory || []).find(h => h.id === purchaseHistoryId);
+  if (!history) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase history entry not found.', { productId, purchaseHistoryId });
+  if (!history.purchaseOrderId) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Legacy purchase entry cannot be safely reversed without linked purchase order.', { productId, purchaseHistoryId });
+
+  const order = (data.purchaseOrders || []).find(o => o.id === history.purchaseOrderId);
+  if (!order) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Linked purchase order not found.', { purchaseOrderId: history.purchaseOrderId });
+  if ((order.paymentHistory || []).length > 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Cannot reverse purchase with recorded payments.', { purchaseOrderId: order.id });
+  const qty = Math.max(0, Number(history.quantity || 0));
+  if (qty <= 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Invalid purchase quantity for reversal.', { purchaseHistoryId });
+  if (Number(product.stock || 0) < qty) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Cannot reverse purchase: stock is lower than purchased quantity.', { stock: product.stock, qty });
+
+  const nextProduct: Product = {
+    ...product,
+    stock: Math.max(0, Number(product.stock || 0) - qty),
+    totalPurchase: Math.max(0, Number(product.totalPurchase || 0) - qty),
+    purchaseHistory: (product.purchaseHistory || []).filter(h => h.id !== purchaseHistoryId),
+  };
+  await updateProduct(nextProduct);
+  await updatePurchaseOrder({ ...order, status: 'cancelled', notes: `${order.notes || ''} | Reversed from inventory purchase history`.trim() });
+  return nextProduct;
+};
+
 
 type PurchasePriceUpdateMethod = 'avg_method_1' | 'avg_method_2' | 'no_change' | 'latest_purchase';
 
@@ -4240,6 +4270,13 @@ export const processTransaction = (transaction: Transaction): AppState => {
           transactions: nextTransactions,
         };
         emitLocalStorageUpdate();
+        emitFinanceSnapshot('after processTransaction_atomic_commit', memoryState, {
+          type: effectiveTransaction.type,
+          source: 'processTransaction',
+          amount: Math.abs(Number(effectiveTransaction.total || 0)),
+          entity: effectiveTransaction.customerName || effectiveTransaction.customerId || 'walk-in',
+          method: effectiveTransaction.paymentMethod,
+        });
         if (FINANCE_ACTION_TRACE_ENABLED) {
           console.info('[FIN][ACTION][TX_CREATE]', {
             actionType: 'TX_CREATE',
@@ -4524,6 +4561,13 @@ export const deleteTransaction = (
     customers: reconciledState.customers,
   };
   emitLocalStorageUpdate();
+  emitFinanceSnapshot('after deleteTransaction_reconcile', memoryState, {
+    type: 'transaction_delete',
+    source: 'deleteTransaction',
+    amount: Math.abs(Number(target.total || 0)),
+    entity: target.customerName || target.customerId || target.id,
+    method: target.paymentMethod,
+  });
   if (FINANCE_ACTION_TRACE_ENABLED) {
     console.info('[FIN][ACTION][TX_DELETE]', {
       actionType: 'TX_DELETE',
@@ -4756,6 +4800,13 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
     updatedTransactionEvents: reconciledState.updatedTransactionEvents || [],
   };
   emitLocalStorageUpdate();
+  emitFinanceSnapshot('after updateTransaction_reconciled', memoryState, {
+    type: 'transaction_update',
+    source: 'updateTransaction',
+    amount: Math.abs(Number(effectiveUpdatedTransaction.total || 0)),
+    entity: effectiveUpdatedTransaction.customerName || effectiveUpdatedTransaction.customerId || effectiveUpdatedTransaction.id,
+    method: effectiveUpdatedTransaction.paymentMethod,
+  });
 
   void Promise.all([
     writeAuditEvent('UPDATE', {

@@ -45,6 +45,10 @@ const todayLabel = () => new Date().toLocaleDateString('en-GB');
 const makePendingBarcode = () => `PENDING-${Math.floor(100000 + Math.random() * 900000)}`;
 const normalizeText = (v?: string) => (v || '').trim();
 const comboKey = (variant?: string, color?: string) => `${normalizeText(variant)}::${normalizeText(color)}`;
+const isPlaceholder = (v?: string) => {
+  const t = normalizeText(v).toLowerCase();
+  return !t || t === 'no variant' || t === 'no color' || t === '-';
+};
 const buildPendingVariantRows = (variants: string[], colors: string[]): PendingVariantRow[] => {
   const cleanVariants = variants.map(v => v.trim()).filter(Boolean);
   const cleanColors = colors.map(c => c.trim()).filter(Boolean);
@@ -206,6 +210,10 @@ export default function PurchasePanel() {
     if (!q) return products;
     return products.filter(p => [p.name, p.category, p.barcode].join(' ').toLowerCase().includes(q));
   }, [products, productSearch]);
+  const categorySuggestions = useMemo(
+    () => Array.from(new Set(products.map(p => (p.category || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [products]
+  );
 
   const orderList = useMemo(() => {
     let rows = orders.map(order => ({
@@ -247,7 +255,7 @@ export default function PurchasePanel() {
     setOrdersPage((prev) => Math.min(prev, orderTotalPages));
   }, [orderTotalPages]);
 
-  const selectedVariants = useMemo(() => {
+  const selectableInventoryVariants = useMemo(() => {
     if (!selectedProduct) return [] as Array<{ key: string; label: string; stock: number; variant?: string; color?: string }>;
     return getProductStockRows(selectedProduct).map((row, idx) => ({
       key: `${selectedProduct.id}-${idx}-${row.variant}-${row.color}`,
@@ -255,8 +263,13 @@ export default function PurchasePanel() {
       stock: row.stock,
       variant: row.variant,
       color: row.color,
-    })).filter(v => selectedVariantKeys.includes(v.key));
-  }, [selectedProduct, selectedVariantKeys]);
+    })).filter(v => !isPlaceholder(v.variant) || !isPlaceholder(v.color));
+  }, [selectedProduct]);
+
+  const selectedVariants = useMemo(() => {
+    if (!selectedProduct) return [] as Array<{ key: string; label: string; stock: number; variant?: string; color?: string }>;
+    return selectableInventoryVariants.filter(v => selectedVariantKeys.includes(v.key));
+  }, [selectedProduct, selectedVariantKeys, selectableInventoryVariants]);
 
   const pendingVariantRows = useMemo(
     () => buildPendingVariantRows(newProductDraft.variants, newProductDraft.colors),
@@ -275,7 +288,8 @@ export default function PurchasePanel() {
         color: row.color,
       });
     }
-    return selectedVariants.map(v => pricingEntries[v.key] || { key: v.key, label: v.label, stock: v.stock, variant: v.variant, color: v.color, quantity: '', unitCost: '' });
+    if (selectedVariants.length > 0) return selectedVariants.map(v => pricingEntries[v.key] || { key: v.key, label: v.label, stock: v.stock, variant: v.variant, color: v.color, quantity: '', unitCost: '' });
+    return [pricingEntries['standalone'] || { key: 'standalone', label: 'Standalone product', stock: Math.max(0, selectedProduct?.stock || 0), variant: undefined, color: undefined, quantity: '', unitCost: '' }];
   }, [sourceMode, selectedVariants, pricingEntries, pendingVariantRows]);
 
   const draftTotals = useMemo(() => activeLines.reduce((acc, line) => {
@@ -286,7 +300,8 @@ export default function PurchasePanel() {
     return acc;
   }, { totalQty: 0, totalAmount: 0 }), [activeLines]);
 
-  const canGoVariantsNext = sourceMode === 'new' ? true : selectedVariantKeys.length > 0;
+  const hasMeaningfulVariantChoices = sourceMode === 'inventory' ? selectableInventoryVariants.length > 0 : true;
+  const canGoVariantsNext = sourceMode === 'new' ? true : (!hasMeaningfulVariantChoices || selectedVariantKeys.length > 0);
   const canGoReviewNext = !!partyId && activeLines.length > 0 && activeLines.every(l => toNum(l.quantity) > 0 && toNum(l.unitCost) > 0);
 
   const stepMeta = [
@@ -911,7 +926,7 @@ export default function PurchasePanel() {
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <div><Label>Product Name</Label><Input value={newProductDraft.name} onChange={e => updateNewDraft({ name: e.target.value })} placeholder="e.g. Wireless Mouse" /></div>
-              <div><Label>Category</Label><Input value={newProductDraft.category} onChange={e => updateNewDraft({ category: e.target.value })} placeholder="Category" /></div>
+              <div><Label>Category</Label><Input list="purchase-panel-category-list" value={newProductDraft.category} onChange={e => updateNewDraft({ category: e.target.value })} placeholder="Category" /><datalist id="purchase-panel-category-list">{categorySuggestions.map(cat => <option key={cat} value={cat} />)}</datalist></div>
               <div><Label>Barcode</Label><Input value={newProductDraft.barcode} onChange={e => updateNewDraft({ barcode: e.target.value })} /></div>
               <div><Label>HSN</Label><Input value={newProductDraft.hsn} onChange={e => updateNewDraft({ hsn: e.target.value })} placeholder="Tax HSN code" /></div>
               <div className="md:col-span-2">
@@ -969,10 +984,10 @@ export default function PurchasePanel() {
             <div className="grid gap-5 lg:grid-cols-[280px_1fr]">
               <div className="rounded-3xl border border-slate-200 p-4"><img src={selectedProduct.image || ''} alt={selectedProduct.name} className="h-48 w-full rounded-2xl object-cover" /><div className="mt-4"><h3 className="text-lg font-semibold text-slate-900">{selectedProduct.name}</h3><p className="text-sm text-slate-500">{selectedProduct.category}</p></div></div>
               <div>
-                <div className="mb-4 flex items-center justify-between gap-3"><div><h4 className="text-base font-semibold text-slate-900">Select Variants</h4></div><div className="rounded-2xl bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700">{selectedVariantKeys.length} selected</div></div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {getProductStockRows(selectedProduct).map((variant, idx) => {
-                    const key = `${selectedProduct.id}-${idx}-${variant.variant}-${variant.color}`;
+                <div className="mb-4 flex items-center justify-between gap-3"><div><h4 className="text-base font-semibold text-slate-900">{selectableInventoryVariants.length ? 'Select Variants' : 'Standalone product'}</h4></div><div className="rounded-2xl bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700">{selectableInventoryVariants.length ? `${selectedVariantKeys.length} selected` : 'No variant selection required'}</div></div>
+                {selectableInventoryVariants.length > 0 ? <div className="grid gap-3 sm:grid-cols-2">
+                  {selectableInventoryVariants.map((variant, idx) => {
+                    const key = variant.key;
                     const selected = selectedVariantKeys.includes(key);
                     return (
                       <button key={key} onClick={() => setSelectedVariantKeys(prev => prev.includes(key) ? prev.filter(v => v !== key) : [...prev, key])} className={`rounded-2xl border p-4 text-left transition ${selected ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white hover:bg-slate-50'}`}>
@@ -980,7 +995,7 @@ export default function PurchasePanel() {
                       </button>
                     );
                   })}
-                </div>
+                </div> : <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">This product has no variant/color combinations. Continue to pricing as a standalone product.</div>}
                 <div className="mt-5 flex justify-end"><button onClick={goToPricing} disabled={!canGoVariantsNext} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next <ArrowRight className="h-4 w-4" /></button></div>
               </div>
             </div>
