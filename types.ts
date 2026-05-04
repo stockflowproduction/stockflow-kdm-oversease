@@ -34,6 +34,10 @@ export interface Product {
     previousStock: number;
     previousBuyPrice: number;
     nextBuyPrice: number;
+    purchaseOrderId?: string;
+    paymentMethod?: 'cash' | 'online' | 'credit';
+    paidAmount?: number;
+    partyName?: string;
     notes?: string;
     reference?: string;
   }>;

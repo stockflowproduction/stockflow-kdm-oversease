@@ -122,11 +122,6 @@ export default function Customers() {
 
   const canonicalBalanceSnapshot = useMemo(() => {
     const snapshot = getCanonicalCustomerBalanceSnapshot(customers, transactions);
-    console.info('[FIN][CUSTOMERS][CURRENT_BALANCE]', {
-      customerCount: customers.length,
-      totalDue: snapshot.totalDue,
-      totalStoreCredit: snapshot.totalStoreCredit,
-    });
     return snapshot;
   }, [customers, transactions]);
 

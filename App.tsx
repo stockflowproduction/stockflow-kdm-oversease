@@ -6,6 +6,7 @@ import { getCurrentUser, logout } from './services/auth';
 import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
+import { emitFinanceSnapshot } from './utils/financeDebugLogger';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3 } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
@@ -22,6 +23,7 @@ const Financial = lazy(() => import('./pages/Financial'));
 const FreightBooking = lazy(() => import('./pages/FreightBooking'));
 const PurchasePanel = lazy(() => import('./pages/PurchasePanel'));
 const ProductAnalytics = lazy(() => import('./pages/ProductAnalytics'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
 
 // --- Components ---
 
@@ -108,6 +110,7 @@ export default function App() {
       if (authStatus === 'authenticated') {
           const data = loadData();
           setStoreName(data.profile.storeName || 'StockFlow');
+          emitFinanceSnapshot('app_load', data, { type: 'app_load', source: 'app' });
       }
 
       const handleStorageUpdate = () => {
@@ -220,10 +223,11 @@ export default function App() {
           
           <nav className="flex-1 px-4 space-y-1">
             <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 mt-2">Menu</p>
-            <NavItem to="/" icon={LayoutDashboard} label="Inventory" />
+            <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" />
+            <NavItem to="/" icon={Package} label="Inventory" />
             <NavItem to="/sales" icon={ShoppingCart} label="POS System" />
             <NavItem to="/transactions" icon={ArrowRightLeft} label="Transactions" />
-            <NavItem to="/dashboard" icon={BarChart3} label="Product Analytics" />
+            <NavItem to="/product-analytics" icon={BarChart3} label="Product Analytics" />
             <NavItem to="/customers" icon={Users} label="Customers" />
             <NavItem to="/pdf" icon={FileText} label="Reports" />
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
@@ -294,6 +298,12 @@ export default function App() {
                          </Link>
                          <Link to="/dashboard" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-indigo-100 text-indigo-600 rounded-full mb-2">
+                                  <LayoutDashboard className="w-6 h-6" />
+                              </div>
+                              <span className="font-medium text-sm">Dashboard</span>
+                         </Link>
+                         <Link to="/product-analytics" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                              <div className="p-3 bg-cyan-100 text-cyan-600 rounded-full mb-2">
                                   <BarChart3 className="w-6 h-6" />
                               </div>
                               <span className="font-medium text-sm">Product Analytics</span>
@@ -347,7 +357,8 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />
                 <Route path="/transactions" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Transactions /></ProtectedRoute>} />
-                <Route path="/dashboard" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><ProductAnalytics /></ProtectedRoute>} />
+                <Route path="/dashboard" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Dashboard /></ProtectedRoute>} />
+                <Route path="/product-analytics" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><ProductAnalytics /></ProtectedRoute>} />
                 <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
                 <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />

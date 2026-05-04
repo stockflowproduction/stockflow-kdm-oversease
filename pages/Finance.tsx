@@ -663,8 +663,6 @@ export default function Finance() {
   }, [filteredCashHistory, data.transactions, expenses]);
 
   const currentUserEmail = (getCurrentUser() || '').trim().toLowerCase();
-  const profileAdminEmail = (data.profile.email || '').trim().toLowerCase();
-  const isAdmin = !profileAdminEmail || currentUserEmail === profileAdminEmail;
   const todayKey = todayISO();
   const isOpenSessionToday = !!openSession && isSameDay(openSession.startTime, todayKey);
   const cashierName = getCurrentUser() || 'Cashier';
@@ -922,12 +920,6 @@ export default function Finance() {
 
   const dueStoreCreditSummary = useMemo(() => {
     const snapshot = getCanonicalCustomerBalanceSnapshot(data.customers, data.transactions);
-    console.info('[FIN][KPI][CURRENT_BALANCE]', {
-      customers: data.customers.length,
-      customersWithLedger: snapshot.customersWithLedger,
-      totalDue: snapshot.totalDue,
-      totalStoreCredit: snapshot.totalStoreCredit,
-    });
     return { totalDue: snapshot.totalDue, totalStoreCredit: snapshot.totalStoreCredit };
   }, [data.customers, data.transactions]);
 
@@ -1603,7 +1595,6 @@ export default function Finance() {
   };
 
   const startShift = async () => {
-    if (!isAdmin) return setErrors('Only admin can start or close shifts.');
     if (openSession) return setErrors('An open cash session already exists.');
 
     const fresh = loadData();
@@ -1666,7 +1657,6 @@ export default function Finance() {
   };
 
   const closeShift = async () => {
-    if (!isAdmin) return setErrors('Only admin can start or close shifts.');
     if (!openSession) return setErrors('No open cash session found.');
 
     const fresh = loadData();
@@ -1761,7 +1751,7 @@ export default function Finance() {
   };
 
   const saveOpeningBalanceEdit = async () => {
-    if (!openSession || !isOpenSessionToday || !isAdmin) return setErrors('Only admin can start or close shifts.');
+    if (!openSession || !isOpenSessionToday) return setErrors('Open session is required for opening balance edit.');
 
     const fresh = loadData();
     const freshCashSessions = Array.isArray(fresh.cashSessions) ? fresh.cashSessions : [];
