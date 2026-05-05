@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
-import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder } from '../services/storage';
+import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
 import { runProcurementShadowCompare } from '../services/procurementApi';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
@@ -179,6 +179,7 @@ export default function PurchasePanel() {
   const [newPartyNotes, setNewPartyNotes] = useState('');
 
   const [showPartyPopup, setShowPartyPopup] = useState(false);
+  const [editingPartyId, setEditingPartyId] = useState<string | null>(null);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [showReceivePopup, setShowReceivePopup] = useState(false);
   const [showPaymentPopup, setShowPaymentPopup] = useState(false);
@@ -435,6 +436,17 @@ export default function PurchasePanel() {
 
   const saveParty = async (closePopupAfterCreate = false) => {
     if (!newPartyName.trim()) return;
+    if (editingPartyId) {
+      const existing = parties.find(p => p.id === editingPartyId);
+      if (!existing) return;
+      const updated = await updatePurchaseParty({ ...existing, name: newPartyName.trim(), phone: newPartyPhone.trim() || undefined, gst: newPartyGst.trim() || undefined, location: newPartyLocation.trim() || undefined, contactPerson: newPartyContactPerson.trim() || undefined, notes: newPartyNotes.trim() || undefined });
+      setPartyId(updated.id);
+      setEditingPartyId(null);
+      resetPartyDraft();
+      if (closePopupAfterCreate) setShowPartyPopup(false);
+      refresh();
+      return;
+    }
     const party = await createPurchaseParty({
       name: newPartyName.trim(),
       phone: newPartyPhone.trim() || undefined,
@@ -720,7 +732,7 @@ export default function PurchasePanel() {
               <div><Label>Location</Label><Input value={newPartyLocation} onChange={e => setNewPartyLocation(e.target.value)} /></div>
               <div><Label>Contact Person</Label><Input value={newPartyContactPerson} onChange={e => setNewPartyContactPerson(e.target.value)} /></div>
               <div><Label>Notes</Label><textarea value={newPartyNotes} onChange={e => setNewPartyNotes(e.target.value)} className="w-full rounded-md border px-3 py-2 text-sm" rows={3} /></div>
-              <Button onClick={saveParty}><Plus className="w-4 h-4 mr-1" /> Save Party</Button>
+              <Button onClick={saveParty}><Plus className="w-4 h-4 mr-1" /> {editingPartyId ? "Update Party" : "Save Party"}</Button>
             </CardContent>
           </Card>
           <Card>
@@ -1015,7 +1027,7 @@ export default function PurchasePanel() {
                       <option value="">Select party</option>
                       {parties.map(p => <option key={p.id} value={p.id}>{p.name} ({p.phone || 'No phone'})</option>)}
                     </select>
-                    <button type="button" onClick={() => setShowPartyPopup(true)} className="mt-2 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"><Plus className="h-3.5 w-3.5" /> Create Party</button>
+                    <div className="mt-2 flex gap-2"><button type="button" onClick={() => { setEditingPartyId(null); setShowPartyPopup(true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"><Plus className="h-3.5 w-3.5" /> Create Party</button><button type="button" disabled={!partyId} onClick={() => { const p = parties.find(x => x.id === partyId); if (!p) return; setEditingPartyId(p.id); setNewPartyName(p.name || ""); setNewPartyPhone(p.phone || ""); setNewPartyGst(p.gst || ""); setNewPartyLocation(p.location || ""); setNewPartyContactPerson(p.contactPerson || ""); setNewPartyNotes(p.notes || ""); setShowPartyPopup(true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Edit className="h-3.5 w-3.5" /> Edit Party</button></div>
                   </div>
                   <div><Label>Order Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div>
                   <div><Label>Bill Number</Label><Input value={billNumber} onChange={e => setBillNumber(e.target.value)} placeholder="Supplier invoice no." /></div>
@@ -1129,7 +1141,7 @@ export default function PurchasePanel() {
       </Modal>
 
 
-      <Modal open={showPartyPopup} onClose={() => setShowPartyPopup(false)} title="Create Party">
+      <Modal open={showPartyPopup} onClose={() => setShowPartyPopup(false)} title={editingPartyId ? "Edit Party" : "Create Party"}>
         <div className="grid gap-4 md:grid-cols-2">
           <div><Label>Name</Label><Input value={newPartyName} onChange={e => setNewPartyName(e.target.value)} /></div>
           <div><Label>Phone</Label><Input value={newPartyPhone} onChange={e => setNewPartyPhone(e.target.value)} /></div>
@@ -1140,7 +1152,7 @@ export default function PurchasePanel() {
         </div>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" onClick={() => setShowPartyPopup(false)}>Cancel</Button>
-          <Button onClick={() => saveParty(true)}><Plus className="w-4 h-4 mr-1" /> Save Party</Button>
+          <Button onClick={() => saveParty(true)}><Plus className="w-4 h-4 mr-1" /> {editingPartyId ? "Update Party" : "Save Party"}</Button>
         </div>
       </Modal>
 

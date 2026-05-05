@@ -20,6 +20,7 @@ const fromMoneyCents = (value: number) => value / 100;
 
 const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
     const [qty, setQty] = useState(1);
+    const [qtyInput, setQtyInput] = useState('1');
     const [flashMsg, setFlashMsg] = useState<string | null>(null);
 
     const isOutOfStock = !isReturnMode && product.stock <= 0;
@@ -55,6 +56,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
         }
         onAdd(qty);
         setQty(1);
+        setQtyInput('1');
         if (navigator.vibrate) navigator.vibrate(50);
     };
 
@@ -63,7 +65,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
         if (cartQty > 0) {
             onAdd(-1);
         } else {
-            setQty(Math.max(1, qty - 1));
+            const next = Math.max(1, qty - 1); setQty(next); setQtyInput(String(next));
         }
     };
 
@@ -116,9 +118,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
                 </div>
                 <div className="mt-auto flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <Button variant="outline" size="icon" className="h-7 w-7 rounded-lg shrink-0" onClick={handleMinus} disabled={isDisabled}><Minus className="w-3 h-3" /></Button>
-                    <div className="h-7 w-full flex items-center justify-center text-xs font-bold bg-secondary/50 rounded-lg">
-                        {cartQty > 0 ? cartQty : qty}
-                    </div>
+                    <Input value={cartQty > 0 ? String(cartQty) : qtyInput} inputMode="numeric" pattern="[0-9]*" className="h-7 text-center text-xs font-bold" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={e => { const v = e.target.value.replace(/[^\d]/g, ''); setQtyInput(v); if (!cartQty) setQty(Math.max(1, Number(v || 1))); }} />
                     <Button variant="default" size="icon" className={`h-7 w-7 rounded-lg shrink-0 ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} ${cartQty > 0 ? 'bg-primary' : ''}`} onClick={handlePlus} disabled={isDisabled}><Plus className="w-3 h-3" /></Button>
                 </div>
             </div>

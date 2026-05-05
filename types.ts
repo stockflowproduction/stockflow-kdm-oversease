@@ -114,6 +114,7 @@ export interface StoreProfile {
   defaultTaxRate?: number;
   defaultTaxLabel?: string;
   signatureImage?: string; // Base64 encoded signature
+  logoImage?: string; // Base64 encoded business logo
   invoiceFormat?: 'standard' | 'thermal';
   adminPin?: string;
 }
