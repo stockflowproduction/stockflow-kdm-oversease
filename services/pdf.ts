@@ -244,9 +244,25 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     };
 
     // --- Header Section ---
+    const logoData = profile.logoImage && profile.logoImage.startsWith('data:image') ? profile.logoImage : '';
+    const logoX = 14;
+    const logoY = 10;
+    const logoBoxW = 26;
+    const logoBoxH = 16;
+    if (logoData) {
+      try {
+        const props = (doc as any).getImageProperties(logoData);
+        const ratio = props?.width && props?.height ? props.width / props.height : 1;
+        let drawW = logoBoxW;
+        let drawH = drawW / ratio;
+        if (drawH > logoBoxH) { drawH = logoBoxH; drawW = drawH * ratio; }
+        doc.addImage(logoData, props?.fileType || 'PNG', logoX, logoY, drawW, drawH, undefined, 'FAST');
+      } catch {}
+    }
+
     doc.setFontSize(14);
     doc.setFont("helvetica", "bold");
-    doc.text(profile.storeName || "StockFlow Store", 14, 15);
+    doc.text(profile.storeName || "StockFlow Store", logoData ? 44 : 14, 15);
     
     doc.setFontSize(8);
     doc.setFont("helvetica", "normal");
@@ -264,7 +280,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
         cleanGstin ? `GSTIN: ${cleanGstin}` : '',
         cleanState ? `State: ${cleanState}` : ''
     ].filter(Boolean);
-    doc.text(headerLines, 14, 22);
+    doc.text(headerLines, logoData ? 44 : 14, 22);
 
     // --- Title ---
     doc.setFontSize(16);

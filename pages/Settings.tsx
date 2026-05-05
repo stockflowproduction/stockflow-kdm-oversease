@@ -11,7 +11,7 @@ export default function Settings() {
     storeName: '', ownerName: '', gstin: '', email: '', phone: '',
     addressLine1: '', addressLine2: '', state: '',
     bankName: '', bankAccount: '', bankIfsc: '', bankHolder: '',
-    defaultTaxRate: 0, defaultTaxLabel: 'None', signatureImage: '', adminPin: ''
+    defaultTaxRate: 0, defaultTaxLabel: 'None', signatureImage: '', logoImage: '', adminPin: ''
   });
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -27,7 +27,8 @@ export default function Settings() {
     refreshData();
     window.addEventListener('storage', refreshData);
     window.addEventListener('local-storage-update', refreshData);
-    return () => {
+
+  return () => {
         window.removeEventListener('storage', refreshData);
         window.removeEventListener('local-storage-update', refreshData);
     };
@@ -56,31 +57,35 @@ export default function Settings() {
       }
   };
 
+  const handleImageToDataUrl = (file: File, cb: (dataUrl: string) => void, maxWidth = 400) => {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const scale = Math.min(1, maxWidth / img.width);
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        if (ctx) { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); cb(canvas.toDataURL('image/png', 0.9)); }
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSignatureUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          // Optimized for small signature (landscape)
-          const MAX_WIDTH = 400;
-          const scale = MAX_WIDTH / img.width;
-          canvas.width = MAX_WIDTH;
-          canvas.height = img.height * scale;
-          
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            const dataUrl = canvas.toDataURL('image/png', 0.8);
-            setProfile(prev => ({ ...prev, signatureImage: dataUrl }));
-          }
-        };
-        img.src = event.target?.result as string;
-      };
-      reader.readAsDataURL(file);
+      handleImageToDataUrl(file, (dataUrl) => setProfile(prev => ({ ...prev, signatureImage: dataUrl })), 400);
     }
+  };
+
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) return;
+    handleImageToDataUrl(file, (dataUrl) => setProfile(prev => ({ ...prev, logoImage: dataUrl })), 600);
   };
 
   return (
@@ -105,6 +110,7 @@ export default function Settings() {
               <div className="space-y-2"><Label>Store Name <span className="text-red-500">*</span></Label><Input value={profile.storeName || ''} onChange={e => setProfile({...profile, storeName: e.target.value})} /></div>
               <div className="space-y-2"><Label>Owner Name</Label><Input value={profile.ownerName || ''} onChange={e => setProfile({...profile, ownerName: e.target.value})} /></div>
               <div className="space-y-2"><Label>GSTIN</Label><Input value={profile.gstin || ''} onChange={e => setProfile({...profile, gstin: e.target.value})} /></div>
+             <div className="space-y-2"><Label>Business Logo</Label><div className="flex items-center gap-3"><div className="h-16 w-24 border rounded bg-muted/20 flex items-center justify-center overflow-hidden">{profile.logoImage ? <img src={profile.logoImage} alt="Logo" className="max-w-full max-h-full object-contain" /> : <span className="text-[10px] text-muted-foreground">No Logo</span>}</div><div className="flex flex-col gap-2"><Input type="file" accept="image/*" onChange={handleLogoUpload} className="text-xs h-auto py-1" />{profile.logoImage && <Button variant="ghost" size="sm" onClick={() => setProfile({...profile, logoImage: ''})} className="text-destructive h-7 px-2">Remove</Button>}</div></div></div>
            </CardContent>
         </Card>
 

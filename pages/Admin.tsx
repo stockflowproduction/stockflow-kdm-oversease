@@ -6,7 +6,7 @@ import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
 import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
-import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp } from 'lucide-react';
+import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp, ChevronRight } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel } from '../services/excel';
 import { generateProductCatalogPDF } from '../services/pdf';
@@ -89,6 +89,11 @@ export default function Admin() {
   const [purchaseParties, setPurchaseParties] = useState<Array<{ id: string; name: string }>>([]);
   const [selectedPurchasePartyId, setSelectedPurchasePartyId] = useState('');
   const [supplierPayableManuallyEdited, setSupplierPayableManuallyEdited] = useState(false);
+
+  const [showSupplierPartyModal, setShowSupplierPartyModal] = useState(false);
+  const [supplierPartySearch, setSupplierPartySearch] = useState('');
+  const [showAddCategoryInline, setShowAddCategoryInline] = useState(false);
+  const [newInlineCategory, setNewInlineCategory] = useState('');
 
   const refreshData = () => {
     const data = loadData();
@@ -1574,7 +1579,7 @@ export default function Admin() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label>Product Category <span className="text-red-500">*</span></Label>
+                      <div className="flex items-center justify-between"><Label>Product Category <span className="text-red-500">*</span></Label><button type="button" className="text-xs text-primary" onClick={() => setShowAddCategoryInline(v => !v)}>+ Add Category</button></div>
                       <Select
                         value={formData.category}
                         onChange={e => {
@@ -1591,6 +1596,7 @@ export default function Admin() {
                         <option value="">Select Category</option>
                         {[...categories].sort().map(c => <option key={c} value={c}>{c}</option>)}
                       </Select>
+                      {showAddCategoryInline && <div className="flex gap-2"><Input value={newInlineCategory} onChange={e => setNewInlineCategory(e.target.value)} placeholder="New category" /><Button type="button" variant="outline" onClick={() => { const c = newInlineCategory.trim(); if (!c) return; const next = addCategory(c); setCategories(next); setFormData({ ...formData, category: c }); setNewInlineCategory(''); setShowAddCategoryInline(false); }}>Save</Button></div>}
                     </div>
 
                     <div className="space-y-2">
@@ -1723,16 +1729,17 @@ export default function Admin() {
                   <div className="space-y-4 rounded-xl border p-4 bg-muted/10">
                     <h4 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Supplier / Purchase Details (optional)</h4>
                     <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-2 col-span-2">
+                      <div className="space-y-2 col-span-2 relative">
                         <Label>Party / Supplier</Label>
-                        <Input list="admin-supplier-party-list" value={formData.supplierName ?? ''} onChange={e => {
+                        <Input value={formData.supplierName ?? ''} onChange={e => {
                           const value = e.target.value;
                           const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
                           setFormData({ ...formData, supplierName: value, supplierPartyId: matched?.id || '' });
                         }} placeholder="Select or type supplier name" />
-                        <datalist id="admin-supplier-party-list">
-                          {purchaseParties.map((party) => <option key={party.id} value={party.name} />)}
-                        </datalist>
+                        <div className="rounded-md border bg-white mt-1 max-h-36 overflow-auto">
+                          {purchaseParties.filter((party) => party.name.toLowerCase().includes(String(formData.supplierName || '').toLowerCase())).slice(0,4).map((party) => <button type="button" key={party.id} className="w-full text-left px-3 py-2 text-sm hover:bg-muted" onClick={() => setFormData({ ...formData, supplierName: party.name, supplierPartyId: party.id })}>{party.name}</button>)}
+                          {!!purchaseParties.length && <button type="button" className="w-full text-left px-3 py-2 text-sm text-primary border-t" onClick={() => setShowSupplierPartyModal(true)}>Show more… <ChevronRight className="inline w-3 h-3" /></button>}
+                        </div>
                       </div>
                       <div className="space-y-2"><Label>Total Payable</Label><Input type="number" min="0" value={formData.supplierTotalPayable ?? ''} onChange={e => { setSupplierPayableManuallyEdited(true); setFormData({ ...formData, supplierTotalPayable: e.target.value }); }} placeholder="0" /><p className="text-[10px] text-muted-foreground">Auto calculated from quantity × purchase price. You can edit it.</p></div>
                       <div className="space-y-2"><Label>Total Paid</Label><Input type="number" min="0" value={formData.supplierTotalPaid ?? ''} onChange={e => setFormData({ ...formData, supplierTotalPaid: e.target.value })} placeholder="0" /></div>
@@ -1758,6 +1765,20 @@ export default function Admin() {
                       </Button>
                     </div>
                 </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {showSupplierPartyModal && (
+        <div className="fixed inset-0 z-[70] bg-black/50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-xl max-h-[80vh] overflow-hidden">
+            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Select Party</CardTitle><Button variant="ghost" size="sm" onClick={() => setShowSupplierPartyModal(false)}><X className="w-4 h-4" /></Button></CardHeader>
+            <CardContent className="space-y-3">
+              <Input value={supplierPartySearch} onChange={e => setSupplierPartySearch(e.target.value)} placeholder="Search party" />
+              <div className="max-h-[50vh] overflow-y-auto border rounded-md">
+                {purchaseParties.filter(p => p.name.toLowerCase().includes(supplierPartySearch.toLowerCase())).map(p => <button type="button" key={p.id} className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-muted" onClick={() => { setFormData({ ...formData, supplierName: p.name, supplierPartyId: p.id }); setShowSupplierPartyModal(false); }}>{p.name}<div className="text-xs text-muted-foreground">{p.id}</div></button>)}
+              </div>
             </CardContent>
           </Card>
         </div>
