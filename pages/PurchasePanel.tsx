@@ -461,6 +461,17 @@ export default function PurchasePanel() {
     refresh();
   };
 
+  const startEditingParty = (party: PurchaseParty, openPopup = true) => {
+    setEditingPartyId(party.id);
+    setNewPartyName(party.name || '');
+    setNewPartyPhone(party.phone || '');
+    setNewPartyGst(party.gst || '');
+    setNewPartyLocation(party.location || '');
+    setNewPartyContactPerson(party.contactPerson || '');
+    setNewPartyNotes(party.notes || '');
+    if (openPopup) setShowPartyPopup(true);
+  };
+
   const saveOrder = async () => {
     const party = parties.find(p => p.id === partyId);
     if (!party) return;
@@ -740,7 +751,19 @@ export default function PurchasePanel() {
             <CardContent className="space-y-2">
               {parties.map(p => (
                 <div key={p.id} className="rounded-xl border p-3">
-                  <div className="font-medium">{p.name}</div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="font-medium">{p.name}</div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => startEditingParty(p, true)}
+                      className="h-8 px-2 text-xs"
+                    >
+                      <Pencil className="mr-1 h-3.5 w-3.5" />
+                      Edit
+                    </Button>
+                  </div>
                   <div className="text-xs text-muted-foreground">{p.phone || '—'} · GST: {p.gst || '—'} · {p.location || '—'}</div>
                   <div className="text-xs text-muted-foreground">Contact: {p.contactPerson || '—'}</div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
@@ -1027,7 +1050,7 @@ export default function PurchasePanel() {
                       <option value="">Select party</option>
                       {parties.map(p => <option key={p.id} value={p.id}>{p.name} ({p.phone || 'No phone'})</option>)}
                     </select>
-                    <div className="mt-2 flex gap-2"><button type="button" onClick={() => { setEditingPartyId(null); setShowPartyPopup(true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"><Plus className="h-3.5 w-3.5" /> Create Party</button><button type="button" disabled={!partyId} onClick={() => { const p = parties.find(x => x.id === partyId); if (!p) return; setEditingPartyId(p.id); setNewPartyName(p.name || ""); setNewPartyPhone(p.phone || ""); setNewPartyGst(p.gst || ""); setNewPartyLocation(p.location || ""); setNewPartyContactPerson(p.contactPerson || ""); setNewPartyNotes(p.notes || ""); setShowPartyPopup(true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Edit className="h-3.5 w-3.5" /> Edit Party</button></div>
+                    <div className="mt-2 flex gap-2"><button type="button" onClick={() => { setEditingPartyId(null); setShowPartyPopup(true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"><Plus className="h-3.5 w-3.5" /> Create Party</button><button type="button" disabled={!partyId} onClick={() => { const p = parties.find(x => x.id === partyId); if (!p) return; startEditingParty(p, true); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Pencil className="h-3.5 w-3.5" /> Edit Party</button></div>
                   </div>
                   <div><Label>Order Date</Label><div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm"><CalendarDays className="h-4 w-4" /> {todayLabel()}</div></div>
                   <div><Label>Bill Number</Label><Input value={billNumber} onChange={e => setBillNumber(e.target.value)} placeholder="Supplier invoice no." /></div>

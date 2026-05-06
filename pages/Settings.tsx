@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { StoreProfile, TAX_OPTIONS } from '../types';
-import { loadData, updateStoreProfile } from '../services/storage';
+import { loadData, updateStoreProfile, uploadImageFileToCloudinary } from '../services/storage';
 import { logout, getCurrentUser } from '../services/auth';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Label, Select } from '../components/ui';
 import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText } from 'lucide-react';
@@ -15,14 +15,18 @@ export default function Settings() {
   });
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [adminPinTouched, setAdminPinTouched] = useState(false);
+  const [uploadingField, setUploadingField] = useState<'logo' | 'signature' | 'catalog' | null>(null);
 
   useEffect(() => {
     const refreshData = () => {
       const data = loadData();
-      setProfile(data.profile);
+      setProfile({
+        ...data.profile,
+        customerCatalogFirstPage: typeof data.profile?.customerCatalogFirstPage === 'string' ? data.profile.customerCatalogFirstPage : '',
+        customerCatalogFirstPageName: typeof data.profile?.customerCatalogFirstPageName === 'string' ? data.profile.customerCatalogFirstPageName : '',
+        customerCatalogFirstPageMimeType: typeof data.profile?.customerCatalogFirstPageMimeType === 'string' ? data.profile.customerCatalogFirstPageMimeType : '',
+      });
       setUserEmail(getCurrentUser());
-      setAdminPinTouched(false);
     };
     refreshData();
     window.addEventListener('storage', refreshData);
@@ -35,17 +39,14 @@ export default function Settings() {
   }, []);
 
   const handleSave = () => {
-    const latestProfile: StoreProfile = loadData().profile || ({} as StoreProfile);
-    const hasTypedPin = !!profile.adminPin?.trim();
-    const existingStoredPin = latestProfile.adminPin?.trim() || '';
-    const shouldPreserveStoredPin = !adminPinTouched && !hasTypedPin && !!existingStoredPin;
-    const nextProfile = shouldPreserveStoredPin
-      ? { ...profile, adminPin: latestProfile.adminPin }
-      : profile;
-
-    updateStoreProfile(nextProfile);
-    setProfile(nextProfile);
-    setAdminPinTouched(false);
+    const safeProfile: StoreProfile = {
+      ...profile,
+      customerCatalogFirstPage: typeof profile.customerCatalogFirstPage === 'string' ? profile.customerCatalogFirstPage : '',
+      customerCatalogFirstPageName: typeof profile.customerCatalogFirstPageName === 'string' ? profile.customerCatalogFirstPageName : '',
+      customerCatalogFirstPageMimeType: typeof profile.customerCatalogFirstPageMimeType === 'string' ? profile.customerCatalogFirstPageMimeType : '',
+    };
+    updateStoreProfile(safeProfile);
+    setProfile(safeProfile);
     setSuccess(true);
     setTimeout(() => setSuccess(false), 3000);
   };
@@ -57,35 +58,52 @@ export default function Settings() {
       }
   };
 
-  const handleImageToDataUrl = (file: File, cb: (dataUrl: string) => void, maxWidth = 400) => {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const scale = Math.min(1, maxWidth / img.width);
-        canvas.width = Math.max(1, Math.round(img.width * scale));
-        canvas.height = Math.max(1, Math.round(img.height * scale));
-        const ctx = canvas.getContext('2d');
-        if (ctx) { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); cb(canvas.toDataURL('image/png', 0.9)); }
-      };
-      img.src = event.target?.result as string;
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleSignatureUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSignatureUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      handleImageToDataUrl(file, (dataUrl) => setProfile(prev => ({ ...prev, signatureImage: dataUrl })), 400);
+    if (!file || !file.type.startsWith('image/')) return;
+    try {
+      setUploadingField('signature');
+      const url = await uploadImageFileToCloudinary(file);
+      setProfile(prev => ({ ...prev, signatureImage: url }));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Signature upload failed.');
+    } finally {
+      setUploadingField(null);
     }
   };
 
-  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (!file.type.startsWith('image/')) return;
-    handleImageToDataUrl(file, (dataUrl) => setProfile(prev => ({ ...prev, logoImage: dataUrl })), 600);
+    try {
+      setUploadingField('logo');
+      const url = await uploadImageFileToCloudinary(file);
+      setProfile(prev => ({ ...prev, logoImage: url }));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Logo upload failed.');
+    } finally {
+      setUploadingField(null);
+    }
+  };
+  const handleCatalogFirstPageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) return;
+    try {
+      setUploadingField('catalog');
+      const url = await uploadImageFileToCloudinary(file);
+      setProfile(prev => ({
+        ...prev,
+        customerCatalogFirstPage: url,
+        customerCatalogFirstPageName: file.name || '',
+        customerCatalogFirstPageMimeType: file.type || 'image/png',
+      }));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Catalog first page upload failed.');
+    } finally {
+      setUploadingField(null);
+    }
   };
 
   return (
@@ -102,6 +120,11 @@ export default function Settings() {
         </div>
         <Button variant="destructive" onClick={logout} className="gap-2"><LogOut className="w-4 h-4" /> Logout</Button>
       </div>
+      {uploadingField && (
+        <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-primary">
+          Uploading {uploadingField} image to Cloudinary…
+        </div>
+      )}
 
       <div className="grid md:grid-cols-2 gap-6">
         <Card>
@@ -112,6 +135,20 @@ export default function Settings() {
               <div className="space-y-2"><Label>GSTIN</Label><Input value={profile.gstin || ''} onChange={e => setProfile({...profile, gstin: e.target.value})} /></div>
              <div className="space-y-2"><Label>Business Logo</Label><div className="flex items-center gap-3"><div className="h-16 w-24 border rounded bg-muted/20 flex items-center justify-center overflow-hidden">{profile.logoImage ? <img src={profile.logoImage} alt="Logo" className="max-w-full max-h-full object-contain" /> : <span className="text-[10px] text-muted-foreground">No Logo</span>}</div><div className="flex flex-col gap-2"><Input type="file" accept="image/*" onChange={handleLogoUpload} className="text-xs h-auto py-1" />{profile.logoImage && <Button variant="ghost" size="sm" onClick={() => setProfile({...profile, logoImage: ''})} className="text-destructive h-7 px-2">Remove</Button>}</div></div></div>
            </CardContent>
+        </Card>
+        <Card className="md:col-span-2">
+          <CardHeader><CardTitle className="flex items-center gap-2"><FileText className="w-5 h-5 text-primary" /> Customer Catalog Default First Page</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">Upload an image first page for Customer Catalog PDF. Internal Audit/Invoices are unaffected.</p>
+            <Input type="file" accept="image/*" onChange={handleCatalogFirstPageUpload} className="text-xs h-auto py-1" />
+            {profile.customerCatalogFirstPageName && <p className="text-xs text-muted-foreground">Selected: {profile.customerCatalogFirstPageName}</p>}
+            {profile.customerCatalogFirstPage && (
+              <div className="flex items-center gap-2">
+                <div className="h-16 w-24 border rounded bg-muted/20 overflow-hidden">{<img src={profile.customerCatalogFirstPage} alt="Catalog first page" className="h-full w-full object-contain" />}</div>
+                <Button variant="outline" size="sm" onClick={() => setProfile(prev => ({ ...prev, customerCatalogFirstPage: '', customerCatalogFirstPageName: '', customerCatalogFirstPageMimeType: '' }))}>Remove</Button>
+              </div>
+            )}
+          </CardContent>
         </Card>
 
         {/* Tax Configuration Section */}
@@ -190,31 +227,6 @@ export default function Settings() {
                   ) : (
                       <p>Standard format generates a professional A4 PDF document for downloading or sharing.</p>
                   )}
-              </div>
-           </CardContent>
-        </Card>
-
-
-        <Card>
-           <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Security</CardTitle></CardHeader>
-           <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Manager Unlock PIN (for opening balance edit)</Label>
-                <Input
-                  type="password"
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={profile.adminPin || ''}
-                  onChange={e => {
-                    setAdminPinTouched(true);
-                    setProfile({ ...profile, adminPin: e.target.value.replace(/[^\d]/g, '').slice(0, 6) });
-                  }}
-                  placeholder="Enter PIN (e.g. 1234)"
-                />
-                <p className="text-xs text-muted-foreground">This PIN is saved in your store profile and used in Finance to unlock opening balance edits.</p>
-                {!profile.adminPin?.trim() && (
-                  <p className="text-xs text-amber-700">No manager PIN configured. Opening balance unlock is disabled until you set one.</p>
-                )}
               </div>
            </CardContent>
         </Card>

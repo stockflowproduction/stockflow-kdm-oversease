@@ -73,6 +73,9 @@ export interface Transaction {
   items: CartItem[];
   total: number;
   storeCreditUsed?: number;
+  storeCreditCreated?: number;
+  cashReceived?: number;
+  changeReturned?: number;
   returnHandlingMode?: 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
   saleSettlement?: {
     cashPaid: number;
@@ -115,6 +118,9 @@ export interface StoreProfile {
   defaultTaxLabel?: string;
   signatureImage?: string; // Base64 encoded signature
   logoImage?: string; // Base64 encoded business logo
+  customerCatalogFirstPage?: string;
+  customerCatalogFirstPageName?: string;
+  customerCatalogFirstPageMimeType?: string;
   invoiceFormat?: 'standard' | 'thermal';
   adminPin?: string;
 }
@@ -153,6 +159,8 @@ export interface CashSession {
   sessionExpenseTotal?: number;
   difference?: number;
   closingDenominationCounts?: Record<string, number>;
+  closingEditedAt?: string;
+  closingEditNote?: string;
   status: 'open' | 'closed';
 }
 

@@ -18,7 +18,7 @@ import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromMoneyCents = (value: number) => value / 100;
 
-const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => void }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
+const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQty: number, returnableQty: number, onAdd: (qty: number) => boolean }> = ({ product, isReturnMode, cartQty, returnableQty, onAdd }) => {
     const [qty, setQty] = useState(1);
     const [qtyInput, setQtyInput] = useState('1');
     const [flashMsg, setFlashMsg] = useState<string | null>(null);
@@ -30,31 +30,23 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
 
     const handleAdd = () => {
         if (isOutOfStock && !isReturnMode) return;
-        
-        // If already in cart, just increment by 1
-        if (cartQty > 0) {
-            if (isReturnMode && cartQty >= maxReturnable) {
-                setFlashMsg(`Limit: ${maxReturnable}`);
-                setTimeout(() => setFlashMsg(null), 1500);
-                return;
-            }
-            if (!isReturnMode && cartQty >= product.stock) {
-                setFlashMsg(`Stock: ${product.stock}`);
-                setTimeout(() => setFlashMsg(null), 1500);
-                return;
-            }
-            onAdd(1);
-            if (navigator.vibrate) navigator.vibrate(50);
+
+        const parsedQty = Math.floor(Number(qtyInput));
+        if (!Number.isFinite(parsedQty) || parsedQty <= 0) {
+            setFlashMsg('Enter a valid quantity');
+            setTimeout(() => setFlashMsg(null), 1500);
             return;
         }
 
-        // Otherwise use the local qty
-        if (isReturnMode && qty > maxReturnable) {
+        if (isReturnMode && (cartQty + parsedQty) > maxReturnable) {
             setFlashMsg(`Limit: ${maxReturnable}`);
             setTimeout(() => setFlashMsg(null), 1500);
             return;
         }
-        onAdd(qty);
+
+        const added = onAdd(parsedQty);
+        if (!added) return;
+
         setQty(1);
         setQtyInput('1');
         if (navigator.vibrate) navigator.vibrate(50);
@@ -118,7 +110,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
                 </div>
                 <div className="mt-auto flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <Button variant="outline" size="icon" className="h-7 w-7 rounded-lg shrink-0" onClick={handleMinus} disabled={isDisabled}><Minus className="w-3 h-3" /></Button>
-                    <Input value={cartQty > 0 ? String(cartQty) : qtyInput} inputMode="numeric" pattern="[0-9]*" className="h-7 text-center text-xs font-bold" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={e => { const v = e.target.value.replace(/[^\d]/g, ''); setQtyInput(v); if (!cartQty) setQty(Math.max(1, Number(v || 1))); }} />
+                    <Input value={qtyInput} inputMode="numeric" pattern="[0-9]*" className="h-7 text-center text-xs font-bold" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={e => { const v = e.target.value.replace(/[^\d]/g, ''); setQtyInput(v); setQty(Math.max(1, Number(v || 1))); }} />
                     <Button variant="default" size="icon" className={`h-7 w-7 rounded-lg shrink-0 ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''} ${cartQty > 0 ? 'bg-primary' : ''}`} onClick={handlePlus} disabled={isDisabled}><Plus className="w-3 h-3" /></Button>
                 </div>
             </div>
@@ -162,6 +154,18 @@ export default function Sales() {
   const setActiveCartItems = (updater: (items: CartItem[]) => CartItem[]) => {
     setInvoiceCarts(prev => prev.map(c => c.id === activeCartId ? { ...c, items: updater(c.items), updatedAt: new Date().toISOString() } : c));
   };
+  const removeCompletedCartAfterSuccess = (completedCartId: string) => {
+    setInvoiceCarts(prev => {
+      const remaining = prev.filter(c => c.id !== completedCartId);
+      if (remaining.length === 0) {
+        const fallback = createEmptyInvoiceCart(1);
+        setActiveCartId(fallback.id);
+        return [fallback];
+      }
+      setActiveCartId(remaining[0].id);
+      return remaining;
+    });
+  };
   useEffect(() => { persistInvoiceCarts(invoiceCarts, activeCartId); }, [invoiceCarts, activeCartId]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -191,8 +195,8 @@ export default function Sales() {
   const [invoiceGstNumber, setInvoiceGstNumber] = useState('');
   
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
-  const [storeCreditMode, setStoreCreditMode] = useState<'none' | 'full' | 'custom'>('none');
-  const [customStoreCreditUse, setCustomStoreCreditUse] = useState('');
+  const [useStoreCreditApplied, setUseStoreCreditApplied] = useState(false);
+  const [storeOverpaymentAsCredit, setStoreOverpaymentAsCredit] = useState(false);
   const [cashPaidInput, setCashPaidInput] = useState('');
   const [onlinePaidInput, setOnlinePaidInput] = useState('');
   const [cashReceivedInput, setCashReceivedInput] = useState('');
@@ -439,11 +443,11 @@ export default function Sales() {
     return getProductStockRows(product).reduce((sum, row) => sum + getReturnableQty(product.id, row.variant, row.color, customerId), 0);
   };
 
-  const handleProductSelect = (scanValue: string, explicitQty: number = 1) => {
+  const handleProductSelect = (scanValue: string, explicitQty: number = 1): boolean => {
     let targetCode = scanValue;
     try { const p = JSON.parse(scanValue); if (p.sku) targetCode = p.sku; if(p.barcode) targetCode = p.barcode; } catch(e) {}
     const product = productLookupByCode.get(targetCode.toLowerCase());
-    if (!product) return;
+    if (!product) return false;
 
     let error = null;
     if (isReturnMode) {
@@ -463,7 +467,7 @@ export default function Sales() {
       if (product.stock <= 0) error = 'Out of Stock!';
       else if (product.stock < (inCart + explicitQty)) error = `Only ${product.stock} in stock.`;
     }
-    if (error) { setCartError(error); return; }
+    if (error) { setCartError(error); return false; }
 
     if (productHasCombinationStock(product)) {
       const rows = getProductStockRows(product).map(row => ({
@@ -473,13 +477,14 @@ export default function Sales() {
         qty: 0
       }));
       setVariantPicker({ open: true, product, rows });
-      return;
+      return false;
     }
 
     if (navigator.vibrate) navigator.vibrate(100);
-    addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
+    return addToCart(product, explicitQty, NO_VARIANT, NO_COLOR);
   };
-  const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string) => {
+  const addToCart = (product: Product, qty: number, selectedVariant?: string, selectedColor?: string): boolean => {
+    let didAdd = false;
     setActiveCartItems(prev => {
         const existing = prev.find(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR));
         if (existing) {
@@ -491,6 +496,7 @@ export default function Sales() {
               setCartError(actualStock > 0 && availableStock !== actualStock ? reservationErrorMessage : `Stock limit: ${availableStock}`);
               return prev;
             }
+            didAdd = true;
             return prev.map(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR) ? { ...item, quantity: newQty } : item);
         }
         if (qty <= 0) return prev;
@@ -500,6 +506,7 @@ export default function Sales() {
           setCartError(actualStock > 0 && availableStock !== actualStock ? reservationErrorMessage : `Stock limit: ${availableStock}`);
           return prev;
         }
+        didAdd = true;
         return [...prev, {
           ...product,
           buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
@@ -511,6 +518,7 @@ export default function Sales() {
           selectedColor: selectedColor || NO_COLOR
         }];
     });
+    return didAdd;
   };
 
   const updateQuantity = (id: string, delta: number, variant?: string, color?: string) => {
@@ -613,8 +621,8 @@ export default function Sales() {
       if (!validateOpenShiftForPos()) return;
       setCheckoutError(null);
       setSelectedTransactionDate('');
-      setStoreCreditMode('none');
-      setCustomStoreCreditUse('');
+      setUseStoreCreditApplied(false);
+      setStoreOverpaymentAsCredit(false);
       const defaultCheckout = buildCheckoutMoney({
         cartItems: cart,
         taxRate: selectedTax.value,
@@ -730,15 +738,24 @@ export default function Sales() {
       }
 
       const availableCreditAtSubmit = Math.max(0, Number(finalCustomer?.storeCredit || 0));
+      const originalCheckoutAtSubmit = buildCheckoutMoney({
+        cartItems: cart,
+        taxRate: selectedTax.value,
+        returnMode: isReturnMode,
+        storeCreditRequested: 0,
+        availableStoreCreditAmount: 0,
+        hasCustomer: Boolean(finalCustomer),
+        cashInput: cashPaidInput,
+        onlineInput: onlinePaidInput,
+      });
+      const requestedStoreCreditAtSubmit = (!isReturnMode && useStoreCreditApplied && finalCustomer)
+        ? Math.min(availableCreditAtSubmit, Math.max(0, Number(originalCheckoutAtSubmit.remainingPayable || 0)))
+        : 0;
       const checkoutMoney = buildCheckoutMoney({
         cartItems: cart,
         taxRate: selectedTax.value,
         returnMode: isReturnMode,
-        storeCreditRequested: storeCreditMode === 'full'
-          ? Number.MAX_SAFE_INTEGER
-          : storeCreditMode === 'custom'
-            ? Math.max(0, Number(customStoreCreditUse || 0))
-            : 0,
+        storeCreditRequested: requestedStoreCreditAtSubmit,
         availableStoreCreditAmount: availableCreditAtSubmit,
         hasCustomer: Boolean(finalCustomer),
         cashInput: cashPaidInput,
@@ -767,6 +784,10 @@ export default function Sales() {
           setCheckoutError("Customer is required when credit due is created.");
           return;
       }
+      if (!isReturnMode && storeOverpaymentAsCredit && rawOverpaymentValue > 0 && !finalCustomer) {
+          setCheckoutError("Select or create a customer to save store credit.");
+          return;
+      }
       if (isReturnMode && (returnHandlingMode === 'reduce_due' || returnHandlingMode === 'store_credit') && !finalCustomer) {
           setCheckoutError("Selected return handling mode requires a customer.");
           return;
@@ -788,7 +809,9 @@ export default function Sales() {
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && cashPaid > 0) {
           const safeCashReceived = Math.max(0, Number(cashReceivedInput || 0));
-          const changeReturned = Math.max(0, safeCashReceived - cashPaid);
+          const rawOverpay = Math.max(0, safeCashReceived - cashPaid);
+          const storeCreditCreated = (storeOverpaymentAsCredit && finalCustomer) ? rawOverpay : 0;
+          const changeReturned = Math.max(0, rawOverpay - storeCreditCreated);
           currentCashDetails = {
               cashReceived: Number.isFinite(safeCashReceived) ? safeCashReceived : cashPaid,
               changeReturned: Number.isFinite(changeReturned) ? changeReturned : 0
@@ -799,6 +822,9 @@ export default function Sales() {
           id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount,
           taxRate: selectedTax.value, taxLabel: selectedTax.label, date: buildEffectiveTransactionDate(), type: isReturnMode ? 'return' : 'sale',
           customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod: resolvedPaymentMethod, storeCreditUsed: appliedStoreCredit,
+          storeCreditCreated: !isReturnMode && storeOverpaymentAsCredit && finalCustomer ? Math.max(0, rawOverpaymentValue) : 0,
+          cashReceived: !isReturnMode ? Math.max(0, Number(cashReceivedInput || 0)) : undefined,
+          changeReturned: !isReturnMode ? (storeOverpaymentAsCredit && finalCustomer ? 0 : Math.max(0, rawOverpaymentValue)) : undefined,
           customerPhone: finalCustomer?.phone,
           gstName: isReturnMode ? undefined : (invoiceGstName.trim() || finalCustomer?.gstName),
           gstNumber: isReturnMode ? undefined : (invoiceGstNumber.trim() || finalCustomer?.gstNumber),
@@ -811,6 +837,7 @@ export default function Sales() {
           }
       };
 
+      const completedCartId = activeCartId;
       pendingCheckoutRef.current = { transactionId: tx.id, cart: [...cart], transaction: tx, cashDetails: currentCashDetails };
       setTransactionSyncStatus({ phase: 'pending', message: 'Saving sale locally…' });
       try {
@@ -819,7 +846,7 @@ export default function Sales() {
         
         // Cleanup
         setIsCustomerModalOpen(false); 
-        setActiveCartItems(() => []);
+        removeCompletedCartAfterSuccess(completedCartId);
         setSelectedCustomer(null);
         setNewCustomerName('');
         setNewCustomerPhone('');
@@ -831,8 +858,8 @@ export default function Sales() {
         setCashReceivedInput('');
         setCashReceivedDirty(false);
         setReturnHandlingMode('refund_cash');
-        setStoreCreditMode('none');
-        setCustomStoreCreditUse('');
+        setUseStoreCreditApplied(false);
+        setStoreOverpaymentAsCredit(false);
         setSelectedTransactionDate('');
         if(isReturnMode) setIsReturnMode(false);
       } catch (error) {
@@ -856,17 +883,24 @@ export default function Sales() {
     }
   };
   const availableStoreCredit = Math.max(0, Number(selectedCustomer?.storeCredit || 0));
+  const originalInvoiceTotal = Math.max(0, Number(buildCheckoutMoney({
+    cartItems: cart,
+    taxRate: selectedTax.value,
+    returnMode: isReturnMode,
+    storeCreditRequested: 0,
+    availableStoreCreditAmount: 0,
+    hasCustomer: false,
+    cashInput: '0',
+    onlineInput: '0',
+  }).remainingPayable || 0));
+  const appliedStoreCredit = !isReturnMode && useStoreCreditApplied && !!selectedCustomer
+    ? Math.min(availableStoreCredit, originalInvoiceTotal)
+    : 0;
   const checkoutPreview = buildCheckoutMoney({
     cartItems: cart,
     taxRate: selectedTax.value,
     returnMode: isReturnMode,
-    storeCreditRequested: !selectedCustomer || isReturnMode
-      ? 0
-      : storeCreditMode === 'full'
-        ? Number.MAX_SAFE_INTEGER
-        : storeCreditMode === 'custom'
-          ? Math.max(0, Number(customStoreCreditUse || 0))
-          : 0,
+    storeCreditRequested: appliedStoreCredit,
     availableStoreCreditAmount: availableStoreCredit,
     hasCustomer: Boolean(selectedCustomer),
     cashInput: cashPaidInput,
@@ -877,14 +911,22 @@ export default function Sales() {
   const taxable = checkoutPreview.taxableAmount;
   const taxVal = checkoutPreview.taxAmount;
   const grandTotal = checkoutPreview.total;
-  const storeCreditUsed = checkoutPreview.appliedStoreCredit;
-  const maxApplicableStoreCredit = checkoutPreview.maxApplicableStoreCredit;
+  const storeCreditUsed = appliedStoreCredit;
   const cashPaidValue = checkoutPreview.cashPaid;
   const onlinePaidValue = checkoutPreview.onlinePaid;
   const cashReceivedValue = Math.max(0, Number(cashReceivedInput || 0));
   const cashToCollectValue = Math.max(0, Number(cashPaidValue || 0));
-  const cashChangeValue = Math.max(0, cashReceivedValue - cashToCollectValue);
+  const rawOverpaymentValue = Math.max(0, cashReceivedValue - cashToCollectValue);
+  const storeCreditToCreate = storeOverpaymentAsCredit ? rawOverpaymentValue : 0;
+  const cashChangeValue = storeOverpaymentAsCredit ? 0 : rawOverpaymentValue;
   const cashShortfallValue = Math.max(0, cashToCollectValue - cashReceivedValue);
+  useEffect(() => {
+    setUseStoreCreditApplied(false);
+    setStoreOverpaymentAsCredit(false);
+  }, [selectedCustomer?.id]);
+  useEffect(() => {
+    if (rawOverpaymentValue <= 0 && storeOverpaymentAsCredit) setStoreOverpaymentAsCredit(false);
+  }, [rawOverpaymentValue, storeOverpaymentAsCredit]);
 
   const categories = ['All', ...Array.from(new Set(products.map((p) => p.category || 'Uncategorized')))];
   const filteredProducts = products.filter(p => {
@@ -1252,14 +1294,16 @@ export default function Sales() {
             <div className="space-y-3">
               <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
               {paginatedProducts.map(p => {
-                const cartItem = cart.find(item => item.id === p.id);
+                const cartQty = cart
+                  .filter(item => lineKey(item.id, item.selectedVariant, item.selectedColor) === lineKey(p.id, NO_VARIANT, NO_COLOR))
+                  .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
                 const returnableQty = isReturnMode ? getProductReturnableQty(p) : 0;
                 return (
                   <ProductGridItem
                     key={p.id}
                     product={p}
                     isReturnMode={isReturnMode}
-                    cartQty={cartItem?.quantity || 0}
+                    cartQty={cartQty}
                     returnableQty={returnableQty}
                     onAdd={(qty) => handleProductSelect(`${p.id}`, qty)}
                   />
@@ -1592,7 +1636,7 @@ export default function Sales() {
                   <div className="space-y-2.5 rounded-lg border p-3 bg-muted/10">
                     <p className="text-xs font-bold uppercase text-muted-foreground">Settlement Split</p>
                     <div className="space-y-1.5">
-                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Paid</Label>
+                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Total Amount</Label>
                       <Input type="number" min="0" step="0.01" placeholder="0.00" value={cashPaidInput} onChange={(e) => {
                         const nextValue = e.target.value;
                         setCashPaidInput(nextValue);
@@ -1617,13 +1661,17 @@ export default function Sales() {
                       <div className="flex justify-between"><span>Cash received</span><span className="font-semibold">₹{formatMoneyPrecise(cashReceivedValue)}</span></div>
                       {cashToCollectValue === 0 ? (
                         <div className="text-muted-foreground">No cash collection required.</div>
-                      ) : cashChangeValue > 0 ? (
-                        <div className={`font-semibold ${getPaymentStatusColorClass('cash').replace('bg-green-50 border-green-200 ', '')}`}>Change to return: ₹{formatMoneyPrecise(cashChangeValue)}</div>
+                      ) : rawOverpaymentValue > 0 ? (
+                        <div className="space-y-2">
+                          <div className={`font-semibold ${getPaymentStatusColorClass('cash').replace('bg-green-50 border-green-200 ', '')}`}>Change to return: ₹{formatMoneyPrecise(cashChangeValue || rawOverpaymentValue)}</div>
+                          <Button size="sm" variant={storeOverpaymentAsCredit ? 'default' : 'outline'} disabled={!selectedCustomer} onClick={() => setStoreOverpaymentAsCredit(v => !v)}>
+                            {storeOverpaymentAsCredit ? `₹${formatMoneyPrecise(storeCreditToCreate)} will be saved as store credit` : `Store Amount (₹${formatMoneyPrecise(rawOverpaymentValue)}) in Store Credit`}
+                          </Button>
+                          {!selectedCustomer && <div className="text-[11px] text-muted-foreground">Select or create a customer to save store credit.</div>}
+                        </div>
                       ) : cashShortfallValue > 0 ? (
                         <div className={`font-semibold ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}>Amount still needed: ₹{formatMoneyPrecise(cashShortfallValue)}</div>
-                      ) : (
-                        <div className={`font-semibold ${getPaymentStatusColorClass('cash').replace('bg-green-50 border-green-200 ', '')}`}>Exact cash received.</div>
-                      )}
+                      ) : null}
                     </div>
                     <div className="text-xs space-y-1 border-t pt-2">
                       <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{formatMoneyWhole(checkoutPreview.settlementPaidNowWhole)}</span></div>
@@ -1718,36 +1766,19 @@ export default function Sales() {
                 {!isReturnMode && selectedCustomer && (
                   <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
                     <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span>
+                      <span className="font-semibold text-muted-foreground uppercase">Customer has ₹{formatMoneyPrecise(availableStoreCredit)} store credit.</span>
                       <span className="font-bold">₹{formatMoneyPrecise(availableStoreCredit)}</span>
                     </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <Button size="sm" variant={storeCreditMode === 'none' ? 'default' : 'outline'} onClick={() => { setStoreCreditMode('none'); setCustomStoreCreditUse(''); }}>No Use</Button>
-                      <Button size="sm" variant={storeCreditMode === 'full' ? 'default' : 'outline'} onClick={() => { setStoreCreditMode('full'); setCustomStoreCreditUse(''); }} disabled={maxApplicableStoreCredit <= 0}>Use Full</Button>
-                      <Button size="sm" variant={storeCreditMode === 'custom' ? 'default' : 'outline'} onClick={() => setStoreCreditMode('custom')} disabled={maxApplicableStoreCredit <= 0}>Custom</Button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button size="sm" variant={useStoreCreditApplied ? 'default' : 'outline'} disabled={Math.min(availableStoreCredit, originalInvoiceTotal) <= 0} onClick={() => setUseStoreCreditApplied(v => !v)}>
+                        {useStoreCreditApplied ? 'Remove Store Credit' : `Use ₹${formatMoneyPrecise(Math.min(availableStoreCredit, originalInvoiceTotal))} Store Credit`}
+                      </Button>
                     </div>
-                    {storeCreditMode === 'custom' && (
-                      <div className="space-y-1">
-                        <Input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={customStoreCreditUse}
-                          onChange={(e) => {
-                            const raw = Math.max(0, Number(e.target.value || 0));
-                            const clamped = Math.min(raw, maxApplicableStoreCredit);
-                            setCustomStoreCreditUse(Number.isFinite(clamped) ? clamped.toString() : '');
-                          }}
-                          placeholder="Enter amount"
-                        />
-                        <p className="text-[11px] text-muted-foreground">Max usable: ₹{formatMoneyPrecise(maxApplicableStoreCredit)} (auto-applied)</p>
-                      </div>
-                    )}
                     <div className="text-xs space-y-1 border-t pt-2">
-                      <div className="flex justify-between"><span>Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+                      <div className="flex justify-between"><span>Original Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
                       <div className="flex justify-between"><span>Store Credit Used</span><span>-₹{formatMoneyPrecise(storeCreditUsed)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
-                      <div className="flex justify-between"><span>Cash Paid</span><span>₹{formatMoneyWhole(cashPaidValue)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Total Amount</span><span>₹{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
+                      <div className="flex justify-between"><span>Total Amount Input</span><span>₹{formatMoneyWhole(cashPaidValue)}</span></div>
                       <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(onlinePaidValue)}</span></div>
                       <div className={`flex justify-between ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}><span>Credit Due to Create</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
                     </div>

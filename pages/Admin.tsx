@@ -91,7 +91,15 @@ export default function Admin() {
   const [supplierPayableManuallyEdited, setSupplierPayableManuallyEdited] = useState(false);
 
   const [showSupplierPartyModal, setShowSupplierPartyModal] = useState(false);
+  const [supplierPartyPickerContext, setSupplierPartyPickerContext] = useState<'product' | 'purchase'>('product');
   const [supplierPartySearch, setSupplierPartySearch] = useState('');
+  const [showAddSupplierPartyModal, setShowAddSupplierPartyModal] = useState(false);
+  const [newSupplierPartyName, setNewSupplierPartyName] = useState('');
+  const [newSupplierPartyPhone, setNewSupplierPartyPhone] = useState('');
+  const [newSupplierPartyGst, setNewSupplierPartyGst] = useState('');
+  const [newSupplierPartyLocation, setNewSupplierPartyLocation] = useState('');
+  const [newSupplierPartyContactPerson, setNewSupplierPartyContactPerson] = useState('');
+  const [newSupplierPartyNotes, setNewSupplierPartyNotes] = useState('');
   const [showAddCategoryInline, setShowAddCategoryInline] = useState(false);
   const [newInlineCategory, setNewInlineCategory] = useState('');
 
@@ -601,6 +609,25 @@ export default function Admin() {
     }
   }, [purchasePaymentMethod, purchasePaidAmount]);
 
+  const purchaseTotalCost = useMemo(() => {
+    const qty = Number(purchaseQty);
+    const unitPrice = Number(purchasePrice);
+    if (!Number.isFinite(qty) || !Number.isFinite(unitPrice)) return 0;
+    return Math.max(0, Number((qty * unitPrice).toFixed(2)));
+  }, [purchaseQty, purchasePrice]);
+
+  const purchaseEffectivePaidAmount = useMemo(() => {
+    if (purchasePaymentMethod === 'credit') return 0;
+    const paid = Number(purchasePaidAmount);
+    if (!Number.isFinite(paid)) return 0;
+    return Math.max(0, Math.min(purchaseTotalCost, paid));
+  }, [purchasePaidAmount, purchasePaymentMethod, purchaseTotalCost]);
+
+  const purchaseRemainingDue = useMemo(
+    () => Math.max(0, Number((purchaseTotalCost - purchaseEffectivePaidAmount).toFixed(2))),
+    [purchaseTotalCost, purchaseEffectivePaidAmount]
+  );
+
   useEffect(() => {
     if (editingProduct) return;
     const stock = toNonNegativeNumber(formData.stock);
@@ -638,19 +665,31 @@ export default function Admin() {
     const reference = purchaseReference.trim() || undefined;
     const notes = purchaseNotes.trim() || undefined;
     const partyName = purchasePartyName.trim();
-    const totalAmount = Number((qty * unitPrice).toFixed(2));
+    const totalAmount = purchaseTotalCost;
     const paidAmountRaw = Math.max(0, Number(purchasePaidAmount) || 0);
     const paidAmount = purchasePaymentMethod === 'credit' ? 0 : paidAmountRaw;
     if (!partyName) {
       alert('Supplier/party name is required.');
       return;
     }
+    if (!Number.isFinite(totalAmount)) {
+      alert('Total cost is invalid.');
+      return;
+    }
+    if (!purchasePaymentMethod && totalAmount > 0) {
+      alert('Payment method is required.');
+      return;
+    }
     if (paidAmount > totalAmount) {
       alert('Paid amount cannot exceed total purchase amount.');
       return;
     }
-    if (paidAmount > 0 && !purchasePaymentMethod) {
-      alert('Payment method is required when paid amount is greater than zero.');
+    if (paidAmount < 0 || !Number.isFinite(paidAmount)) {
+      alert('Paid amount must be a valid non-negative number.');
+      return;
+    }
+    if (purchasePaymentMethod === 'credit' && paidAmountRaw > 0) {
+      alert('Credit purchase requires paid amount = 0.');
       return;
     }
 
@@ -804,6 +843,35 @@ export default function Admin() {
       const updated = addCategory(newCategoryName.trim());
       setCategories(updated);
       setNewCategoryName('');
+  };
+
+  const handleCreateSupplierParty = async () => {
+    const name = newSupplierPartyName.trim();
+    if (!name) return setError('Party name is required.');
+    const existing = getPurchaseParties().find((p) => p.name.trim().toLowerCase() === name.toLowerCase());
+    const party = existing || await createPurchaseParty({
+      name,
+      phone: newSupplierPartyPhone.trim() || undefined,
+      gst: newSupplierPartyGst.trim() || undefined,
+      location: newSupplierPartyLocation.trim() || undefined,
+      contactPerson: newSupplierPartyContactPerson.trim() || undefined,
+      notes: newSupplierPartyNotes.trim() || undefined,
+    });
+    refreshData();
+    if (supplierPartyPickerContext === 'purchase') {
+      setPurchasePartyName(party.name);
+      setSelectedPurchasePartyId(party.id);
+    } else {
+      setFormData((prev: any) => ({ ...prev, supplierName: party.name, supplierPartyId: party.id }));
+    }
+    setShowAddSupplierPartyModal(false);
+    setShowSupplierPartyModal(false);
+    setNewSupplierPartyName('');
+    setNewSupplierPartyPhone('');
+    setNewSupplierPartyGst('');
+    setNewSupplierPartyLocation('');
+    setNewSupplierPartyContactPerson('');
+    setNewSupplierPartyNotes('');
   };
 
   const handleDeleteCategory = (cat: string) => {
@@ -1736,9 +1804,9 @@ export default function Admin() {
                           const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
                           setFormData({ ...formData, supplierName: value, supplierPartyId: matched?.id || '' });
                         }} placeholder="Select or type supplier name" />
-                        <div className="rounded-md border bg-white mt-1 max-h-36 overflow-auto">
-                          {purchaseParties.filter((party) => party.name.toLowerCase().includes(String(formData.supplierName || '').toLowerCase())).slice(0,4).map((party) => <button type="button" key={party.id} className="w-full text-left px-3 py-2 text-sm hover:bg-muted" onClick={() => setFormData({ ...formData, supplierName: party.name, supplierPartyId: party.id })}>{party.name}</button>)}
-                          {!!purchaseParties.length && <button type="button" className="w-full text-left px-3 py-2 text-sm text-primary border-t" onClick={() => setShowSupplierPartyModal(true)}>Show more… <ChevronRight className="inline w-3 h-3" /></button>}
+                        <div className="mt-2 flex items-center gap-2">
+                          <Button type="button" variant="outline" size="sm" onClick={() => { setSupplierPartyPickerContext('product'); setShowSupplierPartyModal(true); }}>See All Parties</Button>
+                          <Button type="button" variant="outline" size="sm" onClick={() => { setSupplierPartyPickerContext('product'); setShowAddSupplierPartyModal(true); }}>+ Add Party</Button>
                         </div>
                       </div>
                       <div className="space-y-2"><Label>Total Payable</Label><Input type="number" min="0" value={formData.supplierTotalPayable ?? ''} onChange={e => { setSupplierPayableManuallyEdited(true); setFormData({ ...formData, supplierTotalPayable: e.target.value }); }} placeholder="0" /><p className="text-[10px] text-muted-foreground">Auto calculated from quantity × purchase price. You can edit it.</p></div>
@@ -1775,9 +1843,33 @@ export default function Admin() {
           <Card className="w-full max-w-xl max-h-[80vh] overflow-hidden">
             <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Select Party</CardTitle><Button variant="ghost" size="sm" onClick={() => setShowSupplierPartyModal(false)}><X className="w-4 h-4" /></Button></CardHeader>
             <CardContent className="space-y-3">
-              <Input value={supplierPartySearch} onChange={e => setSupplierPartySearch(e.target.value)} placeholder="Search party" />
+              <Input value={supplierPartySearch} onChange={e => setSupplierPartySearch(e.target.value)} placeholder="Search party by name / phone / GST" />
               <div className="max-h-[50vh] overflow-y-auto border rounded-md">
-                {purchaseParties.filter(p => p.name.toLowerCase().includes(supplierPartySearch.toLowerCase())).map(p => <button type="button" key={p.id} className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-muted" onClick={() => { setFormData({ ...formData, supplierName: p.name, supplierPartyId: p.id }); setShowSupplierPartyModal(false); }}>{p.name}<div className="text-xs text-muted-foreground">{p.id}</div></button>)}
+                {getPurchaseParties().filter(p => [p.name, p.phone || '', p.gst || ''].join(' ').toLowerCase().includes(supplierPartySearch.toLowerCase())).map(p => <button type="button" key={p.id} className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-muted" onClick={() => { if (supplierPartyPickerContext === 'purchase') { setPurchasePartyName(p.name); setSelectedPurchasePartyId(p.id); } else { setFormData({ ...formData, supplierName: p.name, supplierPartyId: p.id }); } setShowSupplierPartyModal(false); }}>{p.name}<div className="text-xs text-muted-foreground">{p.phone || 'No phone'} {p.gst ? `• GST ${p.gst}` : ''}</div></button>)}
+                {!getPurchaseParties().filter(p => [p.name, p.phone || '', p.gst || ''].join(' ').toLowerCase().includes(supplierPartySearch.toLowerCase())).length && (
+                  <div className="p-4 text-sm text-muted-foreground">No parties found. <button type="button" className="text-primary" onClick={() => { setShowSupplierPartyModal(false); setShowAddSupplierPartyModal(true); }}>Add Party</button></div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      {showAddSupplierPartyModal && (
+        <div className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Add Party</CardTitle><Button variant="ghost" size="sm" onClick={() => setShowAddSupplierPartyModal(false)}><X className="w-4 h-4" /></Button></CardHeader>
+            <CardContent className="space-y-3">
+              <div className="space-y-2"><Label>Party Name *</Label><Input value={newSupplierPartyName} onChange={e => setNewSupplierPartyName(e.target.value)} /></div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-2"><Label>Phone</Label><Input value={newSupplierPartyPhone} onChange={e => setNewSupplierPartyPhone(e.target.value)} /></div>
+                <div className="space-y-2"><Label>GST</Label><Input value={newSupplierPartyGst} onChange={e => setNewSupplierPartyGst(e.target.value)} /></div>
+              </div>
+              <div className="space-y-2"><Label>Location</Label><Input value={newSupplierPartyLocation} onChange={e => setNewSupplierPartyLocation(e.target.value)} /></div>
+              <div className="space-y-2"><Label>Contact Person</Label><Input value={newSupplierPartyContactPerson} onChange={e => setNewSupplierPartyContactPerson(e.target.value)} /></div>
+              <div className="space-y-2"><Label>Notes</Label><Input value={newSupplierPartyNotes} onChange={e => setNewSupplierPartyNotes(e.target.value)} /></div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setShowAddSupplierPartyModal(false)}>Cancel</Button>
+                <Button onClick={handleCreateSupplierParty}>Save Party</Button>
               </div>
             </CardContent>
           </Card>
@@ -1838,8 +1930,8 @@ export default function Admin() {
                   <div className="space-y-1">
                     <Label>Supplier / Party Name</Label>
                     <Input
-                      list="purchase-party-suggestions"
                       value={purchasePartyName}
+                      placeholder="Select or type supplier name"
                       onChange={(e) => {
                         const value = e.target.value;
                         setPurchasePartyName(value);
@@ -1847,19 +1939,18 @@ export default function Admin() {
                         setSelectedPurchasePartyId(matched?.id || '');
                       }}
                     />
-                    <datalist id="purchase-party-suggestions">
-                      {purchaseParties
-                        .filter((party) => party.name.toLowerCase().includes(purchasePartyName.toLowerCase()))
-                        .slice(0, 20)
-                        .map((party) => <option key={party.id} value={party.name} />)}
-                    </datalist>
+                    <div className="mt-2 flex items-center gap-2">
+                      <Button type="button" variant="outline" size="sm" onClick={() => { setSupplierPartyPickerContext('purchase'); setShowSupplierPartyModal(true); }}>See All Parties</Button>
+                      <Button type="button" variant="outline" size="sm" onClick={() => { setSupplierPartyPickerContext('purchase'); setShowAddSupplierPartyModal(true); }}>+ Add Party</Button>
+                    </div>
                   </div>
                   <div><Label>Reference (optional)</Label><Input value={purchaseReference} onChange={(e) => setPurchaseReference(e.target.value)} /></div>
                   <div><Label>Notes (optional)</Label><textarea value={purchaseNotes} onChange={(e) => setPurchaseNotes(e.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" rows={2} /></div>
                 </div>
                 <div className="rounded-lg border p-3 space-y-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment Details</div>
-                  <div><Label>Amount Paid Now</Label><Input type="number" value={purchasePaidAmount} onChange={(e) => setPurchasePaidAmount(e.target.value)} disabled={purchasePaymentMethod === 'credit'} /></div>
+                  <div><Label>Total Cost</Label><Input value={purchaseTotalCost.toFixed(2)} readOnly className="bg-muted/30 font-medium" /></div>
+                  <div><Label>Amount Paid Now</Label><Input type="number" min="0" max={purchaseTotalCost} value={purchasePaymentMethod === 'credit' ? '0' : purchasePaidAmount} onChange={(e) => setPurchasePaidAmount(e.target.value)} disabled={purchasePaymentMethod === 'credit'} /></div>
                   <div>
                     <Label>Payment Method</Label>
                     <select className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm" value={purchasePaymentMethod} onChange={(e) => setPurchasePaymentMethod(e.target.value as 'cash' | 'online' | 'credit')}>
@@ -1871,9 +1962,9 @@ export default function Admin() {
                   {purchasePaymentMethod === 'credit' && <p className="text-xs text-muted-foreground">Credit purchase creates payable due and does not affect cash.</p>}
                   <div><Label>Payment Note (optional)</Label><Input value={purchasePaymentNote} onChange={(e) => setPurchasePaymentNote(e.target.value)} /></div>
                   <div className="grid grid-cols-3 gap-2 text-xs pt-2">
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">₹{(toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)).toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Amount Paid</div><div className="font-semibold">₹{toNonNegativeNumber(purchasePaidAmount).toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Remaining Due</div><div className="font-semibold">₹{Math.max(0, (toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)) - toNonNegativeNumber(purchasePaidAmount)).toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">₹{purchaseTotalCost.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Amount Paid</div><div className="font-semibold">₹{purchaseEffectivePaidAmount.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Remaining Due</div><div className="font-semibold">₹{purchaseRemainingDue.toFixed(2)}</div></div>
                   </div>
                 </div>
               </div>
@@ -1884,7 +1975,7 @@ export default function Admin() {
               <p className="text-xs text-muted-foreground">Click Average Price to auto-fill, or edit manually before applying.</p>
               <div className="sticky bottom-0 mt-2 flex flex-col gap-2 rounded-lg border bg-background/95 p-3 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
                 <div className="text-sm">
-                  <span className="font-semibold">Total:</span> ₹{(toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)).toFixed(2)} · <span className="font-semibold">Paid:</span> ₹{toNonNegativeNumber(purchasePaidAmount).toFixed(2)} · <span className="font-semibold">Due:</span> ₹{Math.max(0, (toNonNegativeNumber(purchaseQty) * toNonNegativeNumber(purchasePrice)) - toNonNegativeNumber(purchasePaidAmount)).toFixed(2)}
+                  <span className="font-semibold">Total:</span> ₹{purchaseTotalCost.toFixed(2)} · <span className="font-semibold">Paid:</span> ₹{purchaseEffectivePaidAmount.toFixed(2)} · <span className="font-semibold">Due:</span> ₹{purchaseRemainingDue.toFixed(2)}
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={() => setPurchaseTarget(null)}>Cancel</Button>
@@ -1941,6 +2032,7 @@ export default function Admin() {
             groupByCategory: opts.groupByCategory,
             showInStockPrices: opts.showInStockPrices,
             showOutOfStockPrices: opts.showOutOfStockPrices,
+            firstPageImage: loadData().profile?.customerCatalogFirstPage,
           });
           setIsCatalogOptionsOpen(false);
         }}

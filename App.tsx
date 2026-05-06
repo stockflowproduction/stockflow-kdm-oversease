@@ -8,16 +8,16 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { emitFinanceSnapshot } from './utils/financeDebugLogger';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3 } from 'lucide-react';
-import { Button, Card, CardContent, CardHeader, CardTitle } from './components/ui';
+import { Button } from './components/ui';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 import { NewUiPreviewBanner } from './components/NewUiPreviewBanner';
+import Settings from './pages/Settings';
 
 const Admin = lazy(() => import('./pages/Admin'));
 const Sales = lazy(() => import('./pages/Sales'));
 const Reports = lazy(() => import('./pages/Reports'));
 const Transactions = lazy(() => import('./pages/Transactions'));
 const Customers = lazy(() => import('./pages/Customers'));
-const Settings = lazy(() => import('./pages/Settings'));
 const Finance = lazy(() => import('./pages/Finance'));
 const Financial = lazy(() => import('./pages/Financial'));
 const FreightBooking = lazy(() => import('./pages/FreightBooking'));
@@ -105,6 +105,7 @@ export default function App() {
 
     return () => unsubscribe();
   }, []);
+
 
   useEffect(() => {
       if (authStatus === 'authenticated') {
