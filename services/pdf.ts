@@ -1,7 +1,7 @@
 
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Transaction, Customer, Product } from '../types';
+import { Transaction, Customer, Product, StoreProfile } from '../types';
 import { loadData } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from './numberFormat';
@@ -43,6 +43,174 @@ const getPdfImageSource = async (image: string | undefined): Promise<string | nu
     } catch {
         return null;
     }
+};
+
+type AccountStatementRow = {
+  date: string;
+  description: string;
+  reference: string;
+  debit: number;
+  credit: number;
+  balance: number;
+};
+
+export const generateAccountStatementPDF = async ({
+  profile,
+  entityLabel,
+  entityName,
+  entityMeta,
+  rows,
+  fileName,
+}: {
+  profile: StoreProfile;
+  entityLabel: string;
+  entityName: string;
+  entityMeta: string[];
+  rows: AccountStatementRow[];
+  fileName: string;
+}) => {
+  const doc = new jsPDF({ format: 'a4', unit: 'mm' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 12;
+  const today = new Date();
+  const sortedAsc = [...rows].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const displayRows = [...rows];
+  const openingBalance = sortedAsc.length ? sortedAsc[0].balance - sortedAsc[0].debit + sortedAsc[0].credit : 0;
+  const totalDebit = rows.reduce((sum, row) => sum + (Number(row.debit) || 0), 0);
+  const totalCredit = rows.reduce((sum, row) => sum + (Number(row.credit) || 0), 0);
+  const closingBalance = sortedAsc.length ? sortedAsc[sortedAsc.length - 1].balance : 0;
+  const periodStart = sortedAsc.length ? new Date(sortedAsc[0].date) : today;
+  const periodEnd = sortedAsc.length ? new Date(sortedAsc[sortedAsc.length - 1].date) : today;
+  const formatDate = (d: Date) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const formatINR = (n: number) => `INR ${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const logoData = await getPdfImageSource(profile.logoImage);
+  const logoX = margin;
+  const logoY = 10;
+  const logoBoxW = 24;
+  const logoBoxH = 16;
+  if (logoData) {
+    try {
+      const props = (doc as any).getImageProperties(logoData);
+      const ratio = (props?.width || 1) / (props?.height || 1);
+      let drawW = logoBoxW;
+      let drawH = drawW / ratio;
+      if (drawH > logoBoxH) { drawH = logoBoxH; drawW = drawH * ratio; }
+      doc.addImage(logoData, props?.fileType || 'PNG', logoX, logoY, drawW, drawH, undefined, 'FAST');
+    } catch {}
+  }
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.text(profile.storeName || 'StockFlow', logoData ? 40 : margin, 15);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9.5);
+  const headerLines = [
+    profile.ownerName,
+    profile.addressLine1,
+    profile.addressLine2,
+    profile.phone ? `Phone: ${profile.phone}` : '',
+    profile.email ? `Email: ${profile.email}` : '',
+    profile.gstin ? `GSTIN: ${profile.gstin}` : '',
+  ].filter(Boolean) as string[];
+  const leftStartY = 20;
+  const leftMaxWidth = 106;
+  const wrappedHeaderLines = headerLines.flatMap((line) => doc.splitTextToSize(String(line), leftMaxWidth) as string[]);
+  if (wrappedHeaderLines.length) doc.text(wrappedHeaderLines, logoData ? 40 : margin, leftStartY, { lineHeightFactor: 1.2 });
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(17);
+  doc.setTextColor(30, 64, 175);
+  doc.text('ACCOUNT STATEMENT', pageWidth - margin, 14, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(55, 65, 81);
+  const rightStartY = 21;
+  doc.text(`Statement Date: ${formatDate(today)}`, pageWidth - margin, rightStartY, { align: 'right' });
+  doc.text(`Statement Period: ${formatDate(periodStart)} to ${formatDate(periodEnd)}`, pageWidth - margin, rightStartY + 5, { align: 'right' });
+  const leftBottomY = leftStartY + (wrappedHeaderLines.length ? ((wrappedHeaderLines.length - 1) * 4.2) : 0);
+  const rightBottomY = rightStartY + 5;
+  const headerBottomY = Math.max(34, leftBottomY + 3, rightBottomY + 5);
+  doc.setDrawColor(214, 220, 229); doc.line(margin, headerBottomY, pageWidth - margin, headerBottomY);
+  doc.setFillColor(248, 250, 252);
+  const entityStartY = headerBottomY + 4;
+  doc.roundedRect(margin, entityStartY, pageWidth - (margin * 2), 22, 1.8, 1.8, 'F');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(37, 99, 235); doc.text(entityLabel, margin + 3, entityStartY + 6);
+  doc.setFont('helvetica', 'bold'); doc.setTextColor(15, 23, 42); doc.text(entityName, margin + 3, entityStartY + 11.5);
+  const cleanMeta = entityMeta.filter(Boolean);
+  if (cleanMeta.length) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(71, 85, 105);
+    const wrappedMeta = cleanMeta.flatMap((line) => doc.splitTextToSize(String(line), pageWidth - (margin * 2) - 6) as string[]);
+    doc.text(wrappedMeta, margin + 3, entityStartY + 16, { lineHeightFactor: 1.2 });
+  }
+
+  const summaryY = entityStartY + 26;
+  const gap = 2.5;
+  const boxW = (pageWidth - (margin * 2) - (gap * 3)) / 4;
+  const summary = [
+    ['Opening Balance', formatINR(openingBalance)],
+    ['Total Debit', formatINR(totalDebit)],
+    ['Total Credit', formatINR(totalCredit)],
+    ['Closing Balance', formatINR(closingBalance)],
+  ];
+  summary.forEach(([label, value], idx) => {
+    const x = margin + idx * (boxW + gap);
+    doc.setDrawColor(226, 232, 240);
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(x, summaryY, boxW, 17, 1.5, 1.5, 'FD');
+    doc.setFontSize(8.5); doc.setTextColor(100); doc.text(label, x + 2.2, summaryY + 5.4);
+    doc.setFontSize(10.5);
+    const color = idx === 1 ? [185, 28, 28] : idx === 2 ? [21, 128, 61] : idx === 3 ? [29, 78, 216] : [30, 41, 59];
+    doc.setTextColor(color[0], color[1], color[2]);
+    doc.text(value, x + 2.2, summaryY + 12);
+  });
+
+  autoTable(doc, {
+    startY: summaryY + 22,
+    head: [['#', 'Date', 'Description', 'Reference', 'Debit', 'Credit', 'Balance']],
+    body: displayRows.length ? displayRows.map((row, idx) => [
+      String(idx + 1),
+      formatDate(new Date(row.date)),
+      row.description,
+      row.reference,
+      row.debit ? formatINR(row.debit) : '-',
+      row.credit ? formatINR(row.credit) : '-',
+      formatINR(row.balance),
+    ]) : [['', '', 'No ledger entries available for selected period.', '', '-', '-', formatINR(closingBalance)]],
+    theme: 'grid',
+    margin: { left: margin, right: margin, bottom: 30 },
+    headStyles: { fillColor: [236, 242, 250], textColor: [30, 41, 59], fontStyle: 'bold', halign: 'center' },
+    styles: { fontSize: 8.6, cellPadding: { top: 2.2, right: 2, bottom: 2.2, left: 2 }, overflow: 'linebreak', textColor: [51, 65, 85], lineColor: [226, 232, 240], lineWidth: 0.1 },
+    columnStyles: { 0: { cellWidth: 8, halign: 'center' }, 1: { cellWidth: 19 }, 2: { cellWidth: 64 }, 3: { cellWidth: 21 }, 4: { halign: 'right', cellWidth: 22 }, 5: { halign: 'right', cellWidth: 22 }, 6: { halign: 'right', cellWidth: 22 } },
+    didParseCell: (data) => {
+      if (data.section === 'body' && data.column.index === 4 && data.cell.raw !== '-') data.cell.styles.textColor = [185, 28, 28];
+      if (data.section === 'body' && data.column.index === 5 && data.cell.raw !== '-') data.cell.styles.textColor = [21, 128, 61];
+      if (data.section === 'body' && [4, 5, 6].includes(data.column.index)) data.cell.styles.overflow = 'visible';
+    },
+    didDrawCell: (data) => {
+      if (data.section === 'body' && data.column.index === 2 && typeof data.cell.raw === 'string' && data.cell.raw.length > 90) {
+        data.cell.styles.fontSize = 8;
+      }
+    },
+    didDrawPage: () => {
+      doc.setFontSize(8);
+      doc.setTextColor(120);
+      doc.text('This is a system generated statement and does not require a signature.', margin, pageHeight - 8);
+      const pages = doc.getNumberOfPages();
+      const pageNo = doc.getCurrentPageInfo().pageNumber;
+      doc.text(`Page ${pageNo} of ${pages}`, pageWidth - margin, pageHeight - 8, { align: 'right' });
+    },
+  });
+  const finalY = (doc as any).lastAutoTable?.finalY || (summaryY + 70);
+  const summaryFooterY = Math.min(finalY + 6, pageHeight - 24);
+  doc.setFillColor(248, 250, 252);
+  doc.roundedRect(margin, summaryFooterY, pageWidth - (margin * 2), 12, 1.5, 1.5, 'F');
+  doc.setFontSize(9);
+  doc.setTextColor(51, 65, 85);
+  doc.text('ACCOUNT SUMMARY', margin + 2, summaryFooterY + 4.5);
+  doc.text(`Opening: ${formatINR(openingBalance)}   Debit: ${formatINR(totalDebit)}   Credit: ${formatINR(totalCredit)}   Closing: ${formatINR(closingBalance)}`, margin + 2, summaryFooterY + 9);
+  doc.save(fileName);
 };
 
 export const generateProductCatalogPDF = async (
@@ -293,9 +461,9 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     // --- Header Section ---
     const logoData = profile.logoImage && profile.logoImage.startsWith('data:image') ? profile.logoImage : '';
     const logoX = 14;
-    const logoY = 10;
-    const logoBoxW = 26;
-    const logoBoxH = 16;
+    const logoBoxW = 40.56; // +30% vs previous
+    const logoBoxH = 24.96; // +30% vs previous
+    const logoY = 4.24; // keep logo bottom aligned so header height stays stable
     if (logoData) {
       try {
         const props = (doc as any).getImageProperties(logoData);
@@ -307,9 +475,11 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
       } catch {}
     }
 
-    doc.setFontSize(14);
+    const headerLeftX = 14;
+    const headerCenterX = pageWidth / 2;
+    doc.setFontSize(15);
     doc.setFont("helvetica", "bold");
-    doc.text(profile.storeName || "StockFlow Store", pageWidth / 2, 15, { align: "center" });
+    doc.text(profile.storeName || "StockFlow Store", headerCenterX, 14, { align: "center" });
     
     doc.setFontSize(8);
     doc.setFont("helvetica", "normal");
@@ -319,7 +489,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     const cleanEmail = sanitizeHeaderText(profile.email);
     const cleanGstin = sanitizeHeaderText(profile.gstin);
     const cleanState = sanitizeHeaderText(profile.state);
-    const headerLines = [
+    const headerLinesRaw = [
         cleanAddress1,
         cleanAddress2,
         cleanPhone ? `Phone no.: ${cleanPhone}` : '',
@@ -327,39 +497,46 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
         cleanGstin ? `GSTIN: ${cleanGstin}` : '',
         cleanState ? `State: ${cleanState}` : ''
     ].filter(Boolean);
-    doc.text(headerLines, logoData ? 44 : 14, 22);
+    const headerLines = headerLinesRaw.flatMap(line => doc.splitTextToSize(line, 108) as string[]);
+    const headerLinesStartY = 20;
+    if (headerLines.length) doc.text(headerLines, headerCenterX, headerLinesStartY, { align: "center", lineHeightFactor: 1.2 });
+    const headerBottomY = Math.max(headerLinesStartY + (Math.max(0, headerLines.length - 1) * 4.2), 20) + 6;
+    doc.setDrawColor(214, 220, 229);
+    doc.line(headerLeftX, headerBottomY, pageWidth - headerLeftX, headerBottomY);
 
     // --- Title ---
     doc.setFontSize(16);
     doc.setFont("helvetica", "bold");
     doc.setTextColor(93, 58, 43); // Brown color from image
-    doc.text(transaction.type === 'return' ? "Return Invoice" : "Tax Invoice", pageWidth / 2, 45, { align: "center" });
+    const titleY = headerBottomY + 10;
+    doc.text(transaction.type === 'return' ? "Return Invoice" : "Tax Invoice", pageWidth / 2, titleY, { align: "center" });
     doc.setTextColor(0, 0, 0);
 
     // --- Bill To & Invoice Details ---
     doc.setFontSize(10);
-    doc.text("Bill To", 14, 55);
+    const billSectionY = titleY + 10;
+    doc.text("Bill To", 14, billSectionY);
     doc.setFontSize(9);
     doc.setFont("helvetica", "bold");
-    doc.text(transaction.customerName || "Walk-in Customer", 14, 62);
+    doc.text(transaction.customerName || "Walk-in Customer", 14, billSectionY + 7);
     doc.setFont("helvetica", "normal");
     const customerPhone = transaction.customerPhone || customers.find(c => c.id === transaction.customerId)?.phone || "Walk-in";
-    doc.text(`Contact No.: ${customerPhone}`, 14, 68);
-    const gstDetailsStartY = 74;
-    let tableStartY = 75;
+    doc.text(`Contact No.: ${customerPhone}`, 14, billSectionY + 13);
+    const gstDetailsStartY = billSectionY + 19;
+    let tableStartY = billSectionY + 20;
     if (transaction.gstApplied) {
       doc.text(`GST Name: ${transaction.gstName || '-'}`, 14, gstDetailsStartY);
       doc.text(`GST Number: ${transaction.gstNumber || '-'}`, 14, gstDetailsStartY + 6);
-      tableStartY = 87;
+      tableStartY = gstDetailsStartY + 13;
     }
 
     doc.setFontSize(10);
     doc.setFont("helvetica", "bold");
-    doc.text("Invoice Details", pageWidth - 14, 55, { align: "right" });
+    doc.text("Invoice Details", pageWidth - 14, billSectionY, { align: "right" });
     doc.setFontSize(9);
     doc.setFont("helvetica", "normal");
-    doc.text(`Invoice No.: IN-${transaction.id.slice(-4)}`, pageWidth - 14, 62, { align: "right" });
-    doc.text(`Date: ${new Date(transaction.date).toLocaleDateString()}`, pageWidth - 14, 68, { align: "right" });
+    doc.text(`Invoice No.: IN-${transaction.id.slice(-4)}`, pageWidth - 14, billSectionY + 7, { align: "right" });
+    doc.text(`Date: ${new Date(transaction.date).toLocaleDateString()}`, pageWidth - 14, billSectionY + 13, { align: "right" });
 
     // --- Items Table ---
     const tableData = transaction.items.map((item, idx) => [
@@ -385,7 +562,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
             3: { halign: 'center' },
             4: { halign: 'right' },
             5: { halign: 'right' },
-            6: { halign: 'right' }
+            6: { halign: 'right', cellWidth: 26 }
         }
     });
 
@@ -402,32 +579,36 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     doc.text(words, 14, finalY + 6);
 
     // Totals Grid
-    const totalsX = pageWidth - 14;
+    const rightMargin = 20;
+    const totalsX = pageWidth - rightMargin;
+    const totalsLabelX = totalsX - 48;
     let summaryY = finalY;
     doc.setFontSize(9);
-    doc.text("Sub Total", totalsX - 45, summaryY);
+    doc.text("Sub Total", totalsLabelX, summaryY);
     doc.text(`Rs. ${formatMoneyPrecise(transaction.subtotal || 0)}`, totalsX, summaryY, { align: "right" });
     
     summaryY += 6;
-    doc.text("Discount", totalsX - 45, summaryY);
+    doc.text("Discount", totalsLabelX, summaryY);
     doc.text(`Rs. ${formatMoneyPrecise(transaction.discount || 0)}`, totalsX, summaryY, { align: "right" });
     
     if (transaction.tax && transaction.tax > 0) {
         summaryY += 6;
-        doc.text(transaction.taxLabel || "Tax", totalsX - 45, summaryY);
+        doc.text(transaction.taxLabel || "Tax", totalsLabelX, summaryY);
         doc.text(`Rs. ${formatMoneyPrecise(transaction.tax)}`, totalsX, summaryY, { align: "right" });
     }
 
     summaryY += 6;
-    doc.text("Round off", totalsX - 45, summaryY);
+    doc.text("Round off", totalsLabelX, summaryY);
     doc.text(`${roundOff >= 0 ? "+" : "-"} Rs. ${formatMoneyPrecise(Math.abs(roundOff))}`, totalsX, summaryY, { align: "right" });
 
     summaryY += 5;
     doc.setFillColor(93, 58, 43);
-    doc.rect(totalsX - 50, summaryY, 50, 8, 'F');
+    const totalBarLeftX = totalsLabelX - 6;
+    const totalBarRightX = totalsX + 2;
+    doc.rect(totalBarLeftX, summaryY, totalBarRightX - totalBarLeftX, 8, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
-    doc.text("Total", totalsX - 45, summaryY + 5.5);
+    doc.text("Total", totalsLabelX, summaryY + 5.5);
     doc.text(`Rs. ${formatMoneyWhole(transaction.total)}`, totalsX, summaryY + 5.5, { align: "right" });
     doc.setTextColor(0, 0, 0);
 
@@ -440,23 +621,23 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
         ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? (receivedAmount - transaction.total))
         : 0;
 
-    doc.text("Received", totalsX - 45, summaryY);
+    doc.text("Received", totalsLabelX, summaryY);
     doc.text(`Rs. ${formatMoneyPrecise(receivedAmount)}`, totalsX, summaryY, { align: "right" });
     
     summaryY += 6;
-    doc.text(hasCashDetails ? "Change Returned" : "Balance", totalsX - 45, summaryY);
+    doc.text(hasCashDetails ? "Change Returned" : "Balance", totalsLabelX, summaryY);
     doc.text(`Rs. ${formatMoneyPrecise(changeAmount)}`, totalsX, summaryY, { align: "right" });
 
     const scUsed = Math.max(0, Number((transaction as any).storeCreditUsed || 0));
     const scAdded = Math.max(0, Number((transaction as any).storeCreditCreated || 0));
     if (scUsed > 0) {
       summaryY += 6;
-      doc.text("Store Credit Used", totalsX - 45, summaryY);
+      doc.text("Store Credit Used", totalsLabelX, summaryY);
       doc.text(`Rs. ${formatMoneyPrecise(scUsed)}`, totalsX, summaryY, { align: "right" });
     }
     if (scAdded > 0) {
       summaryY += 6;
-      doc.text("Store Credit Added", totalsX - 45, summaryY);
+      doc.text("Store Credit Added", totalsLabelX, summaryY);
       doc.text(`Rs. ${formatMoneyPrecise(scAdded)}`, totalsX, summaryY, { align: "right" });
     }
 
@@ -464,7 +645,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     if (youSaved > 0) {
         summaryY += 6;
         doc.setFont("helvetica", "bold");
-        doc.text("You Saved", totalsX - 45, summaryY);
+        doc.text("You Saved", totalsLabelX, summaryY);
         doc.text(`Rs. ${formatMoneyPrecise(youSaved)}`, totalsX, summaryY, { align: "right" });
     }
 

@@ -4,7 +4,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
 import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
-import { generateReceiptPDF } from '../services/pdf';
+import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -537,140 +537,34 @@ export default function Customers() {
       }
   };
 
-  const generateStatementPDF = () => {
+  const generateStatementPDF = async () => {
       if (!viewingCustomer) return;
-      const doc = new jsPDF();
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const { profile } = loadData();
-
-      // Header Banner
-      doc.setFillColor(15, 48, 87);
-      doc.rect(0, 0, pageWidth, 15, 'F');
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(14);
-      doc.setTextColor(255, 255, 255);
-      doc.text(profile.storeName?.toUpperCase() || "STOCKFLOW ERP", pageWidth / 2, 10, { align: "center" });
-
-      // Period Section
       const txRows = [...customerLedgerRows];
-      const startDate = txRows.length > 0 ? new Date(txRows[0].tx.date).toLocaleDateString() : "N/A";
-      const endDate = txRows.length > 0 ? new Date(txRows[txRows.length - 1].tx.date).toLocaleDateString() : new Date().toLocaleDateString();
-
-      doc.setDrawColor(15, 48, 87);
-      doc.setFillColor(211, 227, 245);
-      doc.rect(14, 20, 40, 10, 'F');
-      doc.rect(14, 20, 40, 10, 'D');
-      doc.setFontSize(10);
-      doc.setTextColor(15, 48, 87);
-      doc.text("Period", 34, 26, { align: "center" });
-
-      doc.setFillColor(255, 255, 255);
-      doc.rect(54, 20, pageWidth - 68, 10, 'F');
-      doc.rect(54, 20, pageWidth - 68, 10, 'D');
-      doc.setFontSize(10);
-      doc.setTextColor(0, 0, 0);
-      doc.text(`${startDate} To ${endDate}`, (54 + pageWidth - 14) / 2, 26, { align: "center" });
-
-      // Party Details
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "bold");
-      doc.text("Party Statement", 14, 40);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(9);
-      doc.text(`Party Name: ${viewingCustomer.name.toUpperCase()}`, 14, 46);
-      doc.text(`Contact: ${viewingCustomer.phone}`, 14, 51);
-      doc.text(`Email: ${profile.email || "-"}`, pageWidth - 14, 46, { align: "right" });
-      doc.text(`GSTIN: ${profile.gstin || "-"}`, pageWidth - 14, 51, { align: "right" });
-
-      // Ledger Logic (Correcting the running balance bug)
-      let totalSalesAmount = 0;
-      let totalPaymentsAmount = 0;
-      const bodyData = txRows.map((row) => {
-          if (row.tx.type === 'sale') totalSalesAmount += row.saleTotal;
-          if (row.tx.type === 'payment') totalPaymentsAmount += row.paymentAmount;
-          const statusLabel = row.netAfter >= 0 ? "Dr" : "Cr";
+      const profile = loadData().profile;
+      const rows = txRows
+        .map(row => {
+          let description = 'Ledger Entry';
+          if (row.tx.type === 'sale') description = 'Sale Invoice';
+          else if (row.tx.type === 'payment') description = 'Payment Received';
+          else if (row.tx.type === 'return') description = 'Sales Return';
           return {
-              date: new Date(row.tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }),
-              desc: row.statementDescription,
-              debit: row.debit > 0 ? `${formatMoneyPrecise(row.debit)}` : "",
-              credit: row.credit > 0 ? `${formatMoneyPrecise(row.credit)}` : "",
-              type: statusLabel,
-              balance: `${formatMoneyPrecise(Math.abs(row.netAfter))}`,
-              rawType: row.tx.type
+            date: row.tx.date,
+            description,
+            reference: row.tx.id.slice(-6),
+            debit: row.debit,
+            credit: row.credit,
+            balance: row.netAfter,
           };
+        })
+        .reverse();
+      await generateAccountStatementPDF({
+        profile,
+        entityLabel: 'BILLED TO',
+        entityName: viewingCustomer.name,
+        entityMeta: [viewingCustomer.phone || '', `Customer ID: ${viewingCustomer.id}`],
+        rows,
+        fileName: `Statement_${viewingCustomer.name.replace(/\s+/g, '_')}.pdf`,
       });
-
-      const tableRows = bodyData.map(d => [d.date, d.desc, d.debit, d.credit, d.type, d.balance]);
-      tableRows.unshift([startDate, "Opening Balance", "", "", "Dr", "0.00"]);
-
-      autoTable(doc, {
-          startY: 60,
-          head: [['Date', 'Description', 'Debit (Rs.)', 'Credit (Rs.)', 'Dr/CR', 'Balance (Rs.)']],
-          body: tableRows,
-          theme: 'grid',
-          headStyles: { 
-              fillColor: [247, 201, 172],
-              textColor: [0, 0, 0], 
-              fontSize: 9, 
-              fontStyle: 'bold',
-              halign: 'center'
-          },
-          styles: { 
-              fontSize: 8, 
-              cellPadding: 2.5, 
-              halign: 'center',
-              lineColor: [200, 200, 200]
-          },
-          columnStyles: {
-              0: { cellWidth: 20 },
-              1: { halign: 'left', cellWidth: 'auto' },
-              2: { halign: 'right', cellWidth: 28 }, 
-              3: { halign: 'right', cellWidth: 28 }, 
-              4: { cellWidth: 15 },
-              5: { halign: 'right', fontStyle: 'bold', cellWidth: 35 }
-          },
-          didParseCell: (data) => {
-              if (data.section === 'body' && data.row.index > 0) {
-                  const rowMeta = bodyData[data.row.index - 1];
-                  
-                  // Color Debit Column
-                  if (data.column.index === 2 && rowMeta.debit !== "") {
-                      data.cell.styles.textColor = [185, 28, 28]; // Customer due increased
-                  }
-                  
-                  // Color Credit Column
-                  if (data.column.index === 3 && rowMeta.credit !== "") {
-                      if (rowMeta.rawType === 'payment') {
-                          data.cell.styles.textColor = [217, 119, 6]; // Yellow (Payment towards dues)
-                      } else if (rowMeta.rawType === 'return') {
-                          data.cell.styles.textColor = [185, 28, 28]; // Red (Return)
-                      } else {
-                          // Automatic credit for cash sale
-                          data.cell.styles.textColor = [21, 128, 61]; // Green
-                      }
-                  }
-              }
-          }
-      });
-
-      // Summary Block
-      const finalY = (doc as any).lastAutoTable.finalY + 10;
-      doc.setFillColor(15, 48, 87);
-      doc.rect(pageWidth - 84, finalY, 70, 32, 'F');
-      doc.setTextColor(255, 255, 255);
-      doc.setFontSize(10);
-      doc.text("Statement Summary", pageWidth - 49, finalY + 7, { align: "center" });
-      
-      doc.setFontSize(8);
-      doc.text(`Total Sales: Rs. ${totalSalesAmount.toLocaleString()}`, pageWidth - 80, finalY + 15);
-      doc.text(`Total Payments: Rs. ${totalPaymentsAmount.toLocaleString()}`, pageWidth - 80, finalY + 20);
-      
-      doc.setFontSize(10);
-      doc.setFont("helvetica", "bold");
-      const finalNet = txRows.length ? txRows[txRows.length - 1].netAfter : 0;
-      doc.text(`Final Balance: ${finalNet >= 0 ? 'Dr' : 'Cr'} Rs. ${Math.abs(finalNet).toLocaleString()}`, pageWidth - 80, finalY + 27);
-
-      doc.save(`Statement_${viewingCustomer.name.replace(/\s+/g, '_')}.pdf`);
   };
 
   const generateAllCustomersPDF = () => {
@@ -688,7 +582,7 @@ export default function Customers() {
   const handleExport = (format: 'pdf' | 'excel') => {
       if (exportType === 'statement' && viewingCustomer) {
           if (format === 'pdf') {
-              generateStatementPDF();
+              void generateStatementPDF();
           } else {
               exportCustomerStatementToExcel(viewingCustomer, customerHistory);
           }

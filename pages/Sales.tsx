@@ -497,7 +497,9 @@ export default function Sales() {
               return prev;
             }
             didAdd = true;
-            return prev.map(item => item.id === product.id && (item.selectedVariant || NO_VARIANT) === (selectedVariant || NO_VARIANT) && (item.selectedColor || NO_COLOR) === (selectedColor || NO_COLOR) ? { ...item, quantity: newQty } : item);
+            const updatedItem = { ...existing, quantity: newQty };
+            const remaining = prev.filter(item => lineKey(item.id, item.selectedVariant, item.selectedColor) !== lineKey(product.id, selectedVariant, selectedColor));
+            return [updatedItem, ...remaining];
         }
         if (qty <= 0) return prev;
         const actualStock = getLineAvailableStock(product, selectedVariant, selectedColor);
@@ -507,7 +509,7 @@ export default function Sales() {
           return prev;
         }
         didAdd = true;
-        return [...prev, {
+        return [{
           ...product,
           buyPrice: getResolvedBuyPriceForCombination(product, selectedVariant, selectedColor),
           sellPrice: getResolvedSellPriceForCombination(product, selectedVariant, selectedColor),
@@ -516,7 +518,7 @@ export default function Sales() {
           discountAmount: 0,
           selectedVariant: selectedVariant || NO_VARIANT,
           selectedColor: selectedColor || NO_COLOR
-        }];
+        }, ...prev];
     });
     return didAdd;
   };
@@ -925,6 +927,22 @@ export default function Sales() {
     setStoreOverpaymentAsCredit(false);
   }, [selectedCustomer?.id]);
   useEffect(() => {
+    if (!isCustomerModalOpen || isReturnMode) return;
+    const recalculated = buildCheckoutMoney({
+      cartItems: cart,
+      taxRate: selectedTax.value,
+      returnMode: false,
+      storeCreditRequested: appliedStoreCredit,
+      availableStoreCreditAmount: availableStoreCredit,
+      hasCustomer: Boolean(selectedCustomer),
+      cashInput: '0',
+      onlineInput: '0',
+    });
+    const nextTotalAmount = Math.max(0, Number(recalculated.remainingPayableWhole || 0)).toString();
+    setCashPaidInput(nextTotalAmount);
+    if (!cashReceivedDirty) setCashReceivedInput(nextTotalAmount);
+  }, [isCustomerModalOpen, isReturnMode, cart, selectedTax.value, appliedStoreCredit, availableStoreCredit, selectedCustomer, cashReceivedDirty]);
+  useEffect(() => {
     if (rawOverpaymentValue <= 0 && storeOverpaymentAsCredit) setStoreOverpaymentAsCredit(false);
   }, [rawOverpaymentValue, storeOverpaymentAsCredit]);
 
@@ -933,6 +951,14 @@ export default function Sales() {
     const searchMatch = p.name.toLowerCase().includes(productSearch.toLowerCase()) || p.barcode.toLowerCase().includes(productSearch.toLowerCase()) || (p.variants || []).some(v => v.toLowerCase().includes(productSearch.toLowerCase())) || (p.colors || []).some(c => c.toLowerCase().includes(productSearch.toLowerCase()));
     const categoryMatch = selectedCategory === 'All' || (p.category || 'Uncategorized') === selectedCategory;
     return searchMatch && categoryMatch;
+  }).sort((a, b) => {
+    const categoryA = (a.category || 'Uncategorized').trim().toLowerCase();
+    const categoryB = (b.category || 'Uncategorized').trim().toLowerCase();
+    const categoryCompare = categoryA.localeCompare(categoryB, undefined, { sensitivity: 'base' });
+    if (categoryCompare !== 0) return categoryCompare;
+    const nameA = (a.name || '').trim().toLowerCase();
+    const nameB = (b.name || '').trim().toLowerCase();
+    return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
   });
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
   const productTotalPages = Math.max(1, Math.ceil(filteredProducts.length / POS_PRODUCTS_PER_PAGE));
@@ -1637,12 +1663,7 @@ export default function Sales() {
                     <p className="text-xs font-bold uppercase text-muted-foreground">Settlement Split</p>
                     <div className="space-y-1.5">
                       <Label className="text-[11px] font-bold uppercase text-muted-foreground">Total Amount</Label>
-                      <Input type="number" min="0" step="0.01" placeholder="0.00" value={cashPaidInput} onChange={(e) => {
-                        const nextValue = e.target.value;
-                        setCashPaidInput(nextValue);
-                        if (!cashReceivedDirty) setCashReceivedInput(nextValue);
-                        setCheckoutError(null);
-                      }} />
+                      <Input type="number" min="0" step="0.01" placeholder="0.00" value={cashPaidInput} readOnly className="bg-muted/40 font-semibold cursor-not-allowed" />
                     </div>
                     <div className="space-y-1.5">
                       <Label className="text-[11px] font-bold uppercase text-muted-foreground">Cash Received</Label>

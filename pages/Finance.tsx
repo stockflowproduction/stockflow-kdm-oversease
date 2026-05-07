@@ -549,6 +549,8 @@ export default function Finance() {
   const [editingClosingSessionId, setEditingClosingSessionId] = useState<string | null>(null);
   const [editingClosingAmount, setEditingClosingAmount] = useState('');
   const [editingClosingNote, setEditingClosingNote] = useState('');
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [deleteSessionReason, setDeleteSessionReason] = useState('');
 
   const [expenseTitle, setExpenseTitle] = useState('');
   const [expenseAmount, setExpenseAmount] = useState('');
@@ -609,7 +611,8 @@ export default function Finance() {
   const getTxCogs = (tx: Transaction) => (tx.items || []).reduce((sum, item) => sum + (resolveBuyPriceForFinanceItem(item, tx.date) * item.quantity), 0);
 
   const openSession = cashSessions.find(s => s.status === 'open');
-  const cashHistory = [...cashSessions].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+  const visibleCashSessions = useMemo(() => cashSessions.filter(session => !session.deletedAt), [cashSessions]);
+  const cashHistory = [...visibleCashSessions].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
 
   const filteredCashHistory = useMemo(() => {
     const now = new Date();
@@ -1613,7 +1616,7 @@ export default function Finance() {
     const freshCashSessions = Array.isArray(fresh.cashSessions) ? fresh.cashSessions : [];
     const freshOpenSession = freshCashSessions.find(session => session.status === 'open');
     if (freshOpenSession) return setErrors('An open cash session already exists.');
-    const freshLatestClosedSession = getLastValidClosingSession(freshCashSessions);
+    const freshLatestClosedSession = getLastValidClosingSession(freshCashSessions.filter(session => !session.deletedAt));
 
     const parsedOpeningBalance = openingBalance.trim() ? Number(openingBalance) : Number.NaN;
     const autoCarryBalance = latestCarryForwardSession?.closingBalance;
@@ -1748,6 +1751,49 @@ export default function Finance() {
     setEditingClosingSessionId(null);
     setEditingClosingAmount('');
     setEditingClosingNote('');
+  };
+
+  const openDeleteShiftModal = (session: CashSession) => {
+    if (session.status !== 'closed' || session.deletedAt) return;
+    setDeletingSessionId(session.id);
+    setDeleteSessionReason('');
+  };
+
+  const confirmDeleteShift = async () => {
+    if (!deletingSessionId) return;
+    const fresh = loadData();
+    const freshSessions = Array.isArray(fresh.cashSessions) ? fresh.cashSessions : [];
+    const target = freshSessions.find(session => session.id === deletingSessionId);
+    if (!target || target.status !== 'closed' || target.deletedAt) {
+      setErrors('Only closed shifts can be deleted.');
+      setDeletingSessionId(null);
+      setDeleteSessionReason('');
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    const updatedSessions = freshSessions.map(session => session.id === target.id ? {
+      ...session,
+      deletedAt: nowIso,
+      deletedReason: deleteSessionReason.trim() || undefined,
+      deletedBy: currentUserEmail || undefined,
+    } : session);
+    financeLog.shift('DELETE', {
+      type: 'shift_delete',
+      source: 'finance',
+      sessionId: target.id,
+      sessionStartTime: target.startTime,
+      sessionEndTime: target.endTime ?? null,
+      reason: deleteSessionReason.trim() || null,
+    });
+    await persistState({ ...fresh, cashSessions: updatedSessions });
+    if (activeHistoryDetailSessionId === target.id) setActiveHistoryDetailSessionId(null);
+    if (editingClosingSessionId === target.id) {
+      setEditingClosingSessionId(null);
+      setEditingClosingAmount('');
+      setEditingClosingNote('');
+    }
+    setDeletingSessionId(null);
+    setDeleteSessionReason('');
   };
 
   const updateClosingCount = (denom: number, next: number) => {
@@ -2527,7 +2573,10 @@ export default function Finance() {
                         <div className="flex items-center gap-2">
                           <Button type="button" variant="outline" size="sm" onClick={() => setActiveHistoryDetailSessionId(prev => (prev === session.id ? null : session.id))}>{isOpen ? 'Hide details' : 'View details'}</Button>
                           {session.status === 'closed' ? (
-                            <Button type="button" variant="outline" size="sm" onClick={() => openEditClosingModal(session)}>Edit Closing Amount</Button>
+                            <>
+                              <Button type="button" variant="outline" size="sm" onClick={() => openEditClosingModal(session)}>Edit Closing Amount</Button>
+                              <Button type="button" variant="outline" size="sm" className="border-rose-300 text-rose-700 hover:bg-rose-50" onClick={() => openDeleteShiftModal(session)}>Delete</Button>
+                            </>
                           ) : (
                             <Button type="button" variant="outline" size="sm" disabled title="Close this shift before editing closing amount.">Edit Closing Amount</Button>
                           )}
@@ -2698,6 +2747,38 @@ export default function Finance() {
                       </div>
                     </div>
                   </div>
+                </div>
+              );
+            })()}
+
+            {deletingSessionId && (() => {
+              const deletingSession = cashSessions.find(session => session.id === deletingSessionId);
+              if (!deletingSession || deletingSession.status !== 'closed') return null;
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], deletingSession.startTime, deletingSession.endTime);
+              const systemCashTotal = deletingSession.systemCashTotal ?? computedTotals.systemCashTotal;
+              const expectedClosing = deletingSession.openingBalance + systemCashTotal;
+              const countedClosing = deletingSession.closingBalance ?? 0;
+              const difference = deletingSession.difference ?? (countedClosing - expectedClosing);
+              return (
+                <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+                  <Card className="w-full max-w-lg">
+                    <CardHeader><CardTitle>Delete Closed Shift</CardTitle></CardHeader>
+                    <CardContent className="space-y-3">
+                      <p className="text-xs text-rose-700">This removes the shift record from history. It does not delete sales, expenses, payments, purchases, or cash movements.</p>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div><span className="text-muted-foreground">Shift</span><div>{new Date(deletingSession.startTime).toLocaleString()}</div></div>
+                        <div><span className="text-muted-foreground">Opening</span><div>{formatINR(deletingSession.openingBalance)}</div></div>
+                        <div><span className="text-muted-foreground">Expected closing</span><div>{formatINR(expectedClosing)}</div></div>
+                        <div><span className="text-muted-foreground">Counted closing</span><div>{formatINR(countedClosing)}</div></div>
+                        <div><span className="text-muted-foreground">Variance</span><div>{formatINR(difference)}</div></div>
+                      </div>
+                      <div><Label>Reason (optional)</Label><Input value={deleteSessionReason} onChange={e => setDeleteSessionReason(e.target.value)} placeholder="Reason for archiving this closed shift" /></div>
+                      <div className="flex gap-2 justify-end">
+                        <Button variant="outline" onClick={() => { setDeletingSessionId(null); setDeleteSessionReason(''); }}>Cancel</Button>
+                        <Button variant="destructive" onClick={confirmDeleteShift}>Delete Shift</Button>
+                      </div>
+                    </CardContent>
+                  </Card>
                 </div>
               );
             })()}

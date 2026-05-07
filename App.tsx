@@ -24,10 +24,11 @@ const FreightBooking = lazy(() => import('./pages/FreightBooking'));
 const PurchasePanel = lazy(() => import('./pages/PurchasePanel'));
 const ProductAnalytics = lazy(() => import('./pages/ProductAnalytics'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Cashbook = lazy(() => import('./pages/Cashbook'));
 
 // --- Components ---
 
-const NavItem = ({ to, icon: Icon, label }: { to: string, icon: any, label: string }) => {
+const NavItem = ({ to, icon: Icon, label, labelClassName = '' }: { to: string, icon: any, label: string, labelClassName?: string }) => {
   const location = useLocation();
   const isActive = location.pathname === to;
   return (
@@ -40,7 +41,7 @@ const NavItem = ({ to, icon: Icon, label }: { to: string, icon: any, label: stri
       }`}
     >
       <Icon className="w-5 h-5" />
-      {label}
+      <span className={labelClassName}>{label}</span>
     </Link>
   );
 };
@@ -232,6 +233,7 @@ export default function App() {
             <NavItem to="/customers" icon={Users} label="Customers" />
             <NavItem to="/pdf" icon={FileText} label="Reports" />
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
+            <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" />
             <NavItem to="/finance" icon={Landmark} label="Finance" />
             <NavItem to="/financial" icon={Landmark} label="Financial" />
             <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />
@@ -363,6 +365,7 @@ export default function App() {
                 <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
                 <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
+                <Route path="/cashbook" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Cashbook /></ProtectedRoute>} />
                 <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
                 <Route path="/financial" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Financial /></ProtectedRoute>} />
                 <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />

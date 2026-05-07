@@ -161,6 +161,9 @@ export interface CashSession {
   closingDenominationCounts?: Record<string, number>;
   closingEditedAt?: string;
   closingEditNote?: string;
+  deletedAt?: string;
+  deletedReason?: string;
+  deletedBy?: string;
   status: 'open' | 'closed';
 }
 

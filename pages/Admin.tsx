@@ -102,6 +102,7 @@ export default function Admin() {
   const [newSupplierPartyNotes, setNewSupplierPartyNotes] = useState('');
   const [showAddCategoryInline, setShowAddCategoryInline] = useState(false);
   const [newInlineCategory, setNewInlineCategory] = useState('');
+  const [isPurchasePartyInputFocused, setIsPurchasePartyInputFocused] = useState(false);
 
   const refreshData = () => {
     const data = loadData();
@@ -112,6 +113,13 @@ export default function Admin() {
     setColorsMaster(data.colorsMaster || []);
     setPurchaseParties(getPurchaseParties().map((party) => ({ id: party.id, name: party.name })));
   };
+  const purchasePartySuggestions = useMemo(() => {
+    const query = purchasePartyName.trim().toLowerCase();
+    if (!purchaseTarget || !query || !isPurchasePartyInputFocused) return [];
+    return getPurchaseParties()
+      .filter((party) => party.name.toLowerCase().includes(query))
+      .slice(0, 5);
+  }, [purchasePartyName, purchaseTarget, isPurchasePartyInputFocused]);
 
   useEffect(() => {
     refreshData();
@@ -1929,16 +1937,39 @@ export default function Admin() {
                   <div><Label>Purchase Unit Price</Label><Input type="number" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} /></div>
                   <div className="space-y-1">
                     <Label>Supplier / Party Name</Label>
-                    <Input
-                      value={purchasePartyName}
-                      placeholder="Select or type supplier name"
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        setPurchasePartyName(value);
-                        const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
-                        setSelectedPurchasePartyId(matched?.id || '');
-                      }}
-                    />
+                    <div className="relative">
+                      <Input
+                        value={purchasePartyName}
+                        placeholder="Select or type supplier name"
+                        onFocus={() => setIsPurchasePartyInputFocused(true)}
+                        onBlur={() => window.setTimeout(() => setIsPurchasePartyInputFocused(false), 120)}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setPurchasePartyName(value);
+                          const matched = purchaseParties.find((party) => party.name.toLowerCase() === value.trim().toLowerCase());
+                          setSelectedPurchasePartyId(matched?.id || '');
+                        }}
+                      />
+                      {purchasePartySuggestions.length > 0 && (
+                        <div className="absolute z-40 mt-1 w-full rounded-md border bg-white shadow-lg max-h-44 overflow-y-auto">
+                          {purchasePartySuggestions.map((party) => (
+                            <button
+                              key={party.id}
+                              type="button"
+                              className="w-full border-b last:border-b-0 px-3 py-2 text-left hover:bg-muted"
+                              onClick={() => {
+                                setPurchasePartyName(party.name);
+                                setSelectedPurchasePartyId(party.id);
+                                setIsPurchasePartyInputFocused(false);
+                              }}
+                            >
+                              <div className="text-sm font-medium">{party.name}</div>
+                              <div className="text-xs text-muted-foreground">{party.phone || 'No phone'}{party.gst ? ` • GST ${party.gst}` : ''}</div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <div className="mt-2 flex items-center gap-2">
                       <Button type="button" variant="outline" size="sm" onClick={() => { setSupplierPartyPickerContext('purchase'); setShowSupplierPartyModal(true); }}>See All Parties</Button>
                       <Button type="button" variant="outline" size="sm" onClick={() => { setSupplierPartyPickerContext('purchase'); setShowAddSupplierPartyModal(true); }}>+ Add Party</Button>

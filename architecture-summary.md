@@ -43,3 +43,4 @@ StockFlow is a React + TypeScript single-page business system for inventory mana
 2. Add typed data hooks to replace repeated page refresh patterns
 3. Isolate finance derivations and transaction reconciliation into tested pure modules
 4. Consolidate Cloudinary handler path strategy and archive legacy UI/modules
+

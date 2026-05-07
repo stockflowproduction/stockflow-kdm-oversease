@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
 import { Customer, PurchaseOrder, PurchaseParty, Transaction } from '../types';
-import { getCanonicalCustomerBalanceSnapshot, getPurchaseOrders, getPurchaseParties, loadData, processTransaction, recordPurchaseOrderPayment } from '../services/storage';
+import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getPurchaseOrders, getPurchaseParties, getSaleSettlementBreakdown, loadData, processTransaction, recordPurchaseOrderPayment } from '../services/storage';
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
+import { generateAccountStatementPDF } from '../services/pdf';
 
 type CustomerReceivableRow = Customer & { receivable: number };
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[] };
+type LedgerRow = { id: string; date: string; type: string; ref: string; description: string; debit: number; credit: number; balance: number; tone?: 'due' | 'payment' | 'cash' | 'refund' };
 
 function ActionModal({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: React.ReactNode }) {
   if (!open) return null;
@@ -18,6 +20,24 @@ function ActionModal({ open, title, onClose, children }: { open: boolean; title:
           <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
         </div>
         <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function StatementModal({ open, title, subtitle, onClose, children }: { open: boolean; title: string; subtitle?: string; onClose: () => void; children: React.ReactNode }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/40 p-3 sm:p-4">
+      <div className="w-[90vw] max-w-6xl max-h-[90vh] overflow-hidden rounded-2xl border bg-white shadow-xl">
+        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b bg-white px-4 py-3 sm:px-6 sm:py-4">
+          <div>
+            <h3 className="text-base sm:text-lg font-semibold">{title}</h3>
+            {subtitle && <p className="text-xs sm:text-sm text-muted-foreground mt-0.5">{subtitle}</p>}
+          </div>
+          <Button variant="outline" size="sm" onClick={onClose}>Close</Button>
+        </div>
+        <div className="max-h-[calc(90vh-76px)] overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">{children}</div>
       </div>
     </div>
   );
@@ -40,6 +60,11 @@ export default function Dashboard() {
   const [payMethod, setPayMethod] = useState<'cash' | 'online'>('cash');
   const [payNote, setPayNote] = useState('');
   const [payError, setPayError] = useState<string | null>(null);
+  const [statementCustomerId, setStatementCustomerId] = useState<string | null>(null);
+  const [statementPartyId, setStatementPartyId] = useState<string | null>(null);
+  const [isGeneratingCustomerPdf, setIsGeneratingCustomerPdf] = useState(false);
+  const [isGeneratingPartyPdf, setIsGeneratingPartyPdf] = useState(false);
+  const [statementPdfError, setStatementPdfError] = useState<string | null>(null);
 
   const refresh = () => {
     const data = loadData();
@@ -86,6 +111,83 @@ export default function Dashboard() {
 
   const totalReceivable = useMemo(() => customerReceivables.reduce((sum, customer) => sum + customer.receivable, 0), [customerReceivables]);
   const totalPayable = useMemo(() => partyPayables.reduce((sum, party) => sum + party.payable, 0), [partyPayables]);
+  const selectedCustomer = useMemo(() => customers.find(c => c.id === statementCustomerId) || null, [customers, statementCustomerId]);
+  const selectedParty = useMemo(() => parties.find(p => p.id === statementPartyId) || null, [parties, statementPartyId]);
+
+  const customerStatement = useMemo(() => {
+    if (!selectedCustomer) return null;
+    const customerTx = transactions
+      .filter(tx => tx.customerId === selectedCustomer.id && (tx.type === 'sale' || tx.type === 'payment' || tx.type === 'return'))
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const rows: LedgerRow[] = [];
+    let runningBalance = 0;
+    let totalCreditSales = 0;
+    let totalPayments = 0;
+    let totalStoreCreditUsed = 0;
+    let totalStoreCreditAdded = 0;
+    const processed: Transaction[] = [];
+    customerTx.forEach(tx => {
+      if (tx.type === 'sale') {
+        const settlement = getSaleSettlementBreakdown(tx);
+        const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
+        const dueInc = Math.max(0, settlement.creditDue);
+        runningBalance += dueInc;
+        totalCreditSales += dueInc;
+        totalStoreCreditUsed += storeCreditUsed;
+        rows.push({ id: tx.id, date: tx.date, type: 'Credit Sale', ref: tx.id.slice(-6), description: `Due +${formatINRPrecise(dueInc)}${storeCreditUsed > 0 ? ` • SC used ${formatINRPrecise(storeCreditUsed)}` : ''}`, debit: dueInc, credit: 0, balance: runningBalance, tone: 'due' });
+      } else if (tx.type === 'payment') {
+        const amount = Math.max(0, Number(tx.total || 0));
+        const dueReduced = Math.min(runningBalance, amount);
+        const storeCreditAdded = Math.max(0, amount - dueReduced);
+        runningBalance = Math.max(0, runningBalance - dueReduced);
+        totalPayments += amount;
+        totalStoreCreditAdded += storeCreditAdded;
+        rows.push({ id: tx.id, date: tx.date, type: 'Payment', ref: tx.id.slice(-6), description: `${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}${storeCreditAdded > 0 ? ` • SC added ${formatINRPrecise(storeCreditAdded)}` : ''}`, debit: 0, credit: dueReduced, balance: runningBalance, tone: tx.paymentMethod === 'Cash' ? 'cash' : 'payment' });
+      } else {
+        const alloc = getCanonicalReturnAllocation(tx, processed, runningBalance);
+        const creditReduction = Math.max(0, alloc.dueReduction);
+        runningBalance = Math.max(0, runningBalance - creditReduction);
+        totalStoreCreditAdded += Math.max(0, alloc.storeCreditIncrease);
+        rows.push({ id: tx.id, date: tx.date, type: 'Return', ref: tx.id.slice(-6), description: `Due -${formatINRPrecise(creditReduction)} • SC +${formatINRPrecise(alloc.storeCreditIncrease)}`, debit: 0, credit: creditReduction, balance: runningBalance, tone: 'refund' });
+      }
+      processed.push(tx);
+    });
+    const canonicalDue = Math.max(0, Number(canonicalSnapshot.balances.get(selectedCustomer.id)?.totalDue || 0));
+    return { rows, displayRows: [...rows].reverse(), totalCreditSales, totalPayments, totalStoreCreditUsed, totalStoreCreditAdded, balanceDue: canonicalDue };
+  }, [selectedCustomer, transactions, canonicalSnapshot]);
+
+  const partyStatement = useMemo(() => {
+    if (!selectedParty) return null;
+    const partyOrders = orders
+      .filter(order => order.partyId === selectedParty.id && order.status !== 'cancelled')
+      .sort((a, b) => new Date(a.orderDate).getTime() - new Date(b.orderDate).getTime());
+    const rows: LedgerRow[] = [];
+    let runningBalance = 0;
+    let totalPurchase = 0;
+    let totalPaid = 0;
+    let lastPaymentAt = '';
+    let lastPurchaseAt = '';
+    partyOrders.forEach(order => {
+      const orderTotal = Math.max(0, Number(order.totalAmount || 0));
+      runningBalance += orderTotal;
+      totalPurchase += orderTotal;
+      lastPurchaseAt = order.orderDate || lastPurchaseAt;
+      rows.push({ id: `order-${order.id}`, date: order.orderDate || order.createdAt, type: 'Purchase', ref: order.billNumber || order.id.slice(-6), description: `PO ${order.id.slice(-6)}${order.status ? ` • ${order.status}` : ''}`, debit: orderTotal, credit: 0, balance: runningBalance, tone: 'due' });
+      (order.paymentHistory || [])
+        .slice()
+        .sort((a, b) => new Date(a.paidAt).getTime() - new Date(b.paidAt).getTime())
+        .forEach(payment => {
+          const paid = Math.max(0, Number(payment.amount || 0));
+          runningBalance = Math.max(0, runningBalance - paid);
+          totalPaid += paid;
+          lastPaymentAt = payment.paidAt;
+          rows.push({ id: payment.id, date: payment.paidAt, type: 'Payment', ref: order.billNumber || order.id.slice(-6), description: `${payment.method || 'cash'}${payment.note ? ` • ${payment.note}` : ''}`, debit: 0, credit: paid, balance: runningBalance, tone: payment.method === 'cash' ? 'cash' : 'payment' });
+        });
+    });
+    const remaining = Math.max(0, partyOrders.reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0));
+    const sortedRows = rows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    return { rows: sortedRows, displayRows: [...sortedRows].reverse(), totalPurchase, totalPaid, remaining, lastPaymentAt, lastPurchaseAt };
+  }, [selectedParty, orders]);
 
   const openReceiveModal = (customer: CustomerReceivableRow) => {
     setReceivingCustomer(customer);
@@ -147,6 +249,73 @@ export default function Dashboard() {
     refresh();
   };
 
+  const downloadCustomerStatementPdf = async () => {
+    if (!selectedCustomer || !customerStatement) return;
+    try {
+      setStatementPdfError(null);
+      setIsGeneratingCustomerPdf(true);
+      const profile = loadData().profile;
+      const mapCustomerDescription = (row: LedgerRow) => {
+        if (row.type === 'Credit Sale') return 'Sale Invoice';
+        if (row.type === 'Payment') return 'Payment Received';
+        if (row.type === 'Return') return 'Sales Return';
+        return row.type || 'Ledger Entry';
+      };
+      await generateAccountStatementPDF({
+        profile,
+        entityLabel: 'BILLED TO',
+        entityName: selectedCustomer.name,
+        entityMeta: [selectedCustomer.phone || '', `Customer ID: ${selectedCustomer.id}`],
+        rows: customerStatement.displayRows.map(row => ({
+          date: row.date,
+          description: mapCustomerDescription(row),
+          reference: row.ref || row.id.slice(-6),
+          debit: row.debit,
+          credit: row.credit,
+          balance: row.balance,
+        })),
+        fileName: `customer-statement-${selectedCustomer.name.replace(/\s+/g, '-').toLowerCase()}.pdf`,
+      });
+    } catch (error) {
+      setStatementPdfError(error instanceof Error ? error.message : 'Failed to generate PDF.');
+    } finally {
+      setIsGeneratingCustomerPdf(false);
+    }
+  };
+
+  const downloadPartyStatementPdf = async () => {
+    if (!selectedParty || !partyStatement) return;
+    try {
+      setStatementPdfError(null);
+      setIsGeneratingPartyPdf(true);
+      const profile = loadData().profile;
+      const mapPartyDescription = (row: LedgerRow) => {
+        if (row.type === 'Purchase') return 'Purchase Order';
+        if (row.type === 'Payment') return 'Payment to Supplier';
+        return row.type || 'Ledger Entry';
+      };
+      await generateAccountStatementPDF({
+        profile,
+        entityLabel: 'PARTY / SUPPLIER',
+        entityName: selectedParty.name,
+        entityMeta: [selectedParty.phone || '', `Party ID: ${selectedParty.id}`],
+        rows: partyStatement.displayRows.map(row => ({
+          date: row.date,
+          description: mapPartyDescription(row),
+          reference: row.ref || row.id.slice(-6),
+          debit: row.debit,
+          credit: row.credit,
+          balance: row.balance,
+        })),
+        fileName: `party-statement-${selectedParty.name.replace(/\s+/g, '-').toLowerCase()}.pdf`,
+      });
+    } catch (error) {
+      setStatementPdfError(error instanceof Error ? error.message : 'Failed to generate PDF.');
+    } finally {
+      setIsGeneratingPartyPdf(false);
+    }
+  };
+
   return (
     <div className="h-[calc(100vh-9rem)] min-h-0 flex flex-col gap-4 overflow-hidden">
       <div className="shrink-0 space-y-3">
@@ -178,7 +347,10 @@ export default function Dashboard() {
                 </div>
                 <div className="text-right shrink-0">
                   <div className="font-semibold text-blue-700">{formatINRPrecise(c.receivable)}</div>
-                  <Button size="sm" className="mt-2" onClick={() => openReceiveModal(c)}>Receive</Button>
+                  <div className="mt-2 flex gap-2 justify-end">
+                    <Button size="sm" variant="outline" onClick={() => setStatementCustomerId(c.id)}>View Statement</Button>
+                    <Button size="sm" onClick={() => openReceiveModal(c)}>Receive</Button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -197,7 +369,10 @@ export default function Dashboard() {
                 </div>
                 <div className="text-right shrink-0">
                   <div className="font-semibold text-orange-700">{formatINRPrecise(p.payable)}</div>
-                  <Button size="sm" variant="outline" className="mt-2" onClick={() => openPayModal(p)}>Pay</Button>
+                  <div className="mt-2 flex gap-2 justify-end">
+                    <Button size="sm" variant="outline" onClick={() => setStatementPartyId(p.id)}>View Statement</Button>
+                    <Button size="sm" variant="outline" onClick={() => openPayModal(p)}>Pay</Button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -257,6 +432,64 @@ export default function Dashboard() {
           </div>
         )}
       </ActionModal>
+
+      <StatementModal open={!!selectedCustomer && !!customerStatement} title="Customer Statement" subtitle={selectedCustomer ? `${selectedCustomer.name} • ${selectedCustomer.phone || '-'}` : undefined} onClose={() => setStatementCustomerId(null)}>
+        {selectedCustomer && customerStatement && (
+          <div className="space-y-4">
+            <div className="flex justify-end">
+              <Button type="button" variant="outline" size="sm" disabled={isGeneratingCustomerPdf} onClick={() => void downloadCustomerStatementPdf()}>
+                {isGeneratingCustomerPdf ? 'Generating PDF...' : 'Download Statement PDF'}
+              </Button>
+            </div>
+            {statementPdfError && <p className="text-xs text-red-600">{statementPdfError}</p>}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Credit Due Generated</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(customerStatement.totalCreditSales)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Payments Received</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(customerStatement.totalPayments)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Store Credit Used / Added</div><div className="mt-1 text-lg font-semibold">{formatINRPrecise(customerStatement.totalStoreCreditUsed)} / {formatINRPrecise(customerStatement.totalStoreCreditAdded)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Current Receivable</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(customerStatement.balanceDue)}</div></div>
+            </div>
+            <div className="max-h-[52vh] overflow-auto rounded-xl border">
+              <table className="w-full min-w-[920px] text-sm">
+                <thead className="sticky top-0 bg-slate-50">
+                  <tr>
+                    <th className="p-3 text-left whitespace-nowrap">Date</th><th className="p-3 text-left">Type</th><th className="p-3 text-left whitespace-nowrap">Ref</th><th className="p-3 text-left min-w-[260px]">Description</th><th className="p-3 text-right whitespace-nowrap">Debit</th><th className="p-3 text-right whitespace-nowrap">Credit</th><th className="p-3 text-right whitespace-nowrap">Balance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {customerStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'refund' ? 'bg-red-50 text-red-600' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td></tr>)}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </StatementModal>
+
+      <StatementModal open={!!selectedParty && !!partyStatement} title="Party Statement" subtitle={selectedParty ? `${selectedParty.name} • ${selectedParty.phone || '-'}` : undefined} onClose={() => setStatementPartyId(null)}>
+        {selectedParty && partyStatement && (
+          <div className="space-y-4">
+            <div className="flex justify-end">
+              <Button type="button" variant="outline" size="sm" disabled={isGeneratingPartyPdf} onClick={() => void downloadPartyStatementPdf()}>
+                {isGeneratingPartyPdf ? 'Generating PDF...' : 'Download Statement PDF'}
+              </Button>
+            </div>
+            {statementPdfError && <p className="text-xs text-red-600">{statementPdfError}</p>}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Purchase</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(partyStatement.totalPurchase)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Paid</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(partyStatement.totalPaid)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Remaining Payable</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(partyStatement.remaining)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Last Payment / Purchase</div><div className="mt-1 text-lg font-semibold">{partyStatement.lastPaymentAt ? new Date(partyStatement.lastPaymentAt).toLocaleDateString() : '—'} / {partyStatement.lastPurchaseAt ? new Date(partyStatement.lastPurchaseAt).toLocaleDateString() : '—'}</div></div>
+            </div>
+            <div className="max-h-[52vh] overflow-auto rounded-xl border">
+              <table className="w-full min-w-[920px] text-sm">
+                <thead className="sticky top-0 bg-slate-50"><tr><th className="p-3 text-left whitespace-nowrap">Date</th><th className="p-3 text-left">Type</th><th className="p-3 text-left whitespace-nowrap">Ref</th><th className="p-3 text-left min-w-[260px]">Description</th><th className="p-3 text-right whitespace-nowrap">Debit</th><th className="p-3 text-right whitespace-nowrap">Credit</th><th className="p-3 text-right whitespace-nowrap">Balance</th></tr></thead>
+                <tbody>
+                  {partyStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td></tr>)}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </StatementModal>
     </div>
   );
 }
