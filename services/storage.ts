@@ -15,6 +15,7 @@ import {
   PurchaseOrder,
   PurchaseOrderLine,
   PurchaseParty,
+  SupplierPaymentLedgerEntry,
   DeletedTransactionRecord,
   DeleteCompensationRecord,
   UpdatedTransactionRecord,
@@ -1590,6 +1591,7 @@ const initialData: AppState = {
   freightBrokers: [],
   purchaseParties: [],
   purchaseOrders: [],
+  supplierPayments: [],
   variantsMaster: [],
   colorsMaster: []
 };
@@ -1615,12 +1617,18 @@ const computeCashEstimateFromTransactions = (transactions: Transaction[], delete
   return txCash - deleteCompensationOutflow;
 };
 
-const computeCashSupplierPaymentsOutflow = (orders: PurchaseOrder[] = []) =>
+const computeCashSupplierPaymentsOutflow = (orders: PurchaseOrder[] = [], supplierPayments: SupplierPaymentLedgerEntry[] = []) =>
   (orders || []).reduce((sum, order) =>
     sum + (order.paymentHistory || []).reduce((inner, payment) => {
+      if ((payment as any).supplierPaymentId) return inner;
       if ((payment.method || 'cash') !== 'cash') return inner;
       return inner + Math.max(0, Number(payment.amount) || 0);
-    }, 0), 0);
+    }, 0), 0)
+  + (supplierPayments || []).reduce((sum, payment) => {
+    if (payment.deletedAt) return sum;
+    if (payment.method !== 'cash') return sum;
+    return sum + Math.max(0, Number(payment.amount) || 0);
+  }, 0);
 
 const logLoadedState = (state: AppState) => {
   const openShift = (state.cashSessions || []).find(s => s.status === 'open');
@@ -1631,7 +1639,7 @@ const logLoadedState = (state: AppState) => {
     totalDue: state.customers.reduce((sum, c) => sum + (c.totalDue || 0), 0),
     totalCashEstimate: computeCashEstimateFromTransactions(state.transactions, state.deleteCompensations || [])
       - (state.expenses || []).reduce((sum, e) => sum + (e.amount || 0), 0)
-      - computeCashSupplierPaymentsOutflow(state.purchaseOrders || []),
+      - computeCashSupplierPaymentsOutflow(state.purchaseOrders || [], state.supplierPayments || []),
     openShift: openShift ? { id: openShift.id, openingBalance: openShift.openingBalance, startTime: openShift.startTime } : null,
   });
   if (!hasLoggedInitKpiSnapshot) {
@@ -1897,6 +1905,7 @@ const syncFromCloud = async () => {
                     freightBrokers: cloudData.freightBrokers || [],
                     purchaseParties: cloudData.purchaseParties || [],
                     purchaseOrders: cloudData.purchaseOrders || [],
+                    supplierPayments: cloudData.supplierPayments || [],
                     variantsMaster: cloudData.variantsMaster || [],
                     colorsMaster: cloudData.colorsMaster || [],
                     profile: { ...defaultProfile, ...(cloudData.profile || {}) }
@@ -3832,6 +3841,106 @@ export const recordPurchaseOrderPayment = async (orderId: string, amount: number
   };
   updatedOrder.remainingAmount = Math.max(0, Number((totalAmount - (updatedOrder.totalPaid || 0)).toFixed(2)));
   return updatePurchaseOrder(updatedOrder);
+};
+
+const allocateSupplierPaymentAcrossOrders = (
+  orders: PurchaseOrder[],
+  partyId: string,
+  paymentId: string,
+  amount: number,
+  method: 'cash' | 'online',
+  note?: string,
+  paidAt?: string,
+) => {
+  let remaining = Math.max(0, Number(amount) || 0);
+  const nextOrders = [...orders];
+  const allocations: Array<{ orderId: string; orderRef?: string; amount: number }> = [];
+  const dueOrders = nextOrders
+    .filter((order) => order.partyId === partyId && order.status !== 'cancelled')
+    .sort((a, b) => new Date(a.orderDate).getTime() - new Date(b.orderDate).getTime());
+  dueOrders.forEach((order) => {
+    if (remaining <= 0) return;
+    const orderTotal = Math.max(0, Number(order.totalAmount || 0));
+    const paidSoFar = Math.max(0, Number(order.totalPaid || 0));
+    const orderRemaining = Math.max(0, Number((orderTotal - paidSoFar).toFixed(2)));
+    if (orderRemaining <= 0) return;
+    const allocation = Math.min(remaining, orderRemaining);
+    const paymentEntry = { id: `pop-${paymentId}-${order.id}`, paidAt: paidAt || new Date().toISOString(), amount: Number(allocation.toFixed(2)), method, note, supplierPaymentId: paymentId } as any;
+    order.paymentHistory = [...(order.paymentHistory || []), paymentEntry];
+    order.totalPaid = Number((paidSoFar + allocation).toFixed(2));
+    order.remainingAmount = Math.max(0, Number((orderTotal - (order.totalPaid || 0)).toFixed(2)));
+    order.updatedAt = new Date().toISOString();
+    remaining = Number((remaining - allocation).toFixed(2));
+    allocations.push({ orderId: order.id, orderRef: order.billNumber || order.id.slice(-6), amount: Number(allocation.toFixed(2)) });
+  });
+  return { nextOrders, allocations };
+};
+
+const stripSupplierPaymentAllocations = (orders: PurchaseOrder[], supplierPaymentId: string) => orders.map((order) => {
+  const nextHistory = (order.paymentHistory || []).filter((payment: any) => payment.supplierPaymentId !== supplierPaymentId);
+  if (nextHistory.length === (order.paymentHistory || []).length) return order;
+  const totalPaid = Number(nextHistory.reduce((sum, p) => sum + Math.max(0, Number(p.amount) || 0), 0).toFixed(2));
+  const totalAmount = Math.max(0, Number(order.totalAmount || 0));
+  return { ...order, paymentHistory: nextHistory, totalPaid, remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))), updatedAt: new Date().toISOString() };
+});
+
+export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerEntry, 'id' | 'createdAt' | 'updatedAt' | 'allocations'>) => {
+  const data = loadData();
+  const now = new Date().toISOString();
+  const paymentId = `spp-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const amount = Math.max(0, Number(payload.amount) || 0);
+  const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], payload.partyId, paymentId, amount, payload.method, payload.note, payload.paidAt || now);
+  const payment: SupplierPaymentLedgerEntry = { ...payload, id: paymentId, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations };
+  await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: [payment, ...(data.supplierPayments || [])] }, { throwOnError: true, reason: 'createSupplierPayment', auditOperation: 'CREATE' });
+  return payment;
+};
+
+export const updateSupplierPayment = async (paymentId: string, updates: Partial<Pick<SupplierPaymentLedgerEntry, 'amount' | 'method' | 'note' | 'paidAt'>>) => {
+  const data = loadData();
+  const existing = (data.supplierPayments || []).find((item) => item.id === paymentId && !item.deletedAt);
+  if (!existing) throw new Error('Supplier payment not found.');
+  const strippedOrders = stripSupplierPaymentAllocations(data.purchaseOrders || [], paymentId);
+  const nextEntry: SupplierPaymentLedgerEntry = { ...existing, ...updates, amount: Number(Math.max(0, Number(updates.amount ?? existing.amount) || 0).toFixed(2)), updatedAt: new Date().toISOString() };
+  const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(strippedOrders, nextEntry.partyId, paymentId, nextEntry.amount, nextEntry.method, nextEntry.note, nextEntry.paidAt);
+  nextEntry.allocations = allocations;
+  const nextSupplierPayments = (data.supplierPayments || []).map((item) => item.id === paymentId ? nextEntry : item);
+  await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: nextSupplierPayments }, { throwOnError: true, reason: 'updateSupplierPayment', auditOperation: 'UPDATE' });
+  return nextEntry;
+};
+
+export const deleteSupplierPayment = async (paymentId: string) => {
+  const data = loadData();
+  const existing = (data.supplierPayments || []).find((item) => item.id === paymentId && !item.deletedAt);
+  if (!existing) throw new Error('Supplier payment not found.');
+  const strippedOrders = stripSupplierPaymentAllocations(data.purchaseOrders || [], paymentId);
+  const nextSupplierPayments = (data.supplierPayments || []).map((item) => item.id === paymentId ? { ...item, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : item);
+  await saveData({ ...data, purchaseOrders: strippedOrders, supplierPayments: nextSupplierPayments }, { throwOnError: true, reason: 'deleteSupplierPayment', auditOperation: 'DELETE' });
+};
+
+export const deleteLegacySupplierPaymentGroup = async (allocations: Array<{ orderId: string; paymentId: string }>) => {
+  const data = loadData();
+  const byOrder = new Map<string, Set<string>>();
+  allocations.forEach((item) => {
+    if (!item.orderId || !item.paymentId) return;
+    const set = byOrder.get(item.orderId) || new Set<string>();
+    set.add(item.paymentId);
+    byOrder.set(item.orderId, set);
+  });
+  const nextOrders = (data.purchaseOrders || []).map((order) => {
+    const ids = byOrder.get(order.id);
+    if (!ids || ids.size === 0) return order;
+    const nextHistory = (order.paymentHistory || []).filter((payment) => !ids.has(payment.id));
+    const totalPaid = Number(nextHistory.reduce((sum, payment) => sum + Math.max(0, Number(payment.amount || 0)), 0).toFixed(2));
+    const totalAmount = Math.max(0, Number(order.totalAmount || 0));
+    return {
+      ...order,
+      paymentHistory: nextHistory,
+      totalPaid,
+      remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
+      updatedAt: new Date().toISOString(),
+    };
+  });
+  await saveData({ ...data, purchaseOrders: nextOrders }, { throwOnError: true, reason: 'deleteLegacySupplierPaymentGroup', auditOperation: 'DELETE' });
 };
 
 export const reverseInventoryPurchaseHistoryEntry = async (productId: string, purchaseHistoryId: string): Promise<Product> => {

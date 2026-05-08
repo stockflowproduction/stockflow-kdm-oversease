@@ -19,7 +19,6 @@ const Reports = lazy(() => import('./pages/Reports'));
 const Transactions = lazy(() => import('./pages/Transactions'));
 const Customers = lazy(() => import('./pages/Customers'));
 const Finance = lazy(() => import('./pages/Finance'));
-const Financial = lazy(() => import('./pages/Financial'));
 const FreightBooking = lazy(() => import('./pages/FreightBooking'));
 const PurchasePanel = lazy(() => import('./pages/PurchasePanel'));
 const ProductAnalytics = lazy(() => import('./pages/ProductAnalytics'));
@@ -235,7 +234,6 @@ export default function App() {
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
             <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" />
             <NavItem to="/finance" icon={Landmark} label="Finance" />
-            <NavItem to="/financial" icon={Landmark} label="Financial" />
             <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />
             <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Panel" />
 
@@ -317,12 +315,6 @@ export default function App() {
                               </div>
                               <span className="font-medium text-sm">Finance</span>
                          </Link>
-                         <Link to="/financial" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
-                              <div className="p-3 bg-slate-100 text-slate-700 rounded-full mb-2">
-                                  <Landmark className="w-6 h-6" />
-                              </div>
-                              <span className="font-medium text-sm">Financial</span>
-                         </Link>
                          <Link to="/freight-booking" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-orange-100 text-orange-600 rounded-full mb-2">
                                   <Truck className="w-6 h-6" />
@@ -367,7 +359,6 @@ export default function App() {
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
                 <Route path="/cashbook" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Cashbook /></ProtectedRoute>} />
                 <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
-                <Route path="/financial" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Financial /></ProtectedRoute>} />
                 <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />
                 <Route path="/purchase-panel" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><PurchasePanel /></ProtectedRoute>} />
                 

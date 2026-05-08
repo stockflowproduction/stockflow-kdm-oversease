@@ -16,7 +16,7 @@ const fmt = (n: number) => `₹${(Number.isFinite(n) ? n : 0).toFixed(2)}`;
 const asArray = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
 const asPlainObject = (value: unknown): Record<string, unknown> => (value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
 const toNum = (v: unknown) => Number.isFinite(Number(v)) ? Number(v) : 0;
-const CASHBOOK_RECONCILE_DEBUG = true;
+const CASHBOOK_RECONCILE_DEBUG = import.meta.env.DEV && import.meta.env.VITE_CASHBOOK_RECONCILE_DEBUG === 'true';
 
 const getCashbookReference = (tx: any) => [tx?.invoiceNo, tx?.receiptNo, tx?.billNo, tx?.reference, tx?.orderId, tx?.id].find((v) => typeof v === 'string' && v.trim()) || String(tx?.id || '').slice(-6) || 'UNKNOWN';
 const getCashbookCustomerName = (tx: any, customerMap: Map<string, string>) => customerMap.get(tx?.customerId) || tx?.customerName || tx?.customer?.name || tx?.customerPhone || 'Walk-in Customer';
@@ -162,6 +162,7 @@ export default function Cashbook() {
 
   const safeTransactions = asArray<Transaction>(data.transactions);
   const safePurchaseOrders = asArray<PurchaseOrder>(data.purchaseOrders);
+  const safeSupplierPayments = asArray<any>((data as any).supplierPayments);
   const safeExpenses = asArray<Expense>(data.expenses);
   const safeCashAdjustments = asArray<CashAdjustment>(data.cashAdjustments);
   const safeDeletedTransactions = asArray<any>(data.deletedTransactions);
@@ -170,15 +171,65 @@ export default function Cashbook() {
   const safeCustomers = asArray<any>(data.customers);
   const customerMap = useMemo(() => new Map(safeCustomers.map((c) => [c.id, c.name || ''])), [safeCustomers]);
 
+  const supplierPaymentRows = useMemo<Row[]>(() => {
+    const directRows: Row[] = safeSupplierPayments
+      .filter((sp) => !sp.deletedAt)
+      .map((sp) => {
+        const amount = Math.max(0, Number(sp.amount || 0));
+        const isOnline = (sp.method || 'cash') === 'online';
+        return {
+          id: `sp-${sp.id}`,
+          date: sp.paidAt || sp.createdAt,
+          type: 'supplier_payment',
+          description: `Supplier Payment #${String(sp.id || '').slice(-6)} — ${sp.partyName || 'Supplier'}`,
+          reference: sp.id,
+          party: sp.partyName || 'Supplier',
+          payment: isOnline ? 'online' : 'cash',
+          cashIn: 0, cashOut: isOnline ? 0 : amount, bankIn: 0, bankOut: isOnline ? amount : 0,
+          receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: amount, storeCreditIncrease: 0, storeCreditDecrease: 0,
+        };
+      });
+    const legacyMap = new Map<string, { date: string; party: string; method: 'cash' | 'online'; note: string; amount: number; allocations: number }>();
+    safePurchaseOrders.forEach((po) => {
+      asArray<any>((po as any).paymentHistory).forEach((p) => {
+        if ((p as any).supplierPaymentId) return;
+        const amount = Math.max(0, Number(p.amount || 0));
+        if (amount <= 0) return;
+        const method = (p.method === 'online' ? 'online' : 'cash') as 'cash' | 'online';
+        const at = new Date(p.paidAt).getTime();
+        if (!Number.isFinite(at)) return;
+        const bucket = new Date(Math.floor(at / 60000) * 60000).toISOString().slice(0, 16);
+        const note = String(p.note || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        const key = `${po.partyId}|${method}|${note}|${bucket}`;
+        const ex = legacyMap.get(key) || { date: p.paidAt, party: po.partyName || 'Supplier', method, note, amount: 0, allocations: 0 };
+        ex.amount = Number((ex.amount + amount).toFixed(2));
+        ex.allocations += 1;
+        legacyMap.set(key, ex);
+      });
+    });
+    const legacyRows: Row[] = [];
+    legacyMap.forEach((g, key) => {
+      legacyRows.push({
+        id: `legacy-sp-${key}`,
+        date: g.date,
+        type: 'supplier_payment',
+        description: `${g.method === 'online' ? 'Online' : 'Cash'} supplier payment allocated across ${g.allocations} POs — ${g.party}`,
+        reference: key,
+        party: g.party,
+        payment: g.method === 'online' ? 'online' : 'cash',
+        cashIn: 0, cashOut: g.method === 'cash' ? g.amount : 0, bankIn: 0, bankOut: g.method === 'online' ? g.amount : 0,
+        receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: g.amount, storeCreditIncrease: 0, storeCreditDecrease: 0,
+      });
+    });
+    return [...directRows, ...legacyRows];
+  }, [safeSupplierPayments, safePurchaseOrders]);
+
   const rows = useMemo(() => {
     const txRows = safeTransactions.map((tx) => normalizeTransactionForCashbook(tx, customerMap));
     const purchaseRows: Row[] = safePurchaseOrders.flatMap((po) => {
       const base: Row = { id: `po-${po.id}`, date: po.orderDate || po.createdAt, type: 'purchase', description: `Purchase #${po.id.slice(-6)} — ${po.partyName}`, reference: po.billNumber || po.id, party: po.partyName, payment: 'credit',
         cashIn: 0, cashOut: 0, bankIn: 0, bankOut: 0, receivableIncrease: 0, receivableDecrease: 0, payableIncrease: Math.max(0, Number(po.totalAmount || 0)), payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 };
-      const pays = asArray<any>(asPlainObject(po).paymentHistory).map((p) => ({ id: `pop-${po.id}-${p.id}`, date: p.paidAt, type: 'supplier_payment' as LedgerType, description: `Supplier Payment #${p.id.slice(-6)} — ${po.partyName}`, reference: po.id, party: po.partyName,
-        payment: p.method === 'online' ? 'online' as PayType : 'cash' as PayType, cashIn: 0, cashOut: p.method === 'online' ? 0 : p.amount, bankIn: 0, bankOut: p.method === 'online' ? p.amount : 0,
-        receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: Math.abs(p.amount), storeCreditIncrease: 0, storeCreditDecrease: 0 }));
-      return [base, ...pays];
+      return [base];
     });
     const expenseRows: Row[] = safeExpenses.map((e) => ({ id: `exp-${e.id}`, date: e.createdAt, type: 'expense', description: `Expense — ${e.title}`, reference: e.id, party: e.category || '-', payment: 'cash',
       cashIn: 0, cashOut: Math.abs(e.amount || 0), bankIn: 0, bankOut: 0, receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 }));
@@ -222,8 +273,8 @@ export default function Cashbook() {
         cashIn: Math.max(0, toNum(u.cashbookDelta?.cashIn)), cashOut: Math.max(0, toNum(u.cashbookDelta?.cashOut)), bankIn: Math.max(0, toNum(u.cashbookDelta?.onlineIn)), bankOut: Math.max(0, toNum(u.cashbookDelta?.onlineOut)),
         receivableIncrease: Math.max(0, toNum(u.cashbookDelta?.currentDueEffect)), receivableDecrease: Math.max(0, -toNum(u.cashbookDelta?.currentDueEffect)), payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: Math.max(0, toNum(u.cashbookDelta?.currentStoreCreditEffect)), storeCreditDecrease: Math.max(0, -toNum(u.cashbookDelta?.currentStoreCreditEffect)) })),
     ];
-    return [...txRows, ...deletedTxRows, ...purchaseRows, ...expenseRows, ...adjRows, ...corrRows].filter((r) => !!r.date && (r.cashIn || r.cashOut || r.bankIn || r.bankOut || r.receivableIncrease || r.receivableDecrease || r.payableIncrease || r.payableDecrease || r.storeCreditIncrease || r.storeCreditDecrease));
-  }, [safeTransactions, safeDeletedTransactions, customerMap, safePurchaseOrders, safeExpenses, safeCashAdjustments, safeDeleteCompensations, safeUpdatedTransactionEvents]);
+    return [...txRows, ...deletedTxRows, ...purchaseRows, ...supplierPaymentRows, ...expenseRows, ...adjRows, ...corrRows].filter((r) => !!r.date && (r.cashIn || r.cashOut || r.bankIn || r.bankOut || r.receivableIncrease || r.receivableDecrease || r.payableIncrease || r.payableDecrease || r.storeCreditIncrease || r.storeCreditDecrease));
+  }, [safeTransactions, safeDeletedTransactions, customerMap, safePurchaseOrders, safeExpenses, safeCashAdjustments, safeDeleteCompensations, safeUpdatedTransactionEvents, supplierPaymentRows]);
 
   const allLedgerRows = useMemo(() => asArray<Row>(rows), [rows]);
 
@@ -246,11 +297,14 @@ export default function Cashbook() {
     const q = search.trim().toLowerCase(); if (!q) return true; return `${r.description} ${r.reference} ${r.party}`.toLowerCase().includes(q);
   }).sort((a, b) => sort === 'newest' ? new Date(b.date).getTime() - new Date(a.date).getTime() : new Date(a.date).getTime() - new Date(b.date).getTime()), [allLedgerRows, from, to, payFilter, typeFilter, search, sort]);
 
-  // KPI cards intentionally use all-time authenticated sums and are not affected by table filters.
+  // Cashbook KPI cards intentionally use allLedgerRows only. Dashboard-equivalent values are logged only for reconciliation comparison.
   const kpi = useMemo(() => {
-    const allRows = allLedgerRows; // all-time, not filtered
+    // Source of truth for cash/bank KPI: normalized allLedgerRows (after supplier direct + legacy grouping).
+    const allRows = allLedgerRows; // all-time, not filtered/paginated
     const cash = allRows.reduce((sum, r) => sum + r.cashIn - r.cashOut, 0);
     const bank = allRows.reduce((sum, r) => sum + r.bankIn - r.bankOut, 0);
+    const ledgerReceivableKpi = allRows.reduce((sum, r) => sum + r.receivableIncrease - r.receivableDecrease, 0);
+    const ledgerPayableKpi = allRows.reduce((sum, r) => sum + r.payableIncrease - r.payableDecrease, 0);
 
     const canonicalSnapshot: any = getCanonicalCustomerBalanceSnapshot(safeCustomers, safeTransactions);
     const balances: Map<string, any> = canonicalSnapshot?.balances instanceof Map ? canonicalSnapshot.balances : new Map<string, any>();
@@ -260,7 +314,7 @@ export default function Cashbook() {
       const dashboardTotalDueUsed = Math.max(0, Number(rawBalanceObject?.totalDue || 0));
       return { customerId: customer.id, customerName: customer.name || '-', dashboardTotalDueUsed, storeCredit: Number(rawBalanceObject?.storeCredit || 0), rawBalanceObject };
     });
-    const dashboardEquivalentTotalReceivable = dashboardEquivalentReceivableRows.reduce((sum, row) => sum + row.dashboardTotalDueUsed, 0);
+    const canonicalReceivableForComparison = dashboardEquivalentReceivableRows.reduce((sum, row) => sum + row.dashboardTotalDueUsed, 0);
 
     const cashbookReceivableRows = safeCustomers.map((customer) => {
       const rawBalanceObject = balances.get(customer.id);
@@ -278,23 +332,24 @@ export default function Cashbook() {
       })
       .filter((row) => Math.abs(row.difference) > 0.0001);
 
-    const payable = safePurchaseOrders.filter((po) => Math.max(0, Number(po.remainingAmount || 0)) > 0).reduce((sum, po) => sum + Math.max(0, Number(po.remainingAmount || 0)), 0);
-    const dashboardEquivalentTotalPayable = payable;
-    const cashbookPayable = payable;
+    const dashboardPayableForComparison = safePurchaseOrders.filter((po) => Math.max(0, Number(po.remainingAmount || 0)) > 0).reduce((sum, po) => sum + Math.max(0, Number(po.remainingAmount || 0)), 0);
+    const receivableDifference = canonicalReceivableForComparison - ledgerReceivableKpi;
+    const payableDifference = dashboardPayableForComparison - ledgerPayableKpi;
 
     if (CASHBOOK_RECONCILE_DEBUG && typeof window !== 'undefined') {
       console.table(dashboardEquivalentReceivableRows);
       console.table(cashbookReceivableRows);
       console.table(mismatchRows);
-      console.log('[CASHBOOK_RECON] dashboardEquivalentTotalReceivable=', dashboardEquivalentTotalReceivable);
+      console.log('[CASHBOOK_RECON] canonicalReceivableForComparison=', canonicalReceivableForComparison);
       console.log('[CASHBOOK_RECON] cashbookCurrentReceivable=', cashbookCurrentReceivable);
-      console.log('[CASHBOOK_RECON] receivableDifference=', dashboardEquivalentTotalReceivable - cashbookCurrentReceivable);
-      console.log('[CASHBOOK_RECON] dashboardEquivalentTotalPayable=', dashboardEquivalentTotalPayable);
-      console.log('[CASHBOOK_RECON] cashbookPayable=', cashbookPayable);
-      console.log('[CASHBOOK_RECON] payableDifference=', dashboardEquivalentTotalPayable - cashbookPayable);
+      console.log('[CASHBOOK_RECON] ledgerReceivableKpi=', ledgerReceivableKpi);
+      console.log('[CASHBOOK_RECON] receivableDifference=', receivableDifference);
+      console.log('[CASHBOOK_RECON] dashboardPayableForComparison=', dashboardPayableForComparison);
+      console.log('[CASHBOOK_RECON] ledgerPayableKpi=', ledgerPayableKpi);
+      console.log('[CASHBOOK_RECON] payableDifference=', payableDifference);
     }
 
-    return { cash, bank, receivable: dashboardEquivalentTotalReceivable, payable: cashbookPayable };
+    return { cash, bank, receivable: ledgerReceivableKpi, payable: ledgerPayableKpi };
   }, [allLedgerRows, safeCustomers, safeTransactions, safePurchaseOrders]);
 
   useEffect(() => setVisibleRowCount(100), [from, to, payFilter, typeFilter, search, sort]);

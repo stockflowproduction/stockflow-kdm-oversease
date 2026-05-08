@@ -18,7 +18,7 @@ type Expense = {
   createdAt: string;
 };
 
-type FinanceTabKey = 'dashboard' | 'cashbook' | 'cash' | 'expense' | 'credit' | 'profit';
+type FinanceTabKey = 'cash' | 'expense';
 type ExpenseDatePreset = 'today' | '7d' | '15d' | 'month' | 'custom';
 
 type CashbookRow = {
@@ -463,6 +463,71 @@ const getSessionCashTotals = (
   return totals;
 };
 
+type ShiftMovementRow = { id: string; date: string; type: string; direction: 'in' | 'out'; name: string; ref: string; description: string; amount: number; source: string };
+const buildShiftCashMovementBreakdown = (
+  state: AppState,
+  session: CashSession,
+  computedTotals: ReturnType<typeof getSessionCashTotals>
+) => {
+  const start = new Date(session.startTime).getTime();
+  const end = session.endTime ? new Date(session.endTime).getTime() : Number.POSITIVE_INFINITY;
+  const cashInRows: ShiftMovementRow[] = [];
+  const cashOutRows: ShiftMovementRow[] = [];
+  const pushRow = (row: ShiftMovementRow) => (row.direction === 'in' ? cashInRows : cashOutRows).push(row);
+  (state.transactions || []).forEach((tx) => {
+    const at = resolveTransactionTimeForSession(tx);
+    if (!Number.isFinite(at) || at < start || at > end) return;
+    if (tx.type === 'sale') {
+      const s = getSaleSettlementBreakdown(tx);
+      if (s.cashPaid > 0) pushRow({ id: `sale-${tx.id}`, date: tx.date, type: 'Cash Sale', direction: 'in', name: tx.customerName || 'Walk-in', ref: tx.id.slice(-6), description: 'Cash from sale invoice', amount: s.cashPaid, source: 'salesCash' });
+    }
+    if (tx.type === 'payment' && tx.paymentMethod === 'Cash') pushRow({ id: `pay-${tx.id}`, date: tx.date, type: 'Customer Collection', direction: 'in', name: tx.customerName || 'Customer', ref: tx.id.slice(-6), description: 'Cash collection', amount: Math.abs(tx.total), source: 'customerCollections' });
+    if (tx.type === 'return') {
+      const effects = getReturnFinancialEffects(tx);
+      if (effects.affectsCash) pushRow({ id: `ret-${tx.id}`, date: tx.date, type: 'Cash Refund', direction: 'out', name: tx.customerName || 'Customer', ref: tx.id.slice(-6), description: 'Cash refund / return', amount: Math.abs(tx.total), source: 'refunds' });
+    }
+  });
+  (state.cashAdjustments || []).forEach((entry) => {
+    const at = new Date(entry.createdAt).getTime();
+    if (!Number.isFinite(at) || at < start || at > end) return;
+    if (entry.type === 'cash_addition') pushRow({ id: `adj-in-${entry.id}`, date: entry.createdAt, type: 'Cash Addition', direction: 'in', name: 'Manual', ref: entry.id.slice(-6), description: entry.note || 'Cash addition', amount: Math.max(0, Number(entry.amount) || 0), source: 'cashAdditions' });
+    if (entry.type === 'cash_withdrawal') pushRow({ id: `adj-out-${entry.id}`, date: entry.createdAt, type: 'Cash Withdrawal', direction: 'out', name: 'Manual', ref: entry.id.slice(-6), description: entry.note || 'Cash withdrawal', amount: Math.max(0, Number(entry.amount) || 0), source: 'cashWithdrawals' });
+  });
+  (state.expenses || []).forEach((e) => {
+    const at = new Date(e.createdAt).getTime();
+    if (!Number.isFinite(at) || at < start || at > end) return;
+    pushRow({ id: `exp-${e.id}`, date: e.createdAt, type: 'Expense', direction: 'out', name: e.title, ref: e.id.slice(-6), description: e.note || 'Expense', amount: Math.max(0, Number(e.amount) || 0), source: 'expenses' });
+  });
+  (state.deleteCompensations || []).forEach((d) => {
+    const at = new Date(d.createdAt).getTime();
+    if (!Number.isFinite(at) || at < start || at > end) return;
+    pushRow({ id: `del-${d.id}`, date: d.createdAt, type: 'Delete Compensation', direction: 'out', name: d.customerName || 'Customer', ref: d.transactionId.slice(-6), description: 'Cash refund compensation', amount: Math.max(0, Number(d.amount) || 0), source: 'deleteCompensations' });
+  });
+  const supplierPayments = ((state as any).supplierPayments || []) as any[];
+  supplierPayments.forEach((p) => {
+    const at = new Date(p.paidAt).getTime();
+    if (!Number.isFinite(at) || at < start || at > end || p.deletedAt || p.method !== 'cash') return;
+    pushRow({ id: `sp-${p.id}`, date: p.paidAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
+  });
+  const legacySupplierMap = new Map<string, { date: string; party: string; note: string; amount: number }>();
+  (state.purchaseOrders || []).forEach((o) => (o.paymentHistory || []).forEach((ph: any) => {
+    if (ph.supplierPaymentId || (ph.method || 'cash') !== 'cash') return;
+    const at = new Date(ph.paidAt).getTime();
+    if (!Number.isFinite(at) || at < start || at > end) return;
+    const bucket = new Date(Math.floor(at / 60000) * 60000).toISOString().slice(0, 16);
+    const key = `${o.partyId}|${(ph.note || '').trim().toLowerCase()}|${bucket}`;
+    const ex = legacySupplierMap.get(key) || { date: ph.paidAt, party: o.partyName, note: ph.note || '', amount: 0 };
+    ex.amount = roundMoney(ex.amount + Math.max(0, Number(ph.amount) || 0));
+    legacySupplierMap.set(key, ex);
+  }));
+  legacySupplierMap.forEach((g, key) => pushRow({ id: `legacy-${key}`, date: g.date, type: 'Party Payment', direction: 'out', name: g.party, ref: 'LEGACY', description: g.note || 'Cash supplier payment allocated across POs', amount: g.amount, source: 'legacySupplierPayments' }));
+  cashInRows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  cashOutRows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const cashInTotal = roundMoney(cashInRows.reduce((s, r) => s + r.amount, 0));
+  const cashOutTotal = roundMoney(cashOutRows.reduce((s, r) => s + r.amount, 0));
+  return { cashInRows, cashOutRows, cashInTotal, cashOutTotal, expectedCash: roundMoney(session.openingBalance + computedTotals.systemCashTotal) };
+};
+
 const CLOSING_DENOMS = [500, 200, 100, 50, 20, 10, 5, 2, 1] as const;
 const HIGH_DENOMS = [500, 200, 100, 50, 20] as const;
 const LOW_DENOMS = [10, 5, 2, 1] as const;
@@ -530,10 +595,13 @@ function MoneyTile({ label, value, tone = 'neutral' }: { label: string; value: s
 export default function Finance() {
   const [data, setData] = useState<AppState>(loadData());
   const [errors, setErrors] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<FinanceTabKey>('cashbook');
+  const [activeTab, setActiveTab] = useState<FinanceTabKey>('cash');
+  useEffect(() => {
+    if (!['cash', 'expense'].includes(activeTab)) setActiveTab('cash');
+  }, [activeTab]);
   // Cash tab summary cards depend on the same canonical cashbook rows used by cashbook/profit tabs.
   // Keep derivation gated to tabs that actually render those metrics so other tabs stay lightweight.
-  const shouldComputeDetailedCashbook = activeTab === 'cashbook' || activeTab === 'profit' || activeTab === 'cash';
+  const shouldComputeDetailedCashbook = activeTab === 'cash';
 
   const [openingBalance, setOpeningBalance] = useState('');
   const [openingBalanceAutoFilled, setOpeningBalanceAutoFilled] = useState(false);
@@ -2082,11 +2150,8 @@ export default function Finance() {
   const chartMax = Math.max(monthlySummary.netSales, monthlySummary.todayExpenses, Math.abs(monthlySummary.grossProfit), 1);
 
   const tabs: Array<{ key: FinanceTabKey; label: string; icon: React.ReactNode }> = [
-    { key: 'cashbook', label: 'Cashbook', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
     { key: 'cash', label: 'Cash Management', icon: <Wallet className="w-4 h-4" /> },
     { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
-    { key: 'credit', label: 'Credit Management', icon: <DollarSign className="w-4 h-4" /> },
-    { key: 'profit', label: 'Profit Summary', icon: <BarChart3 className="w-4 h-4" /> }
   ];
 
   return (
@@ -2121,7 +2186,7 @@ export default function Finance() {
           })}
         </div>
 
-        {activeTab === 'cashbook' && (
+        {activeTab === '__removed_cashbook__' && (
           <div className="space-y-4">
             <Card className="border-slate-200 shadow-sm">
               <CardContent className="space-y-3">
@@ -2160,7 +2225,7 @@ export default function Finance() {
                     : 'Cashbook scope: Recent 90 days (performance mode). Switch to Full History Scope for complete accounting view/export.'}
                 </div>
                 <div className="rounded-md border p-2.5 bg-muted/20">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Cashbook Download Center</div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">Removed Download Center</div>
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" variant="outline" onClick={() => exportCashbookCsv(false)}>Download CSV</Button>
                     <Button size="sm" variant="outline" onClick={() => exportCashbookWorkbook('xls')}>Download Excel</Button>
@@ -2177,7 +2242,7 @@ export default function Finance() {
             <Card className="border-slate-200 shadow-sm">
               <CardHeader>
                 <CardTitle className="flex items-center justify-between gap-2">
-                  <span>Transaction-by-transaction KPI Effect Table</span>
+                  <span>Removed KPI Table</span>
                   <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px]" onClick={() => setShowFullCashbookColumns(prev => !prev)}>
                     {showFullCashbookColumns ? 'Show compact columns' : 'Show full accountant columns'}
                   </Button>
@@ -2612,7 +2677,7 @@ export default function Finance() {
                         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3"><div className="text-[11px] font-medium text-slate-500">System cash</div><div className="mt-1 text-sm font-semibold text-slate-900">{formatINR(systemCashTotal)}</div></div>
                       </div>
                       <div className="px-4 pb-4">
-                        <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-600">Expenses deducted in this shift: <span className="font-semibold text-slate-900">{formatINR(sessionExpenseTotal)}</span></div>
+                        <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-600">Cash out in this shift: <span className="font-semibold text-slate-900">{formatINR(sessionExpenseTotal)}</span></div>
                         {session.closingEditedAt && (
                           <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800">Closing edited {new Date(session.closingEditedAt).toLocaleString()}{session.closingEditNote ? ` • ${session.closingEditNote}` : ''}</div>
                         )}
@@ -2674,6 +2739,7 @@ export default function Finance() {
                 return expTime >= sessionStartTs && expTime <= sessionEndTs;
               });
               const expenseTotal = sessionExpenses.reduce((sum, e) => sum + e.amount, 0);
+              const movement = buildShiftCashMovementBreakdown(data as AppState, activeHistorySession, computedTotals);
 
               return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4" role="dialog" aria-modal="true" onClick={() => setActiveHistoryDetailSessionId(null)}>
@@ -2706,7 +2772,30 @@ export default function Finance() {
                         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3"><div className="text-[11px] font-medium text-slate-500">Counted cash</div><div className="mt-1 text-sm font-semibold text-slate-900">{formatINR(activeHistorySession.closingBalance ?? 0)}</div></div>
                         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3"><div className="text-[11px] font-medium text-slate-500">System cash</div><div className="mt-1 text-sm font-semibold text-slate-900">{formatINR(activeHistorySession.openingBalance + systemCashTotal)}</div></div>
                       </div>
-                      <div className="text-xs text-slate-600">Expenses deducted in this shift: <span className="font-semibold text-slate-800">{formatINR(sessionExpenseTotal)}</span></div>
+                      <div className="text-xs text-slate-600">Cash out in this shift: <span className="font-semibold text-slate-800">{formatINR(movement.cashOutTotal)}</span></div>
+
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3"><div className="text-[11px] text-emerald-700">Cash In</div><div className="mt-1 text-sm font-semibold text-emerald-900">{formatINR(movement.cashInTotal)}</div></div>
+                        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3"><div className="text-[11px] text-rose-700">Cash Out</div><div className="mt-1 text-sm font-semibold text-rose-900">{formatINR(movement.cashOutTotal)}</div></div>
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><div className="text-[11px] text-slate-700">Expected/System Cash</div><div className="mt-1 text-sm font-semibold text-slate-900">{formatINR(movement.expectedCash)}</div></div>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                          <div className="border-b border-slate-200 p-3 text-sm font-semibold text-emerald-700">Cash In Breakdown</div>
+                          <div className="grid grid-cols-12 gap-2 bg-slate-50 px-3 py-2 text-[11px] font-semibold text-slate-600"><div className="col-span-3">Time</div><div className="col-span-3">Type</div><div className="col-span-3">Name</div><div className="col-span-3 text-right">Amount</div></div>
+                          <div className="max-h-[220px] overflow-auto divide-y divide-slate-200">
+                            {movement.cashInRows.length === 0 ? <div className="p-4 text-sm text-slate-500">No cash-in movements for this shift.</div> : movement.cashInRows.map(row => <div key={row.id} className="grid grid-cols-12 gap-2 px-3 py-2 text-xs"><div className="col-span-3">{new Date(row.date).toLocaleTimeString()}</div><div className="col-span-3">{row.type}</div><div className="col-span-3 truncate">{row.name}</div><div className="col-span-3 text-right font-semibold">{formatINR(row.amount)}</div></div>)}
+                          </div>
+                        </div>
+                        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                          <div className="border-b border-slate-200 p-3 text-sm font-semibold text-rose-700">Cash Out Breakdown</div>
+                          <div className="grid grid-cols-12 gap-2 bg-slate-50 px-3 py-2 text-[11px] font-semibold text-slate-600"><div className="col-span-3">Time</div><div className="col-span-3">Type</div><div className="col-span-3">Name</div><div className="col-span-3 text-right">Amount</div></div>
+                          <div className="max-h-[220px] overflow-auto divide-y divide-slate-200">
+                            {movement.cashOutRows.length === 0 ? <div className="p-4 text-sm text-slate-500">No cash-out movements for this shift.</div> : movement.cashOutRows.map(row => <div key={row.id} className="grid grid-cols-12 gap-2 px-3 py-2 text-xs"><div className="col-span-3">{new Date(row.date).toLocaleTimeString()}</div><div className="col-span-3">{row.type}</div><div className="col-span-3 truncate">{row.name}</div><div className="col-span-3 text-right font-semibold">{formatINR(row.amount)}</div></div>)}
+                          </div>
+                        </div>
+                      </div>
 
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -3014,9 +3103,9 @@ export default function Finance() {
           </div>
         )}
 
-        {activeTab === 'credit' && (
+        {activeTab === '__removed_credit__' && (
           <Card className="border-slate-200 shadow-sm">
-            <CardHeader><CardTitle>Credit Management</CardTitle></CardHeader>
+            <CardHeader><CardTitle>Credit Ops</CardTitle></CardHeader>
             <CardContent className="space-y-3">
               {creditCustomers.map(customer => (
                 <div key={customer.id} className="border rounded-lg p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
@@ -3054,7 +3143,7 @@ export default function Finance() {
           </Card>
         )}
 
-        {activeTab === 'profit' && (
+        {activeTab === '__removed_profit__' && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
             <div className="lg:col-span-5 space-y-4">
               <Card className="border-slate-200 shadow-sm">

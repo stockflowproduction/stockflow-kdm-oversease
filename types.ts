@@ -455,12 +455,27 @@ export interface PurchaseOrder {
     amount: number;
     method?: 'cash' | 'online';
     note?: string;
+    supplierPaymentId?: string;
   }>;
   receivedQuantity?: number;
   createdAt: string;
   updatedAt: string;
   createdBy?: string;
   updatedBy?: string;
+}
+
+export interface SupplierPaymentLedgerEntry {
+  id: string;
+  partyId: string;
+  partyName: string;
+  amount: number;
+  method: 'cash' | 'online';
+  paidAt: string;
+  note?: string;
+  createdAt: string;
+  updatedAt?: string;
+  deletedAt?: string;
+  allocations?: Array<{ orderId: string; orderRef?: string; amount: number }>;
 }
 
 export interface ExpenseActivity {
@@ -585,6 +600,7 @@ export interface AppState {
   freightBrokers?: FreightBroker[];
   purchaseParties?: PurchaseParty[];
   purchaseOrders?: PurchaseOrder[];
+  supplierPayments?: SupplierPaymentLedgerEntry[];
   variantsMaster?: string[];
   colorsMaster?: string[];
   migrationMarkers?: MigrationMarkers;

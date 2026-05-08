@@ -794,10 +794,10 @@ export default function Sales() {
       }
       const creditDue = isReturnMode ? 0 : clampCreditDueAmount(checkoutMoney.creditDuePreviewWhole);
 
-      const splitTotal = roundMoneyWhole(cashPaid + onlinePaid + creditDue);
-      const payableWhole = roundMoneyWhole(checkoutMoney.remainingPayableWhole);
-      if (!isReturnMode && Math.abs(splitTotal - payableWhole) > 0.001) {
-          setCheckoutError(`Payment split mismatch. Total is ₹${formatMoneyWhole(payableWhole)}, but split is ₹${formatMoneyWhole(splitTotal)}. Please adjust Cash, Online, or Credit.`);
+      const splitTotal = roundMoneyWhole(cashPaid + onlinePaid + creditDue + appliedStoreCredit);
+      const totalWhole = roundMoneyWhole(Math.max(0, total));
+      if (!isReturnMode && Math.abs(splitTotal - totalWhole) > 0.001) {
+          setCheckoutError(`Payment split mismatch. Total is ₹${formatMoneyWhole(totalWhole)}, but Cash + Online + Credit + Store Credit is ₹${formatMoneyWhole(splitTotal)}. Please adjust the split.`);
           return;
       }
       if (!isReturnMode && creditDue > 0 && !finalCustomer) {
@@ -820,15 +820,24 @@ export default function Sales() {
             : 'Credit';
       const resolvedPaymentMethod: 'Cash' | 'Credit' | 'Online' = isReturnMode
         ? returnPaymentMethod
-        : creditDue > 0
-          ? 'Credit'
-          : onlinePaid > 0 && cashPaid === 0
-            ? 'Online'
-            : 'Cash';
+        : (() => {
+            const hasCash = cashPaid > 0;
+            const hasOnline = onlinePaid > 0;
+            const hasCredit = creditDue > 0;
+            const lanes = Number(hasCash) + Number(hasOnline) + Number(hasCredit);
+            if (lanes > 1) return 'Credit';
+            if (hasOnline) return 'Online';
+            if (hasCredit) return 'Credit';
+            return 'Cash';
+          })();
 
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
       if (!isReturnMode && cashPaid > 0) {
           const safeCashReceived = Math.max(0, Number(cashReceivedInput || 0));
+          if (safeCashReceived < cashPaid) {
+            setCheckoutError(`Cash short by ₹${formatMoneyPrecise(cashPaid - safeCashReceived)}. Increase Cash Received or reduce Cash Paid.`);
+            return;
+          }
           const rawOverpay = Math.max(0, safeCashReceived - cashPaid);
           const storeCreditCreated = (storeOverpaymentAsCredit && finalCustomer) ? rawOverpay : 0;
           const changeReturned = Math.max(0, rawOverpay - storeCreditCreated);
@@ -971,14 +980,11 @@ export default function Sales() {
     if (!isCustomerModalOpen || isReturnMode) return;
     const payable = Math.max(0, Number(checkoutPreview.remainingPayableWhole || 0));
     const online = Math.max(0, Number(onlinePaidInput || 0));
+    const cash = Math.max(0, Number(cashPaidInput || 0));
     const credit = Math.max(0, Number(creditDueInput || 0));
-    const cappedCredit = Math.min(Math.max(0, payable - online), credit);
+    const cappedCredit = Math.min(Math.max(0, payable - online - cash), credit);
     if (cappedCredit !== credit) setCreditDueInput(String(cappedCredit));
-    if (!cashManuallyEdited) {
-      const nextCash = Math.max(0, payable - online - cappedCredit);
-      setCashPaidInput(String(nextCash));
-    }
-  }, [isCustomerModalOpen, isReturnMode, checkoutPreview.remainingPayableWhole, onlinePaidInput, creditDueInput, cashManuallyEdited]);
+  }, [isCustomerModalOpen, isReturnMode, checkoutPreview.remainingPayableWhole, onlinePaidInput, creditDueInput, cashPaidInput]);
   useEffect(() => {
     if (rawOverpaymentValue <= 0 && storeOverpaymentAsCredit) setStoreOverpaymentAsCredit(false);
   }, [rawOverpaymentValue, storeOverpaymentAsCredit]);
@@ -1716,21 +1722,19 @@ export default function Sales() {
                     </div>
 
                     <div className="space-y-1.5">
-                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Credit</Label>
+                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Credit Due</Label>
                       <div className="flex gap-2">
                         <Input type="number" min="0" step="0.01" placeholder="0.00" value={creditDueInput} onChange={(e) => { setCreditDueInput(e.target.value); setCheckoutError(null); }} />
                         <Button type="button" variant="outline" onClick={() => {
-                          const remaining = Math.max(0, checkoutPreview.remainingPayableWhole - roundMoneyWhole(onlinePaidValue));
+                          const remaining = Math.max(0, checkoutPreview.remainingPayableWhole - roundMoneyWhole(onlinePaidValue) - roundMoneyWhole(cashPaidValue));
                           setCreditDueInput(String(remaining));
-                          setCashPaidInput('0');
-                          setCashManuallyEdited(false);
                           setCheckoutError(null);
                         }}>Credit</Button>
                       </div>
                     </div>
                     <div className="rounded border bg-white p-2 text-xs space-y-1">
-                      <div className="flex justify-between"><span>Cash to collect</span><span className="font-semibold">₹{formatMoneyPrecise(cashToCollectValue)}</span></div>
-                      <div className="flex justify-between"><span>Cash received</span><span className="font-semibold">₹{formatMoneyPrecise(cashReceivedValue)}</span></div>
+                      <div className="flex justify-between"><span>Cash Paid</span><span className="font-semibold">₹{formatMoneyPrecise(cashToCollectValue)}</span></div>
+                      <div className="flex justify-between"><span>Cash Received/Tendered</span><span className="font-semibold">₹{formatMoneyPrecise(cashReceivedValue)}</span></div>
                       {cashToCollectValue === 0 ? (
                         <div className="text-muted-foreground">No cash collection required.</div>
                       ) : rawOverpaymentValue > 0 ? (
@@ -1742,12 +1746,14 @@ export default function Sales() {
                           {!selectedCustomer && <div className="text-[11px] text-muted-foreground">Select or create a customer to save store credit.</div>}
                         </div>
                       ) : cashShortfallValue > 0 ? (
-                        <div className={`font-semibold ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}>Amount still needed: ₹{formatMoneyPrecise(cashShortfallValue)}</div>
+                        <div className={`font-semibold ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}>Cash short by ₹{formatMoneyPrecise(cashShortfallValue)}</div>
                       ) : null}
                     </div>
                     <div className="text-xs space-y-1 border-t pt-2">
                       <div className="flex justify-between"><span>Paid Now (Cash + Online)</span><span>₹{formatMoneyWhole(checkoutPreview.settlementPaidNowWhole)}</span></div>
+                      <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(onlinePaidValue)}</span></div>
                       <div className="flex justify-between font-semibold"><span>Credit Due</span><span>₹{formatMoneyWhole(checkoutPreview.creditDuePreviewWhole)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Split Total</span><span>₹{formatMoneyWhole(roundMoneyWhole(cashPaidValue + onlinePaidValue + checkoutPreview.creditDuePreviewWhole + storeCreditUsed))}</span></div>
                       {checkoutPreview.hasWholeOverpay && (
                         <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{formatMoneyWhole(checkoutPreview.settlementOverpayWhole)}</p>
                       )}
