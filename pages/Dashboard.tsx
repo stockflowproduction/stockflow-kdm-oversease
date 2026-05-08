@@ -153,7 +153,8 @@ export default function Dashboard() {
       processed.push(tx);
     });
     const canonicalDue = Math.max(0, Number(canonicalSnapshot.balances.get(selectedCustomer.id)?.totalDue || 0));
-    return { rows, displayRows: rows, totalCreditSales, totalPayments, totalStoreCreditUsed, totalStoreCreditAdded, balanceDue: canonicalDue };
+    const displayRows = [...rows].reverse();
+    return { rows, displayRows, totalCreditSales, totalPayments, totalStoreCreditUsed, totalStoreCreditAdded, balanceDue: canonicalDue };
   }, [selectedCustomer, transactions, canonicalSnapshot]);
 
   const partyStatement = useMemo(() => {
@@ -218,7 +219,8 @@ export default function Dashboard() {
     });
 
     const remaining = Math.max(0, Number((totalPurchase - totalPaid).toFixed(2)));
-    return { rows, displayRows: rows, totalPurchase, totalPaid, remaining, lastPaymentAt, lastPurchaseAt };
+    const displayRows = [...rows].reverse();
+    return { rows, displayRows, totalPurchase, totalPaid, remaining, lastPaymentAt, lastPurchaseAt };
   }, [selectedParty, orders]);
 
   const openReceiveModal = (customer: CustomerReceivableRow) => {
@@ -474,8 +476,7 @@ export default function Dashboard() {
               </Button>
             </div>
             {statementPdfError && <p className="text-xs text-red-600">{statementPdfError}</p>}
-            <p className="text-xs text-muted-foreground">Ledger shown oldest to newest for running balance accuracy.</p>
-            <p className="text-xs text-muted-foreground">Ledger shown oldest to newest for running balance accuracy.</p>
+            <p className="text-xs text-muted-foreground">Latest transactions shown first. Balance means balance after that transaction.</p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Credit Due Generated</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(customerStatement.totalCreditSales)}</div></div>
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Payments Received</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(customerStatement.totalPayments)}</div></div>
@@ -507,6 +508,7 @@ export default function Dashboard() {
               </Button>
             </div>
             {statementPdfError && <p className="text-xs text-red-600">{statementPdfError}</p>}
+            <p className="text-xs text-muted-foreground">Latest transactions shown first. Balance means balance after that transaction.</p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Purchase</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(partyStatement.totalPurchase)}</div></div>
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Paid</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(partyStatement.totalPaid)}</div></div>
