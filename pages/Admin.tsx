@@ -52,8 +52,8 @@ export default function Admin() {
   const [purchaseReference, setPurchaseReference] = useState('');
   const [purchaseNotes, setPurchaseNotes] = useState('');
   const [purchasePartyName, setPurchasePartyName] = useState('');
-  const [purchasePaidAmount, setPurchasePaidAmount] = useState('');
-  const [purchasePaymentMethod, setPurchasePaymentMethod] = useState<'cash' | 'online' | 'credit'>('cash');
+  const [purchaseCashPaid, setPurchaseCashPaid] = useState('');
+  const [purchaseBankPaid, setPurchaseBankPaid] = useState('');
   const [purchasePaymentNote, setPurchasePaymentNote] = useState('');
   const [purchaseModalTab, setPurchaseModalTab] = useState<'add' | 'history'>('add');
   const [purchaseHistoryVariantFilter, setPurchaseHistoryVariantFilter] = useState('all');
@@ -373,14 +373,16 @@ export default function Admin() {
     const hasCombos = hasVariantAxes && Array.isArray(formData.stockByVariantColor) && formData.stockByVariantColor.length > 0;
 
     // Strict Validation
-    if (!formData.name || !formData.barcode || !formData.category ||
-        (!hasCombos && (formData.buyPrice === '' || formData.sellPrice === ''))) {
-        setError("Please fill in all required fields marked with *");
-        return;
-    }
+    const missingFields: string[] = [];
+    if (!String(formData.name || '').trim()) missingFields.push('Product Name');
+    if (!String(formData.barcode || '').trim()) missingFields.push('SKU / Product Code');
+    if (!String(formData.category || '').trim()) missingFields.push('Category');
+    if (!hasCombos && (formData.buyPrice === '' || formData.buyPrice === null || formData.buyPrice === undefined)) missingFields.push('Buy Price');
+    if (!hasCombos && (formData.sellPrice === '' || formData.sellPrice === null || formData.sellPrice === undefined)) missingFields.push('Sell Price');
     const hasManualStock = formData.stock !== '' && formData.stock !== null && formData.stock !== undefined;
-    if (!hasCombos && !hasManualStock) {
-      setError('Opening stock is required.');
+    if (!hasCombos && !hasManualStock) missingFields.push('Stock / Quantity');
+    if (missingFields.length > 0) {
+      setError(`Please fill required fields: ${missingFields.join(', ')}`);
       return;
     }
     const openingStockValue = toNonNegativeNumber(formData.stock);
@@ -611,12 +613,6 @@ export default function Admin() {
     setSelectedPurchaseVariantKey(prev => (prev && purchaseVariantRows.some(row => row.key === prev)) ? prev : purchaseVariantRows[0].key);
   }, [purchaseTarget, purchaseVariantRows]);
 
-  useEffect(() => {
-    if (purchasePaymentMethod === 'credit' && purchasePaidAmount !== '0') {
-      setPurchasePaidAmount('0');
-    }
-  }, [purchasePaymentMethod, purchasePaidAmount]);
-
   const purchaseTotalCost = useMemo(() => {
     const qty = Number(purchaseQty);
     const unitPrice = Number(purchasePrice);
@@ -624,17 +620,10 @@ export default function Admin() {
     return Math.max(0, Number((qty * unitPrice).toFixed(2)));
   }, [purchaseQty, purchasePrice]);
 
-  const purchaseEffectivePaidAmount = useMemo(() => {
-    if (purchasePaymentMethod === 'credit') return 0;
-    const paid = Number(purchasePaidAmount);
-    if (!Number.isFinite(paid)) return 0;
-    return Math.max(0, Math.min(purchaseTotalCost, paid));
-  }, [purchasePaidAmount, purchasePaymentMethod, purchaseTotalCost]);
-
-  const purchaseRemainingDue = useMemo(
-    () => Math.max(0, Number((purchaseTotalCost - purchaseEffectivePaidAmount).toFixed(2))),
-    [purchaseTotalCost, purchaseEffectivePaidAmount]
-  );
+  const purchaseEffectiveCashPaid = useMemo(() => Math.max(0, Number(purchaseCashPaid || 0) || 0), [purchaseCashPaid]);
+  const purchaseEffectiveBankPaid = useMemo(() => Math.max(0, Number(purchaseBankPaid || 0) || 0), [purchaseBankPaid]);
+  const purchaseEffectivePaidAmount = useMemo(() => Number((purchaseEffectiveCashPaid + purchaseEffectiveBankPaid).toFixed(2)), [purchaseEffectiveCashPaid, purchaseEffectiveBankPaid]);
+  const purchaseRemainingDue = useMemo(() => Math.max(0, Number((purchaseTotalCost - purchaseEffectivePaidAmount).toFixed(2))), [purchaseTotalCost, purchaseEffectivePaidAmount]);
 
   useEffect(() => {
     if (editingProduct) return;
@@ -674,8 +663,9 @@ export default function Admin() {
     const notes = purchaseNotes.trim() || undefined;
     const partyName = purchasePartyName.trim();
     const totalAmount = purchaseTotalCost;
-    const paidAmountRaw = Math.max(0, Number(purchasePaidAmount) || 0);
-    const paidAmount = purchasePaymentMethod === 'credit' ? 0 : paidAmountRaw;
+    const cashPaid = Math.max(0, Number(purchaseCashPaid) || 0);
+    const bankPaid = Math.max(0, Number(purchaseBankPaid) || 0);
+    const paidAmount = Number((cashPaid + bankPaid).toFixed(2));
     if (!partyName) {
       alert('Supplier/party name is required.');
       return;
@@ -684,20 +674,12 @@ export default function Admin() {
       alert('Total cost is invalid.');
       return;
     }
-    if (!purchasePaymentMethod && totalAmount > 0) {
-      alert('Payment method is required.');
-      return;
-    }
-    if (paidAmount > totalAmount) {
-      alert('Paid amount cannot exceed total purchase amount.');
+    if (paidAmount > totalAmount + 0.0001) {
+      alert('Payment split exceeds total purchase amount. Please reduce Cash or Bank.');
       return;
     }
     if (paidAmount < 0 || !Number.isFinite(paidAmount)) {
       alert('Paid amount must be a valid non-negative number.');
-      return;
-    }
-    if (purchasePaymentMethod === 'credit' && paidAmountRaw > 0) {
-      alert('Credit purchase requires paid amount = 0.');
       return;
     }
 
@@ -762,13 +744,10 @@ export default function Admin() {
       lines: [line],
       totalQuantity: qty,
       totalAmount,
-      paymentHistory: paidAmount > 0 ? [{
-        id: `pop-init-${Date.now()}`,
-        paidAt: now,
-        amount: paidAmount,
-        method: purchasePaymentMethod === 'credit' ? 'online' : purchasePaymentMethod,
-        note: purchasePaymentNote.trim() || reference || undefined,
-      }] : [],
+      paymentHistory: [
+        ...(cashPaid > 0 ? [{ id: `pop-init-cash-${Date.now()}`, paidAt: now, amount: cashPaid, method: 'cash' as const, note: purchasePaymentNote.trim() || reference || undefined }] : []),
+        ...(bankPaid > 0 ? [{ id: `pop-init-bank-${Date.now()}`, paidAt: now, amount: bankPaid, method: 'online' as const, note: purchasePaymentNote.trim() || reference || undefined }] : []),
+      ],
       receivedQuantity: qty,
       createdAt: now,
       updatedAt: now,
@@ -792,7 +771,7 @@ export default function Admin() {
           previousBuyPrice: currentBuyPrice,
           nextBuyPrice,
           purchaseOrderId: orderId,
-          paymentMethod: purchasePaymentMethod,
+          paymentMethod: paidAmount > 0 ? (bankPaid > 0 && cashPaid === 0 ? 'online' : 'cash') : 'credit',
           paidAmount,
           partyName,
           reference,
@@ -812,8 +791,8 @@ export default function Admin() {
     setPurchaseNotes('');
     setPurchasePartyName('');
     setSelectedPurchasePartyId('');
-    setPurchasePaidAmount('');
-    setPurchasePaymentMethod('cash');
+    setPurchaseCashPaid('');
+    setPurchaseBankPaid('');
     setPurchasePaymentNote('');
     setSelectedPurchaseVariantKey('');
   };
@@ -1576,7 +1555,7 @@ export default function Admin() {
                 <td className="p-3">₹{metrics.combinedAvgBuyPrice.toFixed(2)} / ₹{metrics.combinedAvgSellPrice.toFixed(2)}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setSelectedPurchasePartyId(''); setPurchasePaidAmount(''); setPurchasePaymentMethod('cash'); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setSelectedPurchasePartyId(''); setPurchaseCashPaid(''); setPurchaseBankPaid(''); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
                     <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
                     <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
@@ -1980,22 +1959,17 @@ export default function Admin() {
                 </div>
                 <div className="rounded-lg border p-3 space-y-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Payment Details</div>
-                  <div><Label>Total Cost</Label><Input value={purchaseTotalCost.toFixed(2)} readOnly className="bg-muted/30 font-medium" /></div>
-                  <div><Label>Amount Paid Now</Label><Input type="number" min="0" max={purchaseTotalCost} value={purchasePaymentMethod === 'credit' ? '0' : purchasePaidAmount} onChange={(e) => setPurchasePaidAmount(e.target.value)} disabled={purchasePaymentMethod === 'credit'} /></div>
-                  <div>
-                    <Label>Payment Method</Label>
-                    <select className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm" value={purchasePaymentMethod} onChange={(e) => setPurchasePaymentMethod(e.target.value as 'cash' | 'online' | 'credit')}>
-                      <option value="cash">cash</option>
-                      <option value="online">online</option>
-                      <option value="credit">credit</option>
-                    </select>
-                  </div>
-                  {purchasePaymentMethod === 'credit' && <p className="text-xs text-muted-foreground">Credit purchase creates payable due and does not affect cash.</p>}
+                  <div><Label>Total Amount</Label><Input value={purchaseTotalCost.toFixed(2)} readOnly className="bg-muted/30 font-medium" /></div>
+                  <div><Label>Cash</Label><Input type="number" min="0" value={purchaseCashPaid} onChange={(e) => setPurchaseCashPaid(e.target.value)} /></div>
+                  <div><Label>Bank</Label><Input type="number" min="0" value={purchaseBankPaid} onChange={(e) => setPurchaseBankPaid(e.target.value)} /></div>
+                  <div><Label>Credit</Label><Input value={purchaseRemainingDue.toFixed(2)} readOnly className="bg-muted/30 font-medium" /></div>
                   <div><Label>Payment Note (optional)</Label><Input value={purchasePaymentNote} onChange={(e) => setPurchasePaymentNote(e.target.value)} /></div>
-                  <div className="grid grid-cols-3 gap-2 text-xs pt-2">
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs pt-2">
                     <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">₹{purchaseTotalCost.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Cash Paid</div><div className="font-semibold">₹{purchaseEffectiveCashPaid.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Bank Paid</div><div className="font-semibold">₹{purchaseEffectiveBankPaid.toFixed(2)}</div></div>
                     <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Amount Paid</div><div className="font-semibold">₹{purchaseEffectivePaidAmount.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Remaining Due</div><div className="font-semibold">₹{purchaseRemainingDue.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Credit / Remaining Due</div><div className="font-semibold">₹{purchaseRemainingDue.toFixed(2)}</div></div>
                   </div>
                 </div>
               </div>

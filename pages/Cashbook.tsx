@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { loadData, getSaleSettlementBreakdown, getCanonicalCustomerBalanceSnapshot } from '../services/storage';
 import { CashAdjustment, Expense, PurchaseOrder, Transaction } from '../types';
 
-type LedgerType = 'sale' | 'payment' | 'purchase' | 'supplier_payment' | 'expense' | 'return' | 'adjustment' | 'credit';
+type LedgerType = 'sale' | 'payment' | 'purchase' | 'supplier_payment' | 'expense' | 'return' | 'adjustment' | 'credit' | 'deleted_sale' | 'deleted_refund';
 type PayType = 'cash' | 'online' | 'credit' | 'mixed' | 'na';
 
 type Row = {
@@ -53,6 +53,51 @@ const getCashbookReturnBreakdown = (txAny: any) => {
   return { cashOut: 0, bankOut: 0, receivableDecrease: amount, storeCreditIncrease: storeCreditCreated, payment: method === 'credit' ? 'credit' as PayType : 'na' as PayType };
 };
 
+
+
+const getDeletedTransactionLedgerRow = (deleted: any, customerMap: Map<string, string>): Row | null => {
+  const original = asPlainObject(deleted?.originalTransaction);
+  const originalId = String(deleted?.originalTransactionId || original?.id || deleted?.id || '');
+  const reference = getCashbookReference({ ...original, id: originalId });
+  const party = deleted?.customerName || getCashbookCustomerName(original, customerMap);
+  const date = String(deleted?.deletedAt || original?.date || deleted?.createdAt || '');
+  const txType = String(deleted?.type || original?.type || '').toLowerCase();
+
+  if (txType === 'sale' || txType === 'historical_reference') {
+    const settlement = getCashbookSaleBreakdown(original as Transaction, original);
+    const isMixed = (settlement.cashPaid > 0 && settlement.onlinePaid > 0) || (settlement.creditDue > 0 && (settlement.cashPaid > 0 || settlement.onlinePaid > 0));
+    const payment: PayType = isMixed ? 'mixed' : (settlement.creditDue > 0 ? 'credit' : (settlement.cashPaid > 0 ? 'cash' : settlement.onlinePaid > 0 ? 'online' : getCashbookPaymentMethod(original)));
+    return {
+      id: `dtx-${deleted.id || originalId}`,
+      date,
+      type: 'deleted_sale',
+      description: `Deleted Sale #${reference} — ${party}`,
+      reference,
+      party,
+      payment,
+      cashIn: settlement.cashPaid,
+      cashOut: 0,
+      bankIn: settlement.onlinePaid,
+      bankOut: 0,
+      receivableIncrease: settlement.creditDue,
+      receivableDecrease: 0,
+      payableIncrease: 0,
+      payableDecrease: 0,
+      storeCreditIncrease: 0,
+      storeCreditDecrease: Math.max(0, toNum(original?.storeCreditUsed)),
+    };
+  }
+
+  if (txType === 'payment') {
+    const amount = Math.abs(toNum(original?.total));
+    const payment = getCashbookPaymentMethod(original);
+    return { id: `dtx-${deleted.id || originalId}`, date, type: 'deleted_sale', description: `Deleted Payment #${reference} — ${party}`, reference, party, payment,
+      cashIn: payment === 'cash' ? amount : 0, cashOut: 0, bankIn: payment === 'online' ? amount : 0, bankOut: 0,
+      receivableIncrease: 0, receivableDecrease: amount, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 };
+  }
+
+  return null;
+};
 
 const detectCashbookTransactionType = (txAny: any): 'sale' | 'payment' | 'return' | 'unknown' => {
   const t = String(txAny?.type || txAny?.transactionType || '').toLowerCase();
@@ -119,6 +164,7 @@ export default function Cashbook() {
   const safePurchaseOrders = asArray<PurchaseOrder>(data.purchaseOrders);
   const safeExpenses = asArray<Expense>(data.expenses);
   const safeCashAdjustments = asArray<CashAdjustment>(data.cashAdjustments);
+  const safeDeletedTransactions = asArray<any>(data.deletedTransactions);
   const safeDeleteCompensations = asArray<any>(data.deleteCompensations);
   const safeUpdatedTransactionEvents = asArray<any>(data.updatedTransactionEvents);
   const safeCustomers = asArray<any>(data.customers);
@@ -139,15 +185,45 @@ export default function Cashbook() {
     const adjRows: Row[] = safeCashAdjustments.map((a) => ({ id: `adj-${a.id}`, date: a.createdAt, type: 'adjustment', description: a.type === 'cash_addition' ? `Manual Cash Added — ${a.note || ''}` : `Manual Cash Withdrawn — ${a.note || ''}`,
       reference: a.id, party: '-', payment: 'cash', cashIn: a.type === 'cash_addition' ? a.amount : 0, cashOut: a.type === 'cash_withdrawal' ? a.amount : 0, bankIn: 0, bankOut: 0,
       receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 }));
+    const activeTxIds = new Set(safeTransactions.map((tx) => String(tx.id)));
+    const deletedTxRows: Row[] = safeDeletedTransactions
+      .filter((deleted) => !activeTxIds.has(String(deleted?.originalTransactionId || deleted?.originalTransaction?.id || '')))
+      .map((deleted) => getDeletedTransactionLedgerRow(deleted, customerMap))
+      .filter((row): row is Row => !!row);
+    const deletedByOriginalId = new Map(safeDeletedTransactions.map((d) => [String(d?.originalTransactionId || d?.originalTransaction?.id || ''), d]));
+    const compensationRows: Row[] = safeDeleteCompensations.map((c) => {
+      const linkedDeleted = deletedByOriginalId.get(String(c.transactionId));
+      const reference = linkedDeleted ? getCashbookReference({ ...(linkedDeleted.originalTransaction || {}), id: c.transactionId }) : (String(c.transactionId || '').slice(-6) || 'UNKNOWN');
+      const party = c.customerName || linkedDeleted?.customerName || 'Customer';
+      const isOrphan = !linkedDeleted;
+      return {
+        id: `dc-${c.id}`,
+        date: c.createdAt,
+        type: 'deleted_refund' as LedgerType,
+        description: isOrphan ? `Deleted Refund (orphan) #${reference} — ${party}` : `Refund on Deleted Sale #${reference} — ${party}`,
+        reference: String(c.transactionId || c.id),
+        party,
+        payment: c.mode === 'online_refund' ? 'online' as PayType : 'cash' as PayType,
+        cashIn: 0,
+        cashOut: c.mode === 'online_refund' ? 0 : Math.max(0, toNum(c.amount)),
+        bankIn: 0,
+        bankOut: c.mode === 'online_refund' ? Math.max(0, toNum(c.amount)) : 0,
+        receivableIncrease: 0,
+        receivableDecrease: 0,
+        payableIncrease: 0,
+        payableDecrease: 0,
+        storeCreditIncrease: 0,
+        storeCreditDecrease: 0,
+      };
+    });
     const corrRows: Row[] = [
-      ...safeDeleteCompensations.map((c) => ({ id: `dc-${c.id}`, date: c.createdAt, type: 'adjustment' as LedgerType, description: `Delete compensation — ${c.customerName || 'Customer'}`, reference: c.transactionId, party: c.customerName || '-', payment: 'cash' as PayType,
-        cashIn: 0, cashOut: c.amount, bankIn: 0, bankOut: 0, receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 })),
+      ...compensationRows,
       ...safeUpdatedTransactionEvents.map((u) => ({ id: `ute-${u.id}`, date: u.updatedAt, type: 'adjustment' as LedgerType, description: `Transaction edit correction — ${u.customerName || u.updatedTransactionId?.slice?.(-6) || ''}`, reference: u.originalTransactionId, party: u.customerName || '-', payment: 'na' as PayType,
         cashIn: Math.max(0, toNum(u.cashbookDelta?.cashIn)), cashOut: Math.max(0, toNum(u.cashbookDelta?.cashOut)), bankIn: Math.max(0, toNum(u.cashbookDelta?.onlineIn)), bankOut: Math.max(0, toNum(u.cashbookDelta?.onlineOut)),
         receivableIncrease: Math.max(0, toNum(u.cashbookDelta?.currentDueEffect)), receivableDecrease: Math.max(0, -toNum(u.cashbookDelta?.currentDueEffect)), payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: Math.max(0, toNum(u.cashbookDelta?.currentStoreCreditEffect)), storeCreditDecrease: Math.max(0, -toNum(u.cashbookDelta?.currentStoreCreditEffect)) })),
     ];
-    return [...txRows, ...purchaseRows, ...expenseRows, ...adjRows, ...corrRows].filter((r) => !!r.date && (r.cashIn || r.cashOut || r.bankIn || r.bankOut || r.receivableIncrease || r.receivableDecrease || r.payableIncrease || r.payableDecrease || r.storeCreditIncrease || r.storeCreditDecrease));
-  }, [safeTransactions, customerMap, safePurchaseOrders, safeExpenses, safeCashAdjustments, safeDeleteCompensations, safeUpdatedTransactionEvents]);
+    return [...txRows, ...deletedTxRows, ...purchaseRows, ...expenseRows, ...adjRows, ...corrRows].filter((r) => !!r.date && (r.cashIn || r.cashOut || r.bankIn || r.bankOut || r.receivableIncrease || r.receivableDecrease || r.payableIncrease || r.payableDecrease || r.storeCreditIncrease || r.storeCreditDecrease));
+  }, [safeTransactions, safeDeletedTransactions, customerMap, safePurchaseOrders, safeExpenses, safeCashAdjustments, safeDeleteCompensations, safeUpdatedTransactionEvents]);
 
   const allLedgerRows = useMemo(() => asArray<Row>(rows), [rows]);
 
@@ -237,12 +313,12 @@ export default function Cashbook() {
         <input type="date" value={from} onChange={e => setFrom(e.target.value)} className="border rounded px-2 h-9" />
         <input type="date" value={to} onChange={e => setTo(e.target.value)} className="border rounded px-2 h-9" />
         <select value={payFilter} onChange={e => setPayFilter(e.target.value as any)} className="border rounded px-2 h-9"><option value="all">All Payment</option><option value="cash">Cash</option><option value="online">Bank/Online</option><option value="credit">Credit</option></select>
-        <select value={typeFilter} onChange={e => setTypeFilter(e.target.value as any)} className="border rounded px-2 h-9"><option value="all">All Type</option><option value="sale">Sale</option><option value="payment">Payment</option><option value="purchase">Purchase</option><option value="supplier_payment">Supplier Payment</option><option value="expense">Expense</option><option value="return">Return</option><option value="adjustment">Adjustment</option><option value="credit">Credit</option></select>
+        <select value={typeFilter} onChange={e => setTypeFilter(e.target.value as any)} className="border rounded px-2 h-9"><option value="all">All Type</option><option value="sale">Sale</option><option value="credit">Credit Sale</option><option value="payment">Payment</option><option value="return">Return</option><option value="deleted_sale">Deleted Sale</option><option value="deleted_refund">Deleted Refund</option><option value="purchase">Purchase</option><option value="supplier_payment">Supplier Payment</option><option value="expense">Expense</option><option value="adjustment">Adjustment</option></select>
         <select value={sort} onChange={e => setSort(e.target.value as any)} className="border rounded px-2 h-9"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select>
         <button onClick={() => setFull(v => !v)} className="border rounded px-2 h-9">{full ? 'Compact columns' : 'Show full accountant columns'}</button>
       </div>
       <input placeholder="Search description/customer/party/reference" value={search} onChange={e => setSearch(e.target.value)} className="border rounded px-2 h-9 w-full" />
-      <div className="overflow-auto"><table className="min-w-[1400px] w-full text-xs"><thead><tr className="text-left border-b"><th>Date</th><th>Type</th><th>Description</th><th>Payment</th><th className="text-right">Cash In</th><th className="text-right">Cash Out</th><th className="text-right">Bank In</th><th className="text-right">Bank Out</th><th className="text-right">Recv +</th><th className="text-right">Recv -</th><th className="text-right">Pay +</th><th className="text-right">Pay -</th><th className="text-right">SC +</th><th className="text-right">SC -</th><th className="text-right">Cash Bal</th><th className="text-right">Bank Bal</th></tr></thead><tbody>{visibleRows.map((r) => { const bal = rowsWithChronoBalances.get(r.id) || { cash: 0, bank: 0 }; return <tr key={r.id} className="border-b"><td>{new Date(r.date).toLocaleString()}</td><td>{r.type}</td><td>{r.description}</td><td>{r.payment}</td><td className="text-right text-emerald-700">{r.cashIn ? fmt(r.cashIn) : '-'}</td><td className="text-right text-red-600">{r.cashOut ? fmt(r.cashOut) : '-'}</td><td className="text-right text-blue-700">{r.bankIn ? fmt(r.bankIn) : '-'}</td><td className="text-right text-red-600">{r.bankOut ? fmt(r.bankOut) : '-'}</td><td className="text-right">{r.receivableIncrease ? fmt(r.receivableIncrease) : '-'}</td><td className="text-right">{r.receivableDecrease ? fmt(r.receivableDecrease) : '-'}</td><td className="text-right">{r.payableIncrease ? fmt(r.payableIncrease) : '-'}</td><td className="text-right">{r.payableDecrease ? fmt(r.payableDecrease) : '-'}</td><td className="text-right">{r.storeCreditIncrease ? fmt(r.storeCreditIncrease) : '-'}</td><td className="text-right">{r.storeCreditDecrease ? fmt(r.storeCreditDecrease) : '-'}</td><td className="text-right">{fmt(bal.cash)}</td><td className="text-right">{fmt(bal.bank)}</td></tr>; })}</tbody></table></div>
+      <div className="overflow-auto"><table className="min-w-[1400px] w-full text-xs"><thead><tr className="text-left border-b"><th>Date</th><th>Type</th><th>Description</th><th>Payment</th><th className="text-right">Cash In</th><th className="text-right">Cash Out</th><th className="text-right">Bank In</th><th className="text-right">Bank Out</th><th className="text-right">Recv +</th><th className="text-right">Recv -</th><th className="text-right">Pay +</th><th className="text-right">Pay -</th><th className="text-right">SC +</th><th className="text-right">SC -</th><th className="text-right">Cash Bal</th><th className="text-right">Bank Bal</th></tr></thead><tbody>{visibleRows.map((r) => { const bal = rowsWithChronoBalances.get(r.id) || { cash: 0, bank: 0 }; return <tr key={r.id} className="border-b"><td>{new Date(r.date).toLocaleString()}</td><td>{({sale:'Sale',credit:'Credit Sale',payment:'Payment',return:'Return',deleted_sale:'Deleted Sale',deleted_refund:'Deleted Refund',purchase:'Purchase',supplier_payment:'Supplier Payment',expense:'Expense',adjustment:'Adjustment'} as Record<string,string>)[r.type] || r.type}</td><td>{r.description}</td><td>{r.payment}</td><td className="text-right text-emerald-700">{r.cashIn ? fmt(r.cashIn) : '-'}</td><td className="text-right text-red-600">{r.cashOut ? fmt(r.cashOut) : '-'}</td><td className="text-right text-blue-700">{r.bankIn ? fmt(r.bankIn) : '-'}</td><td className="text-right text-red-600">{r.bankOut ? fmt(r.bankOut) : '-'}</td><td className="text-right">{r.receivableIncrease ? fmt(r.receivableIncrease) : '-'}</td><td className="text-right">{r.receivableDecrease ? fmt(r.receivableDecrease) : '-'}</td><td className="text-right">{r.payableIncrease ? fmt(r.payableIncrease) : '-'}</td><td className="text-right">{r.payableDecrease ? fmt(r.payableDecrease) : '-'}</td><td className="text-right">{r.storeCreditIncrease ? fmt(r.storeCreditIncrease) : '-'}</td><td className="text-right">{r.storeCreditDecrease ? fmt(r.storeCreditDecrease) : '-'}</td><td className="text-right">{fmt(bal.cash)}</td><td className="text-right">{fmt(bal.bank)}</td></tr>; })}</tbody></table></div>
       <div className="flex items-center justify-between text-xs text-muted-foreground"><span>Showing {Math.min(visibleRows.length, filteredDisplayRows.length)} of {filteredDisplayRows.length} entries</span>{filteredDisplayRows.length > visibleRowCount && <button onClick={() => setVisibleRowCount((p) => p + 100)} className="border rounded px-3 py-1 text-foreground">Load More (100)</button>}</div>
     </div>
   </div>;

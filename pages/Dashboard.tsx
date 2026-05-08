@@ -153,7 +153,7 @@ export default function Dashboard() {
       processed.push(tx);
     });
     const canonicalDue = Math.max(0, Number(canonicalSnapshot.balances.get(selectedCustomer.id)?.totalDue || 0));
-    return { rows, displayRows: [...rows].reverse(), totalCreditSales, totalPayments, totalStoreCreditUsed, totalStoreCreditAdded, balanceDue: canonicalDue };
+    return { rows, displayRows: rows, totalCreditSales, totalPayments, totalStoreCreditUsed, totalStoreCreditAdded, balanceDue: canonicalDue };
   }, [selectedCustomer, transactions, canonicalSnapshot]);
 
   const partyStatement = useMemo(() => {
@@ -161,32 +161,64 @@ export default function Dashboard() {
     const partyOrders = orders
       .filter(order => order.partyId === selectedParty.id && order.status !== 'cancelled')
       .sort((a, b) => new Date(a.orderDate).getTime() - new Date(b.orderDate).getTime());
-    const rows: LedgerRow[] = [];
-    let runningBalance = 0;
+
+    const events: Array<{ id: string; date: string; type: 'purchase' | 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [];
     let totalPurchase = 0;
     let totalPaid = 0;
     let lastPaymentAt = '';
     let lastPurchaseAt = '';
+
     partyOrders.forEach(order => {
       const orderTotal = Math.max(0, Number(order.totalAmount || 0));
-      runningBalance += orderTotal;
       totalPurchase += orderTotal;
       lastPurchaseAt = order.orderDate || lastPurchaseAt;
-      rows.push({ id: `order-${order.id}`, date: order.orderDate || order.createdAt, type: 'Purchase', ref: order.billNumber || order.id.slice(-6), description: `PO ${order.id.slice(-6)}${order.status ? ` • ${order.status}` : ''}`, debit: orderTotal, credit: 0, balance: runningBalance, tone: 'due' });
-      (order.paymentHistory || [])
-        .slice()
-        .sort((a, b) => new Date(a.paidAt).getTime() - new Date(b.paidAt).getTime())
-        .forEach(payment => {
-          const paid = Math.max(0, Number(payment.amount || 0));
-          runningBalance = Math.max(0, runningBalance - paid);
-          totalPaid += paid;
-          lastPaymentAt = payment.paidAt;
-          rows.push({ id: payment.id, date: payment.paidAt, type: 'Payment', ref: order.billNumber || order.id.slice(-6), description: `${payment.method || 'cash'}${payment.note ? ` • ${payment.note}` : ''}`, debit: 0, credit: paid, balance: runningBalance, tone: payment.method === 'cash' ? 'cash' : 'payment' });
+      events.push({
+        id: `order-${order.id}`,
+        date: order.orderDate || order.createdAt,
+        type: 'purchase',
+        ref: order.billNumber || order.id.slice(-6),
+        description: `PO ${order.id.slice(-6)}${order.status ? ` • ${order.status}` : ''}`,
+        debit: orderTotal,
+        credit: 0,
+        tone: 'due',
+      });
+
+      (order.paymentHistory || []).forEach(payment => {
+        const paid = Math.max(0, Number(payment.amount || 0));
+        totalPaid += paid;
+        lastPaymentAt = payment.paidAt;
+        events.push({
+          id: payment.id,
+          date: payment.paidAt,
+          type: 'payment',
+          ref: order.billNumber || order.id.slice(-6),
+          description: `${payment.method || 'cash'}${payment.note ? ` • ${payment.note}` : ''}`,
+          debit: 0,
+          credit: paid,
+          tone: payment.method === 'cash' ? 'cash' : 'payment',
         });
+      });
     });
-    const remaining = Math.max(0, partyOrders.reduce((sum, order) => sum + Math.max(0, Number(order.remainingAmount || 0)), 0));
-    const sortedRows = rows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    return { rows: sortedRows, displayRows: [...sortedRows].reverse(), totalPurchase, totalPaid, remaining, lastPaymentAt, lastPurchaseAt };
+
+    const sortedEvents = events.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    let runningBalance = 0;
+    const rows: LedgerRow[] = sortedEvents.map((event) => {
+      runningBalance = Math.max(0, Number((runningBalance + event.debit - event.credit).toFixed(2)));
+      return {
+        id: event.id,
+        date: event.date,
+        type: event.type === 'purchase' ? 'Purchase' : 'Payment',
+        ref: event.ref,
+        description: event.description,
+        debit: event.debit,
+        credit: event.credit,
+        balance: runningBalance,
+        tone: event.tone,
+      };
+    });
+
+    const remaining = Math.max(0, Number((totalPurchase - totalPaid).toFixed(2)));
+    return { rows, displayRows: rows, totalPurchase, totalPaid, remaining, lastPaymentAt, lastPurchaseAt };
   }, [selectedParty, orders]);
 
   const openReceiveModal = (customer: CustomerReceivableRow) => {
@@ -442,6 +474,8 @@ export default function Dashboard() {
               </Button>
             </div>
             {statementPdfError && <p className="text-xs text-red-600">{statementPdfError}</p>}
+            <p className="text-xs text-muted-foreground">Ledger shown oldest to newest for running balance accuracy.</p>
+            <p className="text-xs text-muted-foreground">Ledger shown oldest to newest for running balance accuracy.</p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Credit Due Generated</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(customerStatement.totalCreditSales)}</div></div>
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Payments Received</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(customerStatement.totalPayments)}</div></div>
