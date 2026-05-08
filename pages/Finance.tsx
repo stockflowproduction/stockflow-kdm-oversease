@@ -834,16 +834,40 @@ export default function Finance() {
   };
 
   const dailyCashTotals = useMemo(() => {
-    const key = todayISO();
-
-    if (isOpenSessionToday && openSession) {
-      return getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], openSession.startTime, undefined, openSession.id);
+    if (openSession) {
+      return getSessionCashTotals(
+        data.transactions,
+        expenses,
+        cashAdjustments,
+        data.deleteCompensations || [],
+        data.purchaseOrders || [],
+        openSession.startTime,
+        undefined,
+        openSession.id
+      );
     }
 
+    const key = todayISO();
     const startOfTodayIso = `${key}T00:00:00`;
     const endOfTodayIso = `${key}T23:59:59`;
-    return getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], startOfTodayIso, endOfTodayIso);
-  }, [data.transactions, expenses, isOpenSessionToday, openSession]);
+    return getSessionCashTotals(
+      data.transactions,
+      expenses,
+      cashAdjustments,
+      data.deleteCompensations || [],
+      data.purchaseOrders || [],
+      startOfTodayIso,
+      endOfTodayIso
+    );
+  }, [
+    openSession?.id,
+    openSession?.startTime,
+    data.transactions,
+    expenses,
+    cashAdjustments,
+    data.deleteCompensations,
+    data.purchaseOrders,
+  ]);
 
   const closingCountTotal = useMemo(() => {
     return CLOSING_DENOMS.reduce((sum, denom) => sum + (denom * (closingCounts[denom] || 0)), 0);
