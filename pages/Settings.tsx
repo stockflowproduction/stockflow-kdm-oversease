@@ -16,6 +16,10 @@ export default function Settings() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [uploadingField, setUploadingField] = useState<'logo' | 'signature' | 'catalog' | null>(null);
+  const [currentPinInput, setCurrentPinInput] = useState('');
+  const [newPinInput, setNewPinInput] = useState('');
+  const [confirmPinInput, setConfirmPinInput] = useState('');
+  const [pinMessage, setPinMessage] = useState<string | null>(null);
 
   useEffect(() => {
     const refreshData = () => {
@@ -58,6 +62,25 @@ export default function Settings() {
       }
   };
 
+
+  const getEffectiveManagerPin = (adminPin?: string) => {
+    const saved = String(adminPin || '').trim();
+    return saved || '1234';
+  };
+
+  const handleChangePin = () => {
+    const requiredCurrent = getEffectiveManagerPin(profile.adminPin);
+    if (currentPinInput.trim() !== requiredCurrent) return setPinMessage('Current PIN is incorrect.');
+    if (!/^\d{4,6}$/.test(newPinInput)) return setPinMessage('New PIN must be 4 to 6 digits.');
+    if (newPinInput !== confirmPinInput) return setPinMessage('New PIN and confirm PIN do not match.');
+    const next = { ...profile, adminPin: newPinInput };
+    updateStoreProfile(next);
+    setProfile(next);
+    setCurrentPinInput('');
+    setNewPinInput('');
+    setConfirmPinInput('');
+    setPinMessage('PIN updated successfully.');
+  };
   const handleSignatureUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !file.type.startsWith('image/')) return;
@@ -231,6 +254,18 @@ export default function Settings() {
            </CardContent>
         </Card>
 
+
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Manager PIN</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">Temporary default PIN is <span className="font-semibold">1234</span> until you set a new PIN.</p>
+            <div className="space-y-1"><Label>Current PIN</Label><Input type="password" inputMode="numeric" value={currentPinInput} onChange={e => setCurrentPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
+            <div className="space-y-1"><Label>New PIN</Label><Input type="password" inputMode="numeric" value={newPinInput} onChange={e => setNewPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
+            <div className="space-y-1"><Label>Confirm New PIN</Label><Input type="password" inputMode="numeric" value={confirmPinInput} onChange={e => setConfirmPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
+            {pinMessage && <p className="text-xs text-muted-foreground">{pinMessage}</p>}
+            <Button type="button" variant="outline" onClick={handleChangePin}>Update PIN</Button>
+          </CardContent>
+        </Card>
         <Card className="md:col-span-2">
            <CardHeader><CardTitle className="flex items-center gap-2"><Landmark className="w-5 h-5 text-primary" /> Bank Details</CardTitle></CardHeader>
            <CardContent className="grid md:grid-cols-2 gap-4">

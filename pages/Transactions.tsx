@@ -2399,9 +2399,9 @@ export default function Transactions() {
                     <div className="rounded-md border p-2.5 bg-muted/10 space-y-1.5 text-[13px]">
                       <div className="font-semibold text-[14px]">Settlement Split</div>
                       <div className="grid grid-cols-3 gap-2">
-                        <Input type="number" min="0" step="0.01" value={editingCashPaid} onChange={e => setEditingCashPaid(e.target.value)} placeholder="Cash" />
-                        <Input type="number" min="0" step="0.01" value={editingOnlinePaid} onChange={e => setEditingOnlinePaid(e.target.value)} placeholder="Online" />
-                        <Input type="number" min="0" step="0.01" value={editingCreditDue} onChange={e => setEditingCreditDue(e.target.value)} placeholder="Credit due" />
+                        <div className="space-y-1"><label className="text-[11px] font-semibold text-muted-foreground">Cash Paid</label><Input type="number" min="0" step="0.01" value={editingCashPaid} onChange={e => setEditingCashPaid(e.target.value)} placeholder="Cash" /></div>
+                        <div className="space-y-1"><label className="text-[11px] font-semibold text-muted-foreground">Online/Bank Paid</label><Input type="number" min="0" step="0.01" value={editingOnlinePaid} onChange={e => setEditingOnlinePaid(e.target.value)} placeholder="Online" /></div>
+                        <div className="space-y-1"><label className="text-[11px] font-semibold text-muted-foreground">Credit Due</label><Input type="number" min="0" step="0.01" value={editingCreditDue} onChange={e => setEditingCreditDue(e.target.value)} placeholder="Credit due" /></div>
                       </div>
                       {editingSectionWarning?.section === 'settlement' && <p className="text-[11px] text-red-700">{editingSectionWarning.message}</p>}
                     </div>

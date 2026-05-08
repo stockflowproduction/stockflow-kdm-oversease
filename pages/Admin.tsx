@@ -373,14 +373,16 @@ export default function Admin() {
     const hasCombos = hasVariantAxes && Array.isArray(formData.stockByVariantColor) && formData.stockByVariantColor.length > 0;
 
     // Strict Validation
-    if (!formData.name || !formData.barcode || !formData.category ||
-        (!hasCombos && (formData.buyPrice === '' || formData.sellPrice === ''))) {
-        setError("Please fill in all required fields marked with *");
-        return;
-    }
+    const missingFields: string[] = [];
+    if (!String(formData.name || '').trim()) missingFields.push('Product Name');
+    if (!String(formData.barcode || '').trim()) missingFields.push('SKU / Product Code');
+    if (!String(formData.category || '').trim()) missingFields.push('Category');
+    if (!hasCombos && (formData.buyPrice === '' || formData.buyPrice === null || formData.buyPrice === undefined)) missingFields.push('Buy Price');
+    if (!hasCombos && (formData.sellPrice === '' || formData.sellPrice === null || formData.sellPrice === undefined)) missingFields.push('Sell Price');
     const hasManualStock = formData.stock !== '' && formData.stock !== null && formData.stock !== undefined;
-    if (!hasCombos && !hasManualStock) {
-      setError('Opening stock is required.');
+    if (!hasCombos && !hasManualStock) missingFields.push('Stock / Quantity');
+    if (missingFields.length > 0) {
+      setError(`Please fill required fields: ${missingFields.join(', ')}`);
       return;
     }
     const openingStockValue = toNonNegativeNumber(formData.stock);
