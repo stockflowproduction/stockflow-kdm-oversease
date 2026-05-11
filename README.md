@@ -75,3 +75,14 @@ Keep it as an independent vertical implementation:
 `Inquiry -> Confirmed Order -> Purchase -> Receipt posting`
 
 Do not reopen the Phase 1 storage migration while progressing procurement.
+
+## Local preflight checks
+
+Before opening a PR, run a lightweight local sanity pass:
+
+```bash
+npm run lint
+npm run test
+```
+
+If your change only touches documentation or planning artifacts, note that in the PR so reviewers can skip runtime validation.

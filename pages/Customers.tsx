@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -14,7 +14,36 @@ import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
+import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
 
+const normalizePhone = (v?: string) => String(v || '').replace(/\D/g, '');
+const normalizeName = (v?: string) => String(v || '').trim().toLowerCase();
+const detectHistoricalTransactionType = (tx: Transaction): 'sale' | 'return' | 'payment' | 'unknown' => {
+  const t = String((tx as any)?.type || '').toLowerCase();
+  if (t === 'sale' || t === 'return' || t === 'payment') return t as any;
+  const ref = `${(tx as any)?.creditNoteNo || ''} ${(tx as any)?.returnHandlingMode || ''} ${(tx as any)?.notes || ''}`.toLowerCase();
+  if (ref.includes('credit note') || ref.includes('return')) return 'return';
+  const payHint = `${(tx as any)?.receiptNo || ''} ${(tx as any)?.paymentMethod || ''} ${(tx as any)?.paidAmount || ''}`.toLowerCase();
+  if (payHint.includes('receipt') || payHint.includes('payment')) return 'payment';
+  if (t === 'historical_reference') return 'sale';
+  return 'unknown';
+};
+
+
+const getLineProductName = (item: any): string => {
+  const raw = item?.productName || item?.name || item?.itemName || item?.medicineName || item?.title || item?.sku || item?.barcode || '';
+  const name = String(raw || '').trim();
+  return name || 'Unknown Product';
+};
+
+const getTransactionProductSummary = (tx: Transaction, maxItems = 2): string => {
+  const items = Array.isArray((tx as any)?.items) ? (tx as any).items : [];
+  if (!items.length) return 'No product details';
+  const labels = items.map((item: any) => formatItemNameWithVariant(getLineProductName(item), item?.selectedVariant, item?.selectedColor));
+  const unique = Array.from(new Set(labels));
+  const shown = unique.slice(0, maxItems).join(', ');
+  return unique.length > maxItems ? `${shown} +${unique.length - maxItems} more` : shown;
+};
 export default function Customers() {
   const CUSTOMERS_PAGE_SIZE = 15;
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -58,16 +87,27 @@ export default function Customers() {
   
   // Upfront Order Form State
   const [upfrontOrderForm, setUpfrontOrderForm] = useState({
-    productName: '',
-    quantity: '',
-    isCarton: true,
-    cartonPriceAdmin: '',
-    cartonPriceCustomer: '',
-    totalCost: '',
-    advancePaid: '',
+    numberOfPieces: '',
+    numberOfCartons: '1',
+    pricePerPiece: '',
+    pricePerPieceCustomer: '',
+    expenseAmount: '0',
+    paidNowCash: '0',
+    paidNowOnline: '0',
     reminderDate: '',
-    notes: ''
+    notes: '',
+    selectedVariant: '',
+    selectedColor: '',
   });
+  const [orderCustomer, setOrderCustomer] = useState<Customer | null>(null);
+  const [orderStage, setOrderStage] = useState<'picker' | 'form'>('picker');
+  const [productSearch, setProductSearch] = useState('');
+  const [selectedOrderProduct, setSelectedOrderProduct] = useState<Product | null>(null);
+  const [orderPopupTab, setOrderPopupTab] = useState<'create' | 'all_orders'>('create');
+  const [allOrdersSearch, setAllOrdersSearch] = useState('');
+  const [allOrdersStatus, setAllOrdersStatus] = useState<'all' | 'pending' | 'paid'>('all');
+  const [allOrdersSort, setAllOrdersSort] = useState<'newest' | 'oldest'>('newest');
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [adminPassword, setAdminPassword] = useState('');
   const [collectAmount, setCollectAmount] = useState('');
 
@@ -86,6 +126,7 @@ export default function Customers() {
       setCustomers(data.customers);
       setTransactions(data.transactions);
       setUpfrontOrders(data.upfrontOrders || []);
+      setProducts(data.products || []);
       setLoadError(null);
 
       if (viewingCustomer) {
@@ -126,15 +167,24 @@ export default function Customers() {
   }, [customers, transactions]);
 
   const canonicalCustomers = useMemo(() => (
-    customers.map((customer) => {
-      const canonical = canonicalBalanceSnapshot.balances.get(customer.id);
-      if (!canonical) return customer;
-      return {
-        ...customer,
-        totalDue: canonical.totalDue,
-        storeCredit: canonical.storeCredit,
-      };
-    })
+    (() => {
+      const customNetByCustomer = new Map<string, number>();
+      buildUpfrontOrderLedgerEffects(upfrontOrders, customers).forEach((effect) => {
+        if (!effect.customerId) return;
+        const delta = Math.max(0, Number(effect.receivableIncrease || 0)) - Math.max(0, Number(effect.receivableDecrease || 0));
+        customNetByCustomer.set(effect.customerId, (customNetByCustomer.get(effect.customerId) || 0) + delta);
+      });
+      return customers.map((customer) => {
+        const canonical = canonicalBalanceSnapshot.balances.get(customer.id);
+        const customNet = customNetByCustomer.get(customer.id) || 0;
+        if (!canonical) return { ...customer, totalDue: Math.max(0, Number(customer.totalDue || 0) + customNet) };
+        return {
+          ...customer,
+          totalDue: Math.max(0, canonical.totalDue + customNet),
+          storeCredit: canonical.storeCredit,
+        };
+      });
+    })()
   ), [customers, canonicalBalanceSnapshot]);
 
   const filteredData = useMemo(() => {
@@ -178,17 +228,24 @@ export default function Customers() {
   useEffect(() => {
     setCustomerPage((prev) => Math.min(prev, customerTotalPages));
   }, [customerTotalPages]);
+  useEffect(() => {
+    const customerProjectionReceivable = canonicalCustomers.reduce((sum, c) => sum + Math.max(0, Number(c.totalDue || 0)), 0);
+    const recon = reconcileReceivableSurfaces({
+      customers,
+      transactions,
+      upfrontOrders,
+      customerProjectionReceivable,
+      sourceLabel: 'Customers',
+    });
+    logReceivableReconciliationIfNeeded(recon);
+  }, [customers, transactions, upfrontOrders, canonicalCustomers]);
 
   const viewingCustomerCanonical = useMemo(() => {
     if (!viewingCustomer) return null;
-    const canonical = canonicalBalanceSnapshot.balances.get(viewingCustomer.id);
-    if (!canonical) return viewingCustomer;
-    return {
-      ...viewingCustomer,
-      totalDue: canonical.totalDue,
-      storeCredit: canonical.storeCredit,
-    };
-  }, [viewingCustomer, canonicalBalanceSnapshot]);
+    const alreadyAdjusted = canonicalCustomers.find((c) => c.id === viewingCustomer.id);
+    if (alreadyAdjusted) return alreadyAdjusted;
+    return viewingCustomer;
+  }, [viewingCustomer, canonicalCustomers]);
   const selectedCustomers = useMemo(
     () => customers.filter(customer => selectedCustomerIds.includes(customer.id)),
     [customers, selectedCustomerIds]
@@ -307,25 +364,44 @@ export default function Customers() {
   }, [transactions, upfrontOrders, viewingCustomer]);
   const customerLedgerRows = useMemo(() => {
       if (!viewingCustomer) return [];
+      const candidateName = normalizeName(viewingCustomer.name);
+      const candidatePhone = normalizePhone(viewingCustomer.phone);
       const txHistory = transactions
-        .filter(tx => tx.customerId === viewingCustomer.id)
+        .filter(tx => tx.customerId === viewingCustomer.id || (normalizePhone(tx.customerPhone) && normalizePhone(tx.customerPhone) === candidatePhone) || (normalizeName(tx.customerName) && normalizeName(tx.customerName) === candidateName))
         .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-      return buildCustomerLedgerRows(txHistory);
-  }, [transactions, viewingCustomer]);
+      const customEffects = buildUpfrontOrderLedgerEffects(upfrontOrders.filter((o) => o.customerId === viewingCustomer.id), [viewingCustomer]);
+      return buildCustomerLedgerRows(txHistory, customEffects);
+  }, [transactions, viewingCustomer, upfrontOrders]);
   const ledgerRowByTxId = useMemo(() => {
       return new Map(customerLedgerRows.map(row => [row.tx.id, row]));
   }, [customerLedgerRows]);
 
-  const customerOrderSummary = useMemo(() => {
-      if (!viewingCustomer) return { totalOrders: 0, openOrders: 0, totalValue: 0, paidSoFar: 0, remaining: 0 };
-      const orders = upfrontOrders.filter(o => o.customerId === viewingCustomer.id);
-      const totalOrders = orders.length;
-      const openOrders = orders.filter(o => o.status !== 'cleared').length;
-      const totalValue = orders.reduce((sum, o) => sum + (o.totalCost || 0), 0);
-      const paidSoFar = orders.reduce((sum, o) => sum + (o.advancePaid || 0), 0);
-      const remaining = orders.reduce((sum, o) => sum + (o.remainingAmount || 0), 0);
-      return { totalOrders, openOrders, totalValue, paidSoFar, remaining };
-  }, [upfrontOrders, viewingCustomer]);
+  const getUpfrontOrderCustomerTotal = (order: UpfrontOrder) => Number(order.finalTotal ?? order.totalCost ?? ((order.orderTotalCustomer || 0) + (order.expenseAmount || 0) || 0));
+  const getUpfrontOrderPaid = (order: UpfrontOrder) => {
+    if (Number.isFinite(order.advancePaid as any)) return Math.max(0, Number(order.advancePaid || 0));
+    const history = Array.isArray(order.paymentHistory) ? order.paymentHistory : [];
+    return history.reduce((sum, p) => sum + Math.max(0, Number(p.amount || 0)), 0);
+  };
+  const getUpfrontOrderRemaining = (order: UpfrontOrder) => {
+    if (Number.isFinite(order.remainingAmount as any)) return Math.max(0, Number(order.remainingAmount || 0));
+    return Math.max(0, getUpfrontOrderCustomerTotal(order) - getUpfrontOrderPaid(order));
+  };
+  const getUpfrontOrderStatus = (order: UpfrontOrder) => getUpfrontOrderRemaining(order) <= 0.0001 ? 'Paid in Full' : 'Pending';
+  const popupCustomerOrders = useMemo(() => {
+    if (!orderCustomer) return [];
+    return upfrontOrders.filter(o => o.customerId === orderCustomer.id);
+  }, [upfrontOrders, orderCustomer]);
+  const filteredPopupCustomerOrders = useMemo(() => popupCustomerOrders
+    .filter(o => {
+      const q = allOrdersSearch.toLowerCase();
+      const matchesQ = !q || `${o.productName || ''} ${o.notes || ''}`.toLowerCase().includes(q);
+      const status = getUpfrontOrderStatus(o);
+      const matchesS = allOrdersStatus === 'all' || (allOrdersStatus === 'pending' ? status !== 'Paid in Full' : status === 'Paid in Full');
+      return matchesQ && matchesS;
+    })
+    .sort((a, b) => allOrdersSort === 'newest'
+      ? new Date(b.date || b.createdAt || 0).getTime() - new Date(a.date || a.createdAt || 0).getTime()
+      : new Date(a.date || a.createdAt || 0).getTime() - new Date(b.date || b.createdAt || 0).getTime()), [popupCustomerOrders, allOrdersSearch, allOrdersStatus, allOrdersSort]);
 
   const handleRecordPayment = () => {
       setPaymentError(null);
@@ -382,8 +458,7 @@ export default function Customers() {
       }
 
       const normalizedPhoneInput = rawPhone.replace(/\D/g, '');
-      const currentData = loadData();
-      const isDuplicate = currentData.customers.some(c => c.phone.replace(/\D/g, '') === normalizedPhoneInput);
+      const isDuplicate = customers.some(c => c.phone.replace(/\D/g, '') === normalizedPhoneInput);
 
       if (isDuplicate) {
           setAddCustomerError(`Customer with phone "${rawPhone}" already exists.`);
@@ -414,40 +489,74 @@ export default function Customers() {
       }
   };
 
-  const handleSaveUpfrontOrder = () => {
-      if (!viewingCustomer) return;
+  const openCreateOrderForCustomer = (customer: Customer) => {
+      setOrderCustomer(customer);
+      setSelectedOrderProduct(null);
+      setOrderStage('picker');
+      setProductSearch('');
+      setOrderPopupTab('create');
+      setEditingUpfrontOrder(null);
       setUpfrontOrderError(null);
-      
-      const cost = parseFloat(upfrontOrderForm.totalCost) || 0;
-      const advance = parseFloat(upfrontOrderForm.advancePaid) || 0;
+      setIsUpfrontOrderModalOpen(true);
+  };
 
-      if (cost <= 0) {
-          setUpfrontOrderError("Total cost must be greater than zero.");
-          return;
-      }
-
-      if (advance > cost) {
-          setUpfrontOrderError("Advance payment cannot exceed total cost.");
-          return;
-      }
-
-      const remaining = cost - advance;
+  const handleSaveUpfrontOrder = (saveAndNext = false) => {
+      if (!orderCustomer || !selectedOrderProduct) return;
+      setUpfrontOrderError(null);
+      const numberOfPieces = Number(upfrontOrderForm.numberOfPieces || 0);
+      const numberOfCartons = Number(upfrontOrderForm.numberOfCartons || 0);
+      const totalPieces = numberOfPieces * numberOfCartons;
+      const pricePerPiece = Number(upfrontOrderForm.pricePerPiece || 0);
+      const pricePerPieceCustomer = Number(upfrontOrderForm.pricePerPieceCustomer || 0);
+      const orderTotal = totalPieces * pricePerPiece;
+      const orderTotalCustomer = totalPieces * pricePerPieceCustomer;
+      const expenseAmount = Math.max(0, Number(upfrontOrderForm.expenseAmount || 0));
+      const finalTotal = orderTotalCustomer + expenseAmount;
+      const paidNowCash = Math.max(0, Number(upfrontOrderForm.paidNowCash || 0));
+      const paidNowOnline = Math.max(0, Number(upfrontOrderForm.paidNowOnline || 0));
+      const advance = paidNowCash + paidNowOnline;
+      const remaining = Math.max(0, finalTotal - advance);
+      if (numberOfPieces <= 0 || numberOfCartons <= 0 || pricePerPiece <= 0 || pricePerPieceCustomer <= 0) return setUpfrontOrderError('Please enter valid positive values for pieces/cartons/prices.');
+      if (advance > finalTotal + 0.0001) return setUpfrontOrderError('Paid Now (Cash + Online) cannot exceed Customer Total + Expenses.');
       
       const order: UpfrontOrder = {
           id: editingUpfrontOrder?.id || Date.now().toString(),
-          customerId: viewingCustomer.id,
-          productName: upfrontOrderForm.productName,
-          quantity: parseFloat(upfrontOrderForm.quantity) || 0,
-          isCarton: upfrontOrderForm.isCarton,
-          cartonPriceAdmin: parseFloat(upfrontOrderForm.cartonPriceAdmin) || 0,
-          cartonPriceCustomer: parseFloat(upfrontOrderForm.cartonPriceCustomer) || 0,
-          totalCost: cost,
+          customerId: orderCustomer.id,
+          productId: selectedOrderProduct.id,
+          productName: selectedOrderProduct.name,
+          productImage: selectedOrderProduct.image,
+          category: selectedOrderProduct.category || 'Uncategorized',
+          quantity: totalPieces,
+          isCarton: true,
+          piecesPerCarton: numberOfPieces,
+          numberOfCartons,
+          totalPieces,
+          pricePerPiece,
+          customerPricePerPiece: pricePerPieceCustomer,
+          orderTotal,
+          orderTotalCustomer,
+          expenseAmount,
+          finalTotal,
+          profitAmount: (pricePerPieceCustomer - pricePerPiece) * totalPieces,
+          profitPercent: pricePerPiece > 0 ? ((pricePerPieceCustomer - pricePerPiece) / pricePerPiece) * 100 : 0,
+          paidNowCash,
+          paidNowOnline,
+          cartonPriceAdmin: pricePerPiece,
+          cartonPriceCustomer: pricePerPieceCustomer,
+          totalCost: finalTotal,
           advancePaid: advance,
-          remainingAmount: Math.max(0, remaining),
+          remainingAmount: remaining,
           date: editingUpfrontOrder?.date || new Date().toISOString(),
           reminderDate: upfrontOrderForm.reminderDate,
           status: remaining <= 0 ? 'cleared' : 'unpaid',
-          notes: upfrontOrderForm.notes
+          notes: upfrontOrderForm.notes,
+          selectedVariant: upfrontOrderForm.selectedVariant || undefined,
+          selectedColor: upfrontOrderForm.selectedColor || undefined,
+          variantLabel: [upfrontOrderForm.selectedVariant, upfrontOrderForm.selectedColor].filter(Boolean).join(' / ') || undefined,
+          paymentHistory: [
+            ...(paidNowCash > 0 ? [{ id: `upfront-pay-${Date.now()}-cash`, paidAt: new Date().toISOString(), amount: paidNowCash, method: 'Cash' as const, note: 'Initial advance (Cash)', kind: 'initial_advance' as const, remainingAfterPayment: Math.max(0, finalTotal - paidNowCash), advancePaidAfterPayment: paidNowCash }] : []),
+            ...(paidNowOnline > 0 ? [{ id: `upfront-pay-${Date.now()}-online`, paidAt: new Date().toISOString(), amount: paidNowOnline, method: 'Online' as const, note: 'Initial advance (Online)', kind: 'initial_advance' as const, remainingAfterPayment: remaining, advancePaidAfterPayment: advance }] : []),
+          ],
       };
 
       if (editingUpfrontOrder) {
@@ -457,19 +566,25 @@ export default function Customers() {
       }
       
       refreshData();
-      setIsUpfrontOrderModalOpen(false);
+      if (!saveAndNext) setIsUpfrontOrderModalOpen(false);
       setEditingUpfrontOrder(null);
       setUpfrontOrderForm({
-          productName: '',
-          quantity: '',
-          isCarton: true,
-          cartonPriceAdmin: '',
-          cartonPriceCustomer: '',
-          totalCost: '',
-          advancePaid: '',
+          numberOfPieces: '',
+          numberOfCartons: '1',
+          pricePerPiece: '',
+          pricePerPieceCustomer: '',
+          expenseAmount: '0',
+          paidNowCash: '0',
+          paidNowOnline: '0',
           reminderDate: '',
-          notes: ''
+          notes: '',
+          selectedVariant: '',
+          selectedColor: '',
       });
+      if (saveAndNext) {
+        setOrderStage('picker');
+        setSelectedOrderProduct(null);
+      }
   };
 
   const handleCollectUpfrontPayment = () => {
@@ -501,6 +616,20 @@ export default function Customers() {
   const projectedRemainingAfterCollect = Math.max(0, selectedOrderRemaining - (isCollectAmountValid ? collectAmountNumber : 0));
   const availableStoreCredit = Math.max(0, Number(viewingCustomerCanonical?.storeCredit || 0));
   const possibleCreditApplication = Math.min(availableStoreCredit, projectedRemainingAfterCollect);
+  const isOrderFormDirty = Boolean(
+    upfrontOrderForm.numberOfPieces || Number(upfrontOrderForm.numberOfCartons || 1) !== 1 ||
+    upfrontOrderForm.pricePerPiece || upfrontOrderForm.pricePerPieceCustomer ||
+    Number(upfrontOrderForm.expenseAmount || 0) > 0 || Number(upfrontOrderForm.paidNowCash || 0) > 0 ||
+    Number(upfrontOrderForm.paidNowOnline || 0) > 0 || upfrontOrderForm.notes
+  );
+  const switchOrderPopupTab = (next: 'create' | 'all_orders') => {
+    if (next === orderPopupTab) return;
+    if (orderPopupTab === 'create' && next === 'all_orders' && isOrderFormDirty) {
+      const ok = window.confirm('You have unsaved order details. Switching tabs may lose your work. Continue?');
+      if (!ok) return;
+    }
+    setOrderPopupTab(next);
+  };
 
   const handleAdminPasswordSubmit = () => {
       // Password check removed as per new security policy
@@ -509,15 +638,17 @@ export default function Customers() {
       if (selectedUpfrontOrder) {
           setEditingUpfrontOrder(selectedUpfrontOrder);
           setUpfrontOrderForm({
-              productName: selectedUpfrontOrder.productName,
-              quantity: selectedUpfrontOrder.quantity.toString(),
-              isCarton: selectedUpfrontOrder.isCarton,
-              cartonPriceAdmin: selectedUpfrontOrder.cartonPriceAdmin.toString(),
-              cartonPriceCustomer: selectedUpfrontOrder.cartonPriceCustomer.toString(),
-              totalCost: selectedUpfrontOrder.totalCost.toString(),
-              advancePaid: selectedUpfrontOrder.advancePaid.toString(),
+              numberOfPieces: String(selectedUpfrontOrder.piecesPerCarton || selectedUpfrontOrder.quantity || ''),
+              numberOfCartons: String(selectedUpfrontOrder.numberOfCartons || 1),
+              pricePerPiece: String(selectedUpfrontOrder.pricePerPiece || selectedUpfrontOrder.cartonPriceAdmin || ''),
+              pricePerPieceCustomer: String(selectedUpfrontOrder.customerPricePerPiece || selectedUpfrontOrder.cartonPriceCustomer || ''),
+              expenseAmount: String(selectedUpfrontOrder.expenseAmount || 0),
+              paidNowCash: String(selectedUpfrontOrder.paidNowCash || 0),
+              paidNowOnline: String(selectedUpfrontOrder.paidNowOnline || 0),
               reminderDate: selectedUpfrontOrder.reminderDate || '',
-              notes: selectedUpfrontOrder.notes || ''
+              notes: selectedUpfrontOrder.notes || '',
+              selectedVariant: selectedUpfrontOrder.selectedVariant || '',
+              selectedColor: selectedUpfrontOrder.selectedColor || '',
           });
           setIsUpfrontOrderModalOpen(true);
           setSelectedUpfrontOrder(null);
@@ -542,20 +673,14 @@ export default function Customers() {
       const txRows = [...customerLedgerRows];
       const profile = loadData().profile;
       const rows = txRows
-        .map(row => {
-          let description = 'Ledger Entry';
-          if (row.tx.type === 'sale') description = 'Sale Invoice';
-          else if (row.tx.type === 'payment') description = 'Payment Received';
-          else if (row.tx.type === 'return') description = 'Sales Return';
-          return {
-            date: row.tx.date,
-            description,
-            reference: row.tx.id.slice(-6),
-            debit: row.debit,
-            credit: row.credit,
-            balance: row.netAfter,
-          };
-        })
+        .map(row => ({
+          date: row.tx.date,
+          description: row.statementDescription,
+          reference: row.reference,
+          debit: row.debit,
+          credit: row.credit,
+          balance: row.netAfter,
+        }))
         .reverse();
       await generateAccountStatementPDF({
         profile,
@@ -719,6 +844,7 @@ export default function Customers() {
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" variant="outline" onClick={() => setViewingCustomer(customer)}>View Details</Button>
+                    <Button size="sm" variant="outline" onClick={() => openCreateOrderForCustomer(customer)}>+ Create Order</Button>
                     <Button size="sm" variant="outline" onClick={() => openCustomerEditor(customer)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => {
                       if (window.confirm(`Delete ${customer.name}?`)) {
@@ -867,17 +993,10 @@ export default function Customers() {
                                <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
                                    <FileText className="w-4 h-4 mr-1.5" /> Get Statement
                                </Button>
-                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-primary text-primary shadow-sm" onClick={() => { setUpfrontOrderError(null); setIsUpfrontOrderModalOpen(true); }}>
-                                   <Plus className="w-4 h-4 mr-1.5" /> Create Order +
-                               </Button>
+                               
                            </div>
                       </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
-                        <div className="rounded-lg border bg-slate-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-slate-500">Custom Orders</div><div className="text-sm font-black text-slate-800">{customerOrderSummary.totalOrders}</div></div>
-                        <div className="rounded-lg border bg-amber-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-amber-600">Open Orders</div><div className="text-sm font-black text-amber-700">{customerOrderSummary.openOrders}</div></div>
-                        <div className="rounded-lg border bg-emerald-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-emerald-600">Advance Paid</div><div className="text-sm font-black text-emerald-700">₹{formatMoneyPrecise(customerOrderSummary.paidSoFar)}</div></div>
-                        <div className="rounded-lg border bg-rose-50 p-2.5"><div className="text-[10px] uppercase font-black tracking-wider text-rose-600">Remaining to Collect</div><div className="text-sm font-black text-rose-700">₹{formatMoneyPrecise(customerOrderSummary.remaining)}</div></div>
-                      </div>
+                      
                   </CardHeader>
                   <CardContent className="flex-1 overflow-y-auto p-0 bg-background">
                       <div className="bg-slate-50 p-2.5 text-[10px] uppercase font-black px-4 text-slate-500 border-b tracking-widest flex justify-between sticky top-0 z-10 backdrop-blur-md bg-opacity-90">
@@ -1169,14 +1288,18 @@ export default function Customers() {
       )}
 
       {/* Upfront Order Modal */}
-      {isUpfrontOrderModalOpen && viewingCustomer && (
+      {isUpfrontOrderModalOpen && orderCustomer && (
           <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
               <Card className="w-full max-w-md shadow-2xl animate-in zoom-in border-t-4 border-t-primary overflow-hidden">
                   <CardHeader className="flex flex-row justify-between items-center border-b pb-4">
-                      <CardTitle className="text-lg">{editingUpfrontOrder ? 'Edit Custom Order' : 'Create Custom Order'}</CardTitle>
-                      <Button variant="ghost" size="icon" onClick={() => { setIsUpfrontOrderModalOpen(false); setEditingUpfrontOrder(null); setUpfrontOrderError(null); }}><X className="w-4 h-4" /></Button>
+                      <CardTitle className="text-lg">{orderStage === 'picker' ? `Create Order • ${orderCustomer.name}` : `Order Form • ${selectedOrderProduct?.name || ''}`}</CardTitle>
+                      <Button variant="ghost" size="icon" onClick={() => { setIsUpfrontOrderModalOpen(false); setEditingUpfrontOrder(null); setUpfrontOrderError(null); setSelectedOrderProduct(null); }}><X className="w-4 h-4" /></Button>
                   </CardHeader>
                   <CardContent className="space-y-4 pt-6 max-h-[70vh] overflow-y-auto">
+                      <div className="flex gap-2">
+                        <Button size="sm" variant={orderPopupTab === 'create' ? 'default' : 'outline'} onClick={() => switchOrderPopupTab('create')}>Create Order</Button>
+                        <Button size="sm" variant={orderPopupTab === 'all_orders' ? 'default' : 'outline'} onClick={() => switchOrderPopupTab('all_orders')}>All Orders</Button>
+                      </div>
                       {upfrontOrderError && (
                           <div className="bg-red-50 border border-red-200 text-red-600 text-[10px] font-bold p-2 rounded-lg flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
                               <AlertCircle className="w-3 h-3" />
@@ -1186,46 +1309,58 @@ export default function Customers() {
                       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-600">
                         Store Credit Available: <span className="font-bold text-emerald-700">₹{formatMoneyPrecise(availableStoreCredit)}</span>. Store credit is customer-level and is not auto-applied to a custom order at creation time.
                       </div>
-                      <div className="space-y-2">
-                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Product Name</Label>
-                          <Input value={upfrontOrderForm.productName} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, productName: e.target.value})} placeholder="e.g. Premium Cotton Fabric" />
+                      {orderPopupTab === 'create' ? (orderStage === 'picker' ? (
+                        <>
+                          <Input placeholder="Search product/category..." value={productSearch} onChange={(e) => setProductSearch(e.target.value)} />
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {products.filter((p) => `${p.name} ${p.category || ''}`.toLowerCase().includes(productSearch.toLowerCase())).map((product) => (
+                              <div key={product.id} className="rounded-lg border p-2 space-y-2">
+                                <img src={product.image || 'https://placehold.co/300x180?text=No+Image'} alt={product.name} className="h-24 w-full object-cover rounded" />
+                                <div className="text-sm font-semibold">{product.name}</div>
+                                <div className="text-xs text-muted-foreground">{product.category || 'Uncategorized'}</div>
+                                <Button size="sm" className="w-full" onClick={() => { setSelectedOrderProduct(product); setOrderStage('form'); }}>+ Create Order</Button>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                      <div className="grid grid-cols-3 gap-4">
+                          <div className="space-y-2">
+                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Number of Pieces *</Label>
+                              <Input type="number" min="1" value={upfrontOrderForm.numberOfPieces} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, numberOfPieces: e.target.value})} placeholder="0" />
+                          </div>
+                          <div className="space-y-2">
+                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Number of Cartons *</Label>
+                              <Input type="number" min="1" value={upfrontOrderForm.numberOfCartons} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, numberOfCartons: e.target.value})} />
+                          </div>
+                          <div className="space-y-2"><Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Total Pieces</Label><Input readOnly value={String((Number(upfrontOrderForm.numberOfPieces||0) * Number(upfrontOrderForm.numberOfCartons||0)) || 0)} /></div>
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                           <div className="space-y-2">
-                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Quantity</Label>
-                              <Input type="number" value={upfrontOrderForm.quantity} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, quantity: e.target.value})} placeholder="0" />
+                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Price per Piece *</Label>
+                              <Input type="number" min="0" value={upfrontOrderForm.pricePerPiece} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, pricePerPiece: e.target.value})} placeholder="0.00" />
                           </div>
                           <div className="space-y-2">
-                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Unit Type</Label>
-                              <div className="flex gap-2">
-                                  <Button size="sm" variant={upfrontOrderForm.isCarton ? 'default' : 'outline'} className="flex-1" onClick={() => setUpfrontOrderForm({...upfrontOrderForm, isCarton: true})}>Carton</Button>
-                                  <Button size="sm" variant={!upfrontOrderForm.isCarton ? 'default' : 'outline'} className="flex-1" onClick={() => setUpfrontOrderForm({...upfrontOrderForm, isCarton: false})}>Unit</Button>
-                              </div>
+                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Price per Piece Customer *</Label>
+                              <Input type="number" min="0" value={upfrontOrderForm.pricePerPieceCustomer} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, pricePerPieceCustomer: e.target.value})} placeholder="0.00" />
                           </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-4">
-                          <div className="space-y-2">
-                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Admin Price ({upfrontOrderForm.isCarton ? 'Carton' : 'Unit'})</Label>
-                              <Input type="number" value={upfrontOrderForm.cartonPriceAdmin} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, cartonPriceAdmin: e.target.value})} placeholder="0.00" />
-                          </div>
-                          <div className="space-y-2">
-                              <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Cust Price ({upfrontOrderForm.isCarton ? 'Carton' : 'Unit'})</Label>
-                              <Input type="number" value={upfrontOrderForm.cartonPriceCustomer} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, cartonPriceCustomer: e.target.value})} placeholder="0.00" />
-                          </div>
-                      </div>
+                      <div className="text-xs rounded border p-2 bg-slate-50">Profit: ₹{formatMoneyPrecise((Number(upfrontOrderForm.pricePerPieceCustomer||0)-Number(upfrontOrderForm.pricePerPiece||0))*(Number(upfrontOrderForm.numberOfPieces||0)*Number(upfrontOrderForm.numberOfCartons||0)))} ({Number(upfrontOrderForm.pricePerPiece||0)>0?((((Number(upfrontOrderForm.pricePerPieceCustomer||0)-Number(upfrontOrderForm.pricePerPiece||0))/Number(upfrontOrderForm.pricePerPiece||1))*100).toFixed(2)):0}%)</div>
                       <div className="space-y-2">
-                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Custom Order Total</Label>
-                          <Input type="number" value={upfrontOrderForm.totalCost} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, totalCost: e.target.value})} placeholder="0.00" />
+                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Expense if any (Transport, Labour)</Label>
+                          <Input type="number" min="0" value={upfrontOrderForm.expenseAmount} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, expenseAmount: e.target.value})} placeholder="0.00" />
                       </div>
-                      <div className="space-y-2">
-                          <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Advance Paid (Order-level)</Label>
-                          <div className="relative">
-                              <Input type="number" value={upfrontOrderForm.advancePaid} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, advancePaid: e.target.value})} placeholder="0.00" />
-                              <div className="text-[10px] mt-1 font-bold text-red-600">
-                                  Balance Due: ₹{formatMoneyPrecise(parseFloat(upfrontOrderForm.totalCost || '0') - parseFloat(upfrontOrderForm.advancePaid || '0'))}
-                              </div>
-                          </div>
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        <div>Order Total: ₹{formatMoneyPrecise((Number(upfrontOrderForm.numberOfPieces||0)*Number(upfrontOrderForm.numberOfCartons||0))*Number(upfrontOrderForm.pricePerPiece||0))}</div>
+                        <div>Order Total Customer: ₹{formatMoneyPrecise((Number(upfrontOrderForm.numberOfPieces||0)*Number(upfrontOrderForm.numberOfCartons||0))*Number(upfrontOrderForm.pricePerPieceCustomer||0))}</div>
+                        <div className="font-bold">Customer Total + Expenses: ₹{formatMoneyPrecise(((Number(upfrontOrderForm.numberOfPieces||0)*Number(upfrontOrderForm.numberOfCartons||0))*Number(upfrontOrderForm.pricePerPieceCustomer||0)) + Number(upfrontOrderForm.expenseAmount||0))}</div>
                       </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div><Label className="text-xs font-bold">Paid Now Cash</Label><Input type="number" min="0" value={upfrontOrderForm.paidNowCash} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, paidNowCash: e.target.value})} /></div>
+                        <div><Label className="text-xs font-bold">Paid Now Online</Label><Input type="number" min="0" value={upfrontOrderForm.paidNowOnline} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, paidNowOnline: e.target.value})} /></div>
+                      </div>
+                      <div className="text-xs font-bold text-red-600">On Credit Remaining: ₹{formatMoneyPrecise(Math.max(0, (((Number(upfrontOrderForm.numberOfPieces||0)*Number(upfrontOrderForm.numberOfCartons||0))*Number(upfrontOrderForm.pricePerPieceCustomer||0)) + Number(upfrontOrderForm.expenseAmount||0)) - Number(upfrontOrderForm.paidNowCash||0) - Number(upfrontOrderForm.paidNowOnline||0)))}</div>
                       <div className="space-y-2">
                           <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Reminder Date (Optional)</Label>
                           <Input type="date" value={upfrontOrderForm.reminderDate} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, reminderDate: e.target.value})} />
@@ -1234,9 +1369,54 @@ export default function Customers() {
                           <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Notes</Label>
                           <Input value={upfrontOrderForm.notes} onChange={e => setUpfrontOrderForm({...upfrontOrderForm, notes: e.target.value})} placeholder="Optional notes..." />
                       </div>
-                      <Button className="w-full h-11 shadow-lg font-bold mt-4" onClick={handleSaveUpfrontOrder}>
-                          {editingUpfrontOrder ? 'Update Order' : 'Save Order'}
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button variant="outline" className="flex-1" onClick={() => { setOrderStage('picker'); }}>Back to Products</Button>
+                        <Button className="flex-1" onClick={() => handleSaveUpfrontOrder(false)}>Save and Exit</Button>
+                        <Button className="flex-1" onClick={() => handleSaveUpfrontOrder(true)}>Save and Next</Button>
+                      </div>
+                      </>
+                      )) : (
+                        <>
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                            <div className="rounded border p-2">Total Orders: <b>{popupCustomerOrders.length}</b></div>
+                            <div className="rounded border p-2">Total Value: <b>₹{formatMoneyWhole(popupCustomerOrders.reduce((s, o) => s + getUpfrontOrderCustomerTotal(o), 0))}</b></div>
+                            <div className="rounded border p-2 text-emerald-700">Paid: <b>₹{formatMoneyWhole(popupCustomerOrders.reduce((s, o) => s + getUpfrontOrderPaid(o), 0))}</b></div>
+                            <div className="rounded border p-2 text-red-700">Remaining: <b>₹{formatMoneyWhole(popupCustomerOrders.reduce((s, o) => s + getUpfrontOrderRemaining(o), 0))}</b></div>
+                          </div>
+                          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                            <Input placeholder="Search product/notes..." value={allOrdersSearch} onChange={(e) => setAllOrdersSearch(e.target.value)} />
+                            <Select value={allOrdersStatus} onChange={(e) => setAllOrdersStatus(e.target.value as any)}><option value="all">All</option><option value="pending">Pending</option><option value="paid">Paid in Full</option></Select>
+                            <Select value={allOrdersSort} onChange={(e) => setAllOrdersSort(e.target.value as any)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option></Select>
+                          </div>
+                          <div className="text-xs font-semibold text-red-700">Remaining due from this customer’s custom orders: ₹{formatMoneyWhole(popupCustomerOrders.reduce((s, o) => s + getUpfrontOrderRemaining(o), 0))}</div>
+                          <div className="space-y-2">
+                            {filteredPopupCustomerOrders.length === 0 && <div className="text-sm text-muted-foreground border rounded p-3">No custom orders found for this customer.</div>}
+                            {filteredPopupCustomerOrders.map((order) => {
+                              const total = getUpfrontOrderCustomerTotal(order); const paid = getUpfrontOrderPaid(order); const rem = getUpfrontOrderRemaining(order); const status = getUpfrontOrderStatus(order);
+                              const isOverdue = rem > 0 && order.reminderDate && new Date(order.reminderDate).getTime() < Date.now();
+                              return <div key={order.id} className="rounded border p-3 text-xs space-y-1">
+                                <div className="flex justify-between"><b>{order.productName || '—'}</b><span>{new Date(order.date || order.createdAt || '').toLocaleDateString()}</span></div>
+                                <div>Ref: {order.id.slice(-6)} • {order.category || 'Uncategorized'} • {order.variantLabel || [order.selectedVariant, order.selectedColor].filter(Boolean).join(' / ') || '—'}</div>
+                                <div>Pieces/Cartons/Total: {order.piecesPerCarton ?? '—'} / {order.numberOfCartons ?? '—'} / {order.totalPieces ?? order.quantity ?? '—'}</div>
+                                <div>₹/Piece: {order.pricePerPiece ?? order.cartonPriceAdmin ?? '—'} • Cust ₹/Piece: {order.customerPricePerPiece ?? order.cartonPriceCustomer ?? '—'}</div>
+                                <div>Order Total: ₹{formatMoneyWhole(order.orderTotal ?? 0)} • Expense: ₹{formatMoneyWhole(order.expenseAmount ?? 0)} • Final: ₹{formatMoneyWhole(total)}</div>
+                                <div>Paid Cash: ₹{formatMoneyWhole(order.paidNowCash ?? 0)} • Paid Online: ₹{formatMoneyWhole(order.paidNowOnline ?? 0)} • Advance Paid: ₹{formatMoneyWhole(paid)} • Remaining: ₹{formatMoneyWhole(rem)}</div>
+                                <div className={`font-bold ${status === 'Paid in Full' ? 'text-emerald-700' : 'text-amber-700'}`}>Status: {isOverdue ? 'Overdue' : status}{order.reminderDate ? ` • Reminder: ${new Date(order.reminderDate).toLocaleDateString()}` : ''}</div>
+                                {order.notes ? <div>Notes: {order.notes}</div> : <div>Notes: —</div>}
+                                <div className="flex gap-2">
+                                  <Button size="sm" variant="outline" onClick={() => setExpandedOrderId(expandedOrderId === order.id ? null : order.id)}>View Details</Button>
+                                  {rem > 0 && <Button size="sm" onClick={() => { setSelectedUpfrontOrder(order); setCollectAmount(''); setCollectPaymentError(null); setIsCollectPaymentModalOpen(true); }}>Collect Payment</Button>}
+                                </div>
+                                {expandedOrderId === order.id && (
+                                  <div className="mt-2 border rounded p-2 bg-slate-50">
+                                    {(order.paymentHistory || []).length > 0 ? (order.paymentHistory || []).map((p) => <div key={p.id} className="flex justify-between"><span>{new Date(p.paidAt).toLocaleString()} • {p.kind === 'initial_advance' ? 'Initial Advance' : 'Additional Payment'} • {p.method || 'Advance'}</span><span>₹{formatMoneyWhole(p.amount)} (Rem ₹{formatMoneyWhole(p.remainingAfterPayment)})</span></div>) : <div>Legacy order — payment breakdown not available.</div>}
+                                  </div>
+                                )}
+                              </div>;
+                            })}
+                          </div>
+                        </>
+                      )}
                   </CardContent>
               </Card>
           </div>
@@ -1359,7 +1539,7 @@ export default function Customers() {
 }
 const getSaleSettlementView = (tx: Transaction) => {
   if (tx.type !== 'sale') return null;
-  const settlement = getSaleSettlementBreakdown(tx);
+  const settlement = getHistoricalAwareSaleSettlement(tx);
   const total = Math.abs(Number(tx.total || 0));
   const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
   const paidNow = settlement.cashPaid + settlement.onlinePaid;
@@ -1368,6 +1548,7 @@ const getSaleSettlementView = (tx: Transaction) => {
 
 type CustomerLedgerRow = {
   tx: Transaction;
+  reference: string;
   debit: number;
   credit: number;
   saleTotal: number;
@@ -1377,7 +1558,7 @@ type CustomerLedgerRow = {
   listDescription: string;
 };
 
-const buildCustomerLedgerRows = (transactions: Transaction[]): CustomerLedgerRow[] => {
+const buildCustomerLedgerRows = (transactions: Transaction[], upfrontEffects: Array<{ id: string; date: string; type: string; orderId: string; paymentId?: string; productName: string; paymentMethod: string; receivableIncrease: number; receivableDecrease: number; }>): CustomerLedgerRow[] => {
   const sorted = [...transactions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   const rows: CustomerLedgerRow[] = [];
   let runningDue = 0;
@@ -1394,34 +1575,39 @@ const buildCustomerLedgerRows = (transactions: Transaction[]): CustomerLedgerRow
     let saleTotal = 0;
     let paymentAmount = 0;
 
-    if (tx.type === 'sale') {
-      const settlement = getSaleSettlementBreakdown(tx);
+    const txKind = detectHistoricalTransactionType(tx);
+    if (txKind === 'sale') {
+      const settlement = getHistoricalAwareSaleSettlement(tx);
       const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
       runningDue = Math.max(0, runningDue + settlement.creditDue);
       runningStoreCredit = Math.max(0, runningStoreCredit - storeCreditUsed);
       saleTotal = amount;
-      statementDescription = `Invoice #${tx.id.slice(-6)} (Total ${formatINRPrecise(amount)}, Paid ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)}, Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? `, Used SC ${formatINRPrecise(storeCreditUsed)}` : ''})`;
-      listDescription = `Sale ${formatINRPrecise(amount)} • Paid now ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)} • Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? ` • Used SC ${formatINRPrecise(storeCreditUsed)}` : ''}`;
-    } else if (tx.type === 'payment') {
+      statementDescription = `Sale Invoice #${tx.invoiceNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} (Total ${formatINRPrecise(amount)}, Paid ${formatINRPrecise(settlement.cashPaid + settlement.onlinePaid)}, Due +${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? `, Used SC ${formatINRPrecise(storeCreditUsed)}` : ''})`;
+      listDescription = `${getTransactionProductSummary(tx)} • Sale ${formatINRPrecise(amount)} • Cash ${formatINRPrecise(settlement.cashPaid)} • Online ${formatINRPrecise(settlement.onlinePaid)} • Due ${formatINRPrecise(settlement.creditDue)}${storeCreditUsed > 0 ? ` • Used SC ${formatINRPrecise(storeCreditUsed)}` : ''}`;
+    } else if (txKind === 'payment') {
       const dueReduced = Math.min(runningDue, amount);
       const storeCreditAdded = Math.max(0, amount - dueReduced);
       runningDue = Math.max(0, runningDue - dueReduced);
       runningStoreCredit = Math.max(0, runningStoreCredit + storeCreditAdded);
       paymentAmount = amount;
-      statementDescription = `Payment #${tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}, Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? `, SC +${formatINRPrecise(storeCreditAdded)}` : ''})`;
+      statementDescription = `Payment Receipt #${tx.receiptNo || tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}, Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? `, SC +${formatINRPrecise(storeCreditAdded)}` : ''})`;
       listDescription = `${tx.paymentMethod || 'Cash'} payment ${formatINRPrecise(amount)} • Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? ` • Store credit +${formatINRPrecise(storeCreditAdded)}` : ''}`;
-    } else {
+    } else if (txKind === 'return') {
       const allocation = getCanonicalReturnAllocation(tx, processed, runningDue);
       runningDue = Math.max(0, runningDue - allocation.dueReduction);
       runningStoreCredit = Math.max(0, runningStoreCredit + allocation.storeCreditIncrease);
-      statementDescription = `Return #${tx.id.slice(-6)} (${allocation.mode.replace('_', ' ')}: Cash ${formatINRPrecise(allocation.cashRefund)}, Online ${formatINRPrecise(allocation.onlineRefund)}, Due -${formatINRPrecise(allocation.dueReduction)}, SC +${formatINRPrecise(allocation.storeCreditIncrease)})`;
+      statementDescription = `Credit Note #${tx.creditNoteNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} (${allocation.mode.replace('_', ' ')}: Cash ${formatINRPrecise(allocation.cashRefund)}, Online ${formatINRPrecise(allocation.onlineRefund)}, Due -${formatINRPrecise(allocation.dueReduction)}, SC +${formatINRPrecise(allocation.storeCreditIncrease)})`;
       listDescription = `Return ${allocation.mode.replace('_', ' ')} • Cash ${formatINRPrecise(allocation.cashRefund)} • Online ${formatINRPrecise(allocation.onlineRefund)} • Due -${formatINRPrecise(allocation.dueReduction)}${allocation.storeCreditIncrease > 0 ? ` • SC +${formatINRPrecise(allocation.storeCreditIncrease)}` : ''}`;
+    } else {
+      statementDescription = `Historical Reference #${tx.id.slice(-6)} (unclassified)`;
+      listDescription = `Historical reference row (unclassified)`;
     }
 
     const netAfter = runningDue - runningStoreCredit;
     const netDelta = netAfter - netBefore;
     rows.push({
       tx,
+      reference: tx.type === 'sale' ? (tx.invoiceNo || tx.id.slice(-6)) : tx.type === 'return' ? (tx.creditNoteNo || tx.id.slice(-6)) : (tx.receiptNo || tx.id.slice(-6)),
       debit: netDelta > 0 ? netDelta : 0,
       credit: netDelta < 0 ? Math.abs(netDelta) : 0,
       saleTotal,
@@ -1433,5 +1619,60 @@ const buildCustomerLedgerRows = (transactions: Transaction[]): CustomerLedgerRow
     processed.push(tx);
   });
 
-  return rows;
+  const consumedPaymentIds = new Set<string>();
+  upfrontEffects
+    .filter((e) => e.type !== 'legacy_custom_order_info')
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+    .forEach((effect) => {
+      if (effect.type === 'custom_order_receivable') {
+        const initialPayments = upfrontEffects.filter((p) => p.type === 'custom_order_payment' && p.orderId === effect.orderId && (String(p.paymentId || '').includes('-cash') || String(p.paymentId || '').includes('-online')));
+        const groupedCredit = initialPayments.reduce((sum, p) => sum + Math.max(0, Number(p.receivableDecrease || 0)), 0);
+        initialPayments.forEach((p) => consumedPaymentIds.add(p.id));
+        runningDue = Math.max(0, runningDue + Math.max(0, Number(effect.receivableIncrease || 0)));
+        if (groupedCredit > 0) runningDue = Math.max(0, runningDue - groupedCredit);
+        rows.push({
+          tx: { id: effect.id, items: [], total: Math.max(0, Number(effect.receivableIncrease || 0)), date: effect.date, type: 'historical_reference' } as Transaction,
+          reference: effect.orderId.slice(-6),
+          debit: Math.max(0, Number(effect.receivableIncrease || 0)),
+          credit: groupedCredit,
+          saleTotal: Math.max(0, Number(effect.receivableIncrease || 0)),
+          paymentAmount: groupedCredit,
+          netAfter: runningDue - runningStoreCredit,
+          statementDescription: `Custom Order #${effect.orderId.slice(-6)} — ${effect.productName} (Total ${formatINRPrecise(effect.receivableIncrease)}${groupedCredit > 0 ? ` • Initial Paid ${formatINRPrecise(groupedCredit)}` : ''} • Remaining ${formatINRPrecise(Math.max(0, Number(effect.receivableIncrease || 0) - groupedCredit))})`,
+          listDescription: `Custom Order • ${effect.productName} • Debit ${formatINRPrecise(effect.receivableIncrease)}${groupedCredit > 0 ? ` • Credit ${formatINRPrecise(groupedCredit)}` : ''}`,
+        });
+      } else {
+        if (consumedPaymentIds.has(effect.id)) return;
+        const dec = Math.max(0, Number(effect.receivableDecrease || 0));
+        runningDue = Math.max(0, runningDue - dec);
+        rows.push({
+          tx: { id: effect.id, items: [], total: dec, date: effect.date, type: 'payment', paymentMethod: effect.paymentMethod === 'Cash' ? 'Cash' : 'Online' } as Transaction,
+          reference: (effect.paymentId || effect.orderId).slice(-6),
+          debit: 0,
+          credit: dec,
+          saleTotal: 0,
+          paymentAmount: dec,
+          netAfter: runningDue - runningStoreCredit,
+          statementDescription: `Custom Order Payment #${(effect.paymentId || effect.orderId).slice(-6)} — ${effect.productName} (${effect.paymentMethod} ${formatINRPrecise(dec)})`,
+          listDescription: `Custom Order Payment • ${effect.productName} • ${effect.paymentMethod} ${formatINRPrecise(dec)}`,
+        });
+      }
+    });
+
+  const priority = (row: CustomerLedgerRow) => {
+    const d = `${row.statementDescription} ${row.listDescription}`.toLowerCase();
+    if (d.includes('custom order payment') && d.includes('cash')) return 0;
+    if (d.includes('custom order payment') && d.includes('online')) return 1;
+    if (d.includes('custom order #')) return 2;
+    if (d.includes('sale invoice')) return 3;
+    if (d.includes('payment')) return 4;
+    return 5;
+  };
+  return rows.sort((a, b) => {
+    const t = new Date(a.tx.date).getTime() - new Date(b.tx.date).getTime();
+    if (t !== 0) return t;
+    const p = priority(a) - priority(b);
+    if (p !== 0) return p;
+    return String(a.tx.id).localeCompare(String(b.tx.id));
+  });
 };

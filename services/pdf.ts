@@ -535,7 +535,11 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     doc.text("Invoice Details", pageWidth - 14, billSectionY, { align: "right" });
     doc.setFontSize(9);
     doc.setFont("helvetica", "normal");
-    doc.text(`Invoice No.: IN-${transaction.id.slice(-4)}`, pageWidth - 14, billSectionY + 7, { align: "right" });
+    const documentNo = transaction.type === 'return'
+      ? (transaction.creditNoteNo || `CN-${transaction.id.slice(-4)}`)
+      : (transaction.invoiceNo || `IN-${transaction.id.slice(-4)}`);
+    const documentLabel = transaction.type === 'return' ? 'Credit Note No.' : 'Invoice No.';
+    doc.text(`${documentLabel}: ${documentNo}`, pageWidth - 14, billSectionY + 7, { align: "right" });
     doc.text(`Date: ${new Date(transaction.date).toLocaleDateString()}`, pageWidth - 14, billSectionY + 13, { align: "right" });
 
     // --- Items Table ---
@@ -685,7 +689,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     doc.setFont("helvetica", "bold");
     doc.text("Authorized Signatory", pageWidth - 14, bankY + 25, { align: "right" });
 
-    doc.save(`invoice_${transaction.id.slice(-6)}.pdf`);
+    doc.save(`${transaction.type === 'return' ? 'credit_note' : 'invoice'}_${documentNo}.pdf`);
 };
 
 export const printThermalInvoice = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
@@ -711,7 +715,9 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
         return convert(absNum) + " Rupees only";
     };
 
-    const invoiceNo = `IN-${transaction.id.slice(-6)}`;
+    const invoiceNo = transaction.type === 'return'
+      ? (transaction.creditNoteNo || `CN-${transaction.id.slice(-6)}`)
+      : (transaction.invoiceNo || `IN-${transaction.id.slice(-6)}`);
     const date = new Date(transaction.date).toLocaleDateString();
     const time = new Date(transaction.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -829,7 +835,7 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
       <p>Phone: ${profile.phone || '-'}</p>
     </div>
   </div>
-  <h1 class="title">INVOICE</h1>
+  <h1 class="title">${transaction.type === 'return' ? 'CREDIT NOTE' : 'INVOICE'}</h1>
   <div class="details-section">
     <div class="bill-to">
       <h4>Bill To</h4>
@@ -838,7 +844,7 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
     </div>
     <div class="invoice-details">
       <h4>Details</h4>
-      <p><strong>No:</strong> ${invoiceNo}</p>
+      <p><strong>${transaction.type === 'return' ? 'Credit Note No' : 'Invoice No'}:</strong> ${invoiceNo}</p>
       <p><strong>Date:</strong> ${date}</p>
       <p><strong>Time:</strong> ${time}</p>
     </div>

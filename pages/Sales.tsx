@@ -974,7 +974,7 @@ export default function Sales() {
     setCreditDueInput('0');
     if (!cashManuallyEdited) setCashPaidInput(nextTotalAmount);
     if (!cashReceivedDirty) setCashReceivedInput(cashManuallyEdited ? cashReceivedInput : nextTotalAmount);
-  }, [isCustomerModalOpen, isReturnMode, cart, selectedTax.value, appliedStoreCredit, availableStoreCredit, selectedCustomer, cashReceivedDirty, cashManuallyEdited, cashReceivedInput]);
+  }, [isCustomerModalOpen, isReturnMode, cart, selectedTax.value, cashReceivedDirty, cashManuallyEdited, cashReceivedInput]);
 
   useEffect(() => {
     if (!isCustomerModalOpen || isReturnMode) return;
@@ -1726,8 +1726,13 @@ export default function Sales() {
                       <div className="flex gap-2">
                         <Input type="number" min="0" step="0.01" placeholder="0.00" value={creditDueInput} onChange={(e) => { setCreditDueInput(e.target.value); setCheckoutError(null); }} />
                         <Button type="button" variant="outline" onClick={() => {
-                          const remaining = Math.max(0, checkoutPreview.remainingPayableWhole - roundMoneyWhole(onlinePaidValue) - roundMoneyWhole(cashPaidValue));
-                          setCreditDueInput(String(remaining));
+                          const fullCreditAmount = Math.max(0, checkoutPreview.remainingPayableWhole);
+                          setCashPaidInput('0');
+                          setOnlinePaidInput('0');
+                          setCashReceivedInput('0');
+                          setCashManuallyEdited(true);
+                          setCashReceivedDirty(true);
+                          setCreditDueInput(String(fullCreditAmount));
                           setCheckoutError(null);
                         }}>Credit</Button>
                       </div>
@@ -1928,7 +1933,13 @@ export default function Sales() {
                           <CheckCircle className="w-10 h-10" />
                       </div>
                       <h2 className="text-2xl font-bold">Successful!</h2>
-                      <p className="text-muted-foreground text-sm">Receipt #{transactionComplete.id.slice(-6)} has been generated.</p>
+                      <p className="text-muted-foreground text-sm">
+                        Receipt #{transactionComplete.type === 'sale'
+                          ? (transactionComplete.invoiceNo || transactionComplete.id.slice(-6))
+                          : transactionComplete.type === 'return'
+                            ? (transactionComplete.creditNoteNo || transactionComplete.id.slice(-6))
+                            : transactionComplete.id.slice(-6)} has been generated.
+                      </p>
                       {transactionCashDetails && (
                         <div className="text-sm bg-muted rounded-lg p-3 space-y-1">
                           <p>Total: {formatINRWhole(transactionComplete.total)}</p>

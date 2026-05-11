@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
-import { Customer, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction } from '../types';
-import { createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getPurchaseOrders, getPurchaseParties, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
+import { Customer, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
+import { buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { generateAccountStatementPDF } from '../services/pdf';
+import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
 
 type CustomerReceivableRow = Customer & { receivable: number };
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[] };
@@ -13,6 +14,39 @@ const formatGroupedSupplierPaymentDescription = (method: string, allocationCount
   const methodLabel = method === 'online' ? 'Online' : 'Cash';
   if (allocationCount > 1) return `${methodLabel} supplier payment allocated across ${allocationCount} POs`;
   return `${methodLabel} supplier payment`;
+};
+
+
+const getLineProductName = (item: any): string => {
+  const raw = item?.productName || item?.name || item?.itemName || item?.medicineName || item?.title || item?.sku || item?.barcode || '';
+  const name = String(raw || '').trim();
+  return name || 'Unknown Product';
+};
+
+const getTransactionProductSummary = (tx: Transaction, maxItems = 2): string => {
+  const items = Array.isArray((tx as any)?.items) ? (tx as any).items : [];
+  if (!items.length) return 'No product details';
+  const labels = items.map((item: any) => {
+    const base = getLineProductName(item);
+    const parts = [item?.selectedColor, item?.selectedVariant].map((v: any) => String(v || '').trim()).filter(Boolean);
+    return parts.length ? `${base} (${parts.join(' / ')})` : base;
+  });
+  const unique = Array.from(new Set(labels));
+  const shown = unique.slice(0, maxItems).join(', ');
+  return unique.length > maxItems ? `${shown} +${unique.length - maxItems} more` : shown;
+};
+
+const getPurchaseOrderProductSummary = (order: PurchaseOrder, maxItems = 2): string => {
+  const lines = Array.isArray((order as any)?.lines) ? (order as any).lines : [];
+  if (!lines.length) return 'No product details';
+  const names = Array.from(new Set(lines.map((line: any) => getLineProductName(line))));
+  const shown = names.slice(0, maxItems).join(', ');
+  return names.length > maxItems ? `${shown} +${names.length - maxItems} more` : shown;
+};
+
+const toDateTimeLocalValue = (date: Date) => {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
 function ActionModal({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: React.ReactNode }) {
@@ -54,17 +88,20 @@ export default function Dashboard() {
   const [parties, setParties] = useState<PurchaseParty[]>([]);
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [supplierPayments, setSupplierPayments] = useState<SupplierPaymentLedgerEntry[]>([]);
+  const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
 
   const [receivingCustomer, setReceivingCustomer] = useState<CustomerReceivableRow | null>(null);
   const [receiveAmount, setReceiveAmount] = useState('');
   const [receiveMethod, setReceiveMethod] = useState<'Cash' | 'Online'>('Cash');
   const [receiveNote, setReceiveNote] = useState('');
+  const [receiveDateTime, setReceiveDateTime] = useState(() => toDateTimeLocalValue(new Date()));
   const [receiveError, setReceiveError] = useState<string | null>(null);
 
   const [payingParty, setPayingParty] = useState<PartyPayableRow | null>(null);
   const [payAmount, setPayAmount] = useState('');
   const [payMethod, setPayMethod] = useState<'cash' | 'online'>('cash');
   const [payNote, setPayNote] = useState('');
+  const [payDateTime, setPayDateTime] = useState(() => toDateTimeLocalValue(new Date()));
   const [payError, setPayError] = useState<string | null>(null);
   const [statementCustomerId, setStatementCustomerId] = useState<string | null>(null);
   const [statementPartyId, setStatementPartyId] = useState<string | null>(null);
@@ -79,6 +116,7 @@ export default function Dashboard() {
     setParties(getPurchaseParties());
     setOrders(getPurchaseOrders());
     setSupplierPayments(data.supplierPayments || []);
+    setUpfrontOrders(data.upfrontOrders || []);
   };
 
   useEffect(() => {
@@ -93,13 +131,24 @@ export default function Dashboard() {
 
   const canonicalSnapshot = useMemo(() => getCanonicalCustomerBalanceSnapshot(customers, transactions), [customers, transactions]);
 
+  const customReceivableByCustomer = useMemo(() => {
+    const map = new Map<string, number>();
+    buildUpfrontOrderLedgerEffects(upfrontOrders, customers).forEach((effect) => {
+      if (!effect.customerId) return;
+      const delta = Math.max(0, Number(effect.receivableIncrease || 0)) - Math.max(0, Number(effect.receivableDecrease || 0));
+      map.set(effect.customerId, (map.get(effect.customerId) || 0) + delta);
+    });
+    return map;
+  }, [upfrontOrders, customers]);
+
   const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     .map((customer) => ({
       ...customer,
-      receivable: Math.max(0, Number(canonicalSnapshot.balances.get(customer.id)?.totalDue || 0)),
+      // Custom-order receivable is sourced from buildUpfrontOrderLedgerEffects and added once here.
+      receivable: Math.max(0, Number(canonicalSnapshot.balances.get(customer.id)?.totalDue || 0) + Number(customReceivableByCustomer.get(customer.id) || 0)),
     }))
     .filter((customer) => customer.receivable > 0)
-    .sort((a, b) => b.receivable - a.receivable), [customers, canonicalSnapshot]);
+    .sort((a, b) => b.receivable - a.receivable), [customers, canonicalSnapshot, customReceivableByCustomer]);
 
   const partyPayables = useMemo<PartyPayableRow[]>(() => {
     const dueOrders = orders
@@ -120,11 +169,21 @@ export default function Dashboard() {
   const totalPayable = useMemo(() => partyPayables.reduce((sum, party) => sum + party.payable, 0), [partyPayables]);
   const selectedCustomer = useMemo(() => customers.find(c => c.id === statementCustomerId) || null, [customers, statementCustomerId]);
   const selectedParty = useMemo(() => parties.find(p => p.id === statementPartyId) || null, [parties, statementPartyId]);
+  useEffect(() => {
+    const recon = reconcileReceivableSurfaces({
+      customers,
+      transactions,
+      upfrontOrders,
+      dashboardReceivable: totalReceivable,
+      sourceLabel: 'Dashboard',
+    });
+    logReceivableReconciliationIfNeeded(recon);
+  }, [customers, transactions, upfrontOrders, totalReceivable]);
 
   const customerStatement = useMemo(() => {
     if (!selectedCustomer) return null;
     const customerTx = transactions
-      .filter(tx => tx.customerId === selectedCustomer.id && (tx.type === 'sale' || tx.type === 'payment' || tx.type === 'return'))
+      .filter(tx => tx.customerId === selectedCustomer.id && (tx.type === 'sale' || tx.type === 'payment' || tx.type === 'return' || String((tx as any).type || '').toLowerCase() === 'historical_reference'))
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     const rows: LedgerRow[] = [];
     let runningBalance = 0;
@@ -134,15 +193,17 @@ export default function Dashboard() {
     let totalStoreCreditAdded = 0;
     const processed: Transaction[] = [];
     customerTx.forEach(tx => {
-      if (tx.type === 'sale') {
-        const settlement = getSaleSettlementBreakdown(tx);
+      const txTypeRaw = String((tx as any).type || '').toLowerCase();
+      const txKind: 'sale' | 'payment' | 'return' = txTypeRaw === 'historical_reference' ? 'sale' : (tx.type as any);
+      if (txKind === 'sale') {
+        const settlement = getHistoricalAwareSaleSettlement(tx);
         const storeCreditUsed = Math.max(0, Number(tx.storeCreditUsed || 0));
         const dueInc = Math.max(0, settlement.creditDue);
         runningBalance += dueInc;
         totalCreditSales += dueInc;
         totalStoreCreditUsed += storeCreditUsed;
-        rows.push({ id: tx.id, date: tx.date, type: 'Credit Sale', ref: tx.id.slice(-6), description: `Due +${formatINRPrecise(dueInc)}${storeCreditUsed > 0 ? ` • SC used ${formatINRPrecise(storeCreditUsed)}` : ''}`, debit: dueInc, credit: 0, balance: runningBalance, tone: 'due' });
-      } else if (tx.type === 'payment') {
+        rows.push({ id: tx.id, date: tx.date, type: 'Credit Sale', ref: tx.id.slice(-6), description: `Sale Invoice #${(tx as any).invoiceNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due +${formatINRPrecise(dueInc)}${storeCreditUsed > 0 ? ` • SC used ${formatINRPrecise(storeCreditUsed)}` : ''}`, debit: dueInc, credit: 0, balance: runningBalance, tone: 'due' });
+      } else if (txKind === 'payment') {
         const amount = Math.max(0, Number(tx.total || 0));
         const dueReduced = Math.min(runningBalance, amount);
         const storeCreditAdded = Math.max(0, amount - dueReduced);
@@ -155,9 +216,22 @@ export default function Dashboard() {
         const creditReduction = Math.max(0, alloc.dueReduction);
         runningBalance = Math.max(0, runningBalance - creditReduction);
         totalStoreCreditAdded += Math.max(0, alloc.storeCreditIncrease);
-        rows.push({ id: tx.id, date: tx.date, type: 'Return', ref: tx.id.slice(-6), description: `Due -${formatINRPrecise(creditReduction)} • SC +${formatINRPrecise(alloc.storeCreditIncrease)}`, debit: 0, credit: creditReduction, balance: runningBalance, tone: 'refund' });
+        rows.push({ id: tx.id, date: tx.date, type: 'Return', ref: tx.id.slice(-6), description: `Credit Note #${(tx as any).creditNoteNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} • Due -${formatINRPrecise(creditReduction)} • SC +${formatINRPrecise(alloc.storeCreditIncrease)}`, debit: 0, credit: creditReduction, balance: runningBalance, tone: 'refund' });
       }
       processed.push(tx);
+    });
+    buildUpfrontOrderLedgerEffects(upfrontOrders.filter((o) => o.customerId === selectedCustomer.id), [selectedCustomer]).forEach((effect) => {
+      if (effect.type === 'legacy_custom_order_info') return;
+      if (effect.type === 'custom_order_receivable') {
+        runningBalance += Math.max(0, effect.receivableIncrease);
+        totalCreditSales += Math.max(0, effect.receivableIncrease);
+        rows.push({ id: effect.id, date: effect.date, type: 'Custom Order', ref: effect.orderId.slice(-6), description: `Custom Order — ${effect.productName}`, debit: Math.max(0, effect.receivableIncrease), credit: 0, balance: runningBalance, tone: 'due' });
+      } else {
+        const credit = Math.max(0, effect.receivableDecrease);
+        runningBalance = Math.max(0, runningBalance - credit);
+        totalPayments += credit;
+        rows.push({ id: effect.id, date: effect.date, type: 'Order Payment', ref: (effect.paymentId || effect.orderId).slice(-6), description: `Custom Order Payment — ${effect.productName} — ${effect.paymentMethod}`, debit: 0, credit, balance: runningBalance, tone: effect.paymentMethod === 'Cash' ? 'cash' : 'payment', source: 'customerPayment' });
+      }
     });
     const canonicalDue = Math.max(0, Number(canonicalSnapshot.balances.get(selectedCustomer.id)?.totalDue || 0));
     const displayRows = [...rows].reverse();
@@ -184,7 +258,7 @@ export default function Dashboard() {
         date: order.orderDate || order.createdAt,
         type: 'purchase',
         ref: order.billNumber || order.id.slice(-6),
-        description: `PO ${order.id.slice(-6)} received${order.status ? ` • ${order.status}` : ''}`,
+        description: `PO ${order.billNumber || order.id.slice(-6)} • ${getPurchaseOrderProductSummary(order)}${order.status ? ` • ${order.status}` : ''}`,
         debit: orderTotal,
         credit: 0,
         tone: 'due',
@@ -199,7 +273,7 @@ export default function Dashboard() {
         id: `sp-${payment.id}`,
         date: payment.paidAt,
         type: 'payment',
-        ref: payment.id.slice(-6),
+        ref: payment.voucherNo || payment.id.slice(-6),
         description: formatGroupedSupplierPaymentDescription(payment.method, Math.max(1, payment.allocations?.length || 1)),
         debit: 0,
         credit: Math.max(0, Number(payment.amount || 0)),
@@ -272,6 +346,7 @@ export default function Dashboard() {
     setReceiveAmount('');
     setReceiveMethod('Cash');
     setReceiveNote('');
+    setReceiveDateTime(toDateTimeLocalValue(new Date()));
     setReceiveError(null);
   };
 
@@ -280,6 +355,7 @@ export default function Dashboard() {
     setPayAmount('');
     setPayMethod('cash');
     setPayNote('');
+    setPayDateTime(toDateTimeLocalValue(new Date()));
     setPayError(null);
   };
 
@@ -290,11 +366,14 @@ export default function Dashboard() {
     if (!Number.isFinite(amount) || amount <= 0) return setReceiveError('Enter valid amount greater than zero.');
     if (amount > receivingCustomer.receivable + 0.0001) return setReceiveError('Amount cannot exceed customer receivable.');
 
+    const paymentDate = receiveDateTime ? new Date(receiveDateTime) : new Date();
+    if (Number.isNaN(paymentDate.getTime())) return setReceiveError('Please select a valid payment date.');
+
     const tx: Transaction = {
       id: Date.now().toString(),
       items: [],
       total: amount,
-      date: new Date().toISOString(),
+      date: paymentDate.toISOString(),
       type: 'payment',
       customerId: receivingCustomer.id,
       customerName: receivingCustomer.name,
@@ -313,12 +392,15 @@ export default function Dashboard() {
     if (!Number.isFinite(amount) || amount <= 0) return setPayError('Enter valid amount greater than zero.');
     if (amount > payingParty.payable + 0.0001) return setPayError('Amount cannot exceed party payable.');
 
+    const paymentDate = payDateTime ? new Date(payDateTime) : new Date();
+    if (Number.isNaN(paymentDate.getTime())) return setPayError('Please select a valid payment date.');
+
     await createSupplierPayment({
       partyId: payingParty.id,
       partyName: payingParty.name,
       amount,
       method: payMethod,
-      paidAt: new Date().toISOString(),
+      paidAt: paymentDate.toISOString(),
       note: payNote.trim() || 'Supplier payment',
     });
 
@@ -532,6 +614,10 @@ export default function Dashboard() {
               <Input type="number" min="0" step="0.01" value={receiveAmount} onChange={(e) => setReceiveAmount(e.target.value)} />
             </div>
             <div>
+              <Label>Payment Date</Label>
+              <Input type="datetime-local" value={receiveDateTime} onChange={(e) => setReceiveDateTime(e.target.value)} />
+            </div>
+            <div>
               <Label>Method</Label>
               <Select value={receiveMethod} onChange={(e) => setReceiveMethod(e.target.value as 'Cash' | 'Online')}>
                 <option value="Cash">Cash</option>
@@ -556,6 +642,10 @@ export default function Dashboard() {
             <div>
               <Label>Amount</Label>
               <Input type="number" min="0" step="0.01" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} />
+            </div>
+            <div>
+              <Label>Payment Date</Label>
+              <Input type="datetime-local" value={payDateTime} onChange={(e) => setPayDateTime(e.target.value)} />
             </div>
             <div>
               <Label>Method</Label>

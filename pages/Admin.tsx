@@ -19,6 +19,7 @@ export default function Admin() {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [storeName, setStoreName] = useState('StockFlow');
+  const [storeProfile, setStoreProfile] = useState<any>(null);
   const [variantsMaster, setVariantsMaster] = useState<string[]>([]);
   const [colorsMaster, setColorsMaster] = useState<string[]>([]);
   
@@ -109,6 +110,7 @@ export default function Admin() {
     setProducts(data.products);
     setCategories(data.categories);
     setStoreName(data.profile.storeName || 'StockFlow');
+    setStoreProfile(data.profile || null);
     setVariantsMaster(data.variantsMaster || []);
     setColorsMaster(data.colorsMaster || []);
     setPurchaseParties(getPurchaseParties().map((party) => ({ id: party.id, name: party.name })));
@@ -2037,7 +2039,7 @@ export default function Admin() {
             groupByCategory: opts.groupByCategory,
             showInStockPrices: opts.showInStockPrices,
             showOutOfStockPrices: opts.showOutOfStockPrices,
-            firstPageImage: loadData().profile?.customerCatalogFirstPage,
+            firstPageImage: storeProfile?.customerCatalogFirstPage,
           });
           setIsCatalogOptionsOpen(false);
         }}

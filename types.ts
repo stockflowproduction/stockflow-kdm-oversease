@@ -83,7 +83,7 @@ export interface Transaction {
     creditDue: number;
   };
   date: string;
-  type: 'sale' | 'return' | 'payment';
+  type: 'sale' | 'return' | 'payment' | 'historical_reference';
   customerId?: string;
   customerName?: string;
   customerPhone?: string;
@@ -95,10 +95,24 @@ export interface Transaction {
   tax?: number;
   taxRate?: number;
   taxLabel?: string;
-  paymentMethod?: 'Cash' | 'Credit' | 'Online';
+  paymentMethod?: 'Cash' | 'Credit' | 'Online' | 'Mixed';
+  source?: 'live' | 'historical_import';
+  isHistorical?: boolean;
+  legacyRef?: string;
+  sourceRef?: string;
+  invoiceNo?: string;
+  creditNoteNo?: string;
+  receiptNo?: string;
+  billRef?: string;
   notes?: string;
   sourceTransactionId?: string;
   sourceTransactionDate?: string;
+}
+
+export interface DocumentSeriesConfig {
+  nextNumber: number;
+  padding: number;
+  prefix?: string;
 }
 
 export interface StoreProfile {
@@ -134,9 +148,28 @@ export interface AdminUser {
 export interface UpfrontOrder {
   id: string;
   customerId: string;
+  productId?: string;
   productName: string;
+  productImage?: string;
+  category?: string;
+  selectedVariant?: string;
+  selectedColor?: string;
+  variantLabel?: string;
   quantity: number;
   isCarton: boolean;
+  piecesPerCarton?: number;
+  numberOfCartons?: number;
+  totalPieces?: number;
+  pricePerPiece?: number;
+  customerPricePerPiece?: number;
+  orderTotal?: number;
+  orderTotalCustomer?: number;
+  expenseAmount?: number;
+  finalTotal?: number;
+  profitAmount?: number;
+  profitPercent?: number;
+  paidNowCash?: number;
+  paidNowOnline?: number;
   cartonPriceAdmin: number;
   cartonPriceCustomer: number;
   totalCost: number;
@@ -146,6 +179,41 @@ export interface UpfrontOrder {
   reminderDate?: string;
   status: 'unpaid' | 'cleared';
   notes?: string;
+  initialAdvancePaid?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  paymentHistory?: Array<{
+    id: string;
+    paidAt: string;
+    amount: number;
+    method?: 'Cash' | 'Online' | 'Credit' | 'Advance' | string;
+    note?: string;
+    kind: 'initial_advance' | 'additional_payment';
+    remainingAfterPayment: number;
+    advancePaidAfterPayment: number;
+  }>;
+}
+
+export interface UpfrontOrderLedgerEffect {
+  id: string;
+  orderId: string;
+  paymentId?: string;
+  date: string;
+  customerId?: string;
+  customerName: string;
+  productName: string;
+  description: string;
+  type: 'custom_order_receivable' | 'custom_order_payment' | 'legacy_custom_order_info';
+  paymentMethod: 'Cash' | 'Online' | 'Mixed' | 'Unknown' | 'Advance';
+  cashIn: number;
+  bankIn: number;
+  receivableIncrease: number;
+  receivableDecrease: number;
+  totalAmount: number;
+  paidAmount: number;
+  remainingAmount: number;
+  source: 'upfront_order';
+  isLegacyInfoOnly?: boolean;
 }
 
 
@@ -466,6 +534,7 @@ export interface PurchaseOrder {
 
 export interface SupplierPaymentLedgerEntry {
   id: string;
+  voucherNo?: string;
   partyId: string;
   partyName: string;
   amount: number;
@@ -587,6 +656,12 @@ export interface AppState {
   categories: string[];
   customers: Customer[];
   profile: StoreProfile;
+  documentSeries?: {
+    salesInvoice?: DocumentSeriesConfig;
+    salesCreditNote?: DocumentSeriesConfig;
+    customerPaymentReceipt?: DocumentSeriesConfig;
+    supplierPaymentVoucher?: DocumentSeriesConfig;
+  };
   upfrontOrders: UpfrontOrder[];
   cashSessions?: CashSession[];
   expenses?: Expense[];

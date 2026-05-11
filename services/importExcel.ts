@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { CartItem, Customer, Product, PurchaseOrder, PurchaseOrderLine, Transaction } from '../types';
-import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, loadData, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
+import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, loadData, normalizeHistoricalTransactionForImport, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 
 export type ImportIssue = { sheet: string; row: number; field: string; message: string };
@@ -711,7 +711,15 @@ export const importTransactionsFromFile = async (
 
     const existingTx = (data.transactions || []).find(t => t.id === txId);
     if (!date || Number.isNaN(Date.parse(date))) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Date', message: 'Date format is invalid' });
-    if (!['sale', 'return', 'payment'].includes(type)) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Type', message: 'Type must be sale, return, or payment' });
+    if (!type && !isHistoricalMode) {
+      errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Type', message: 'Transaction Type is required. Use sale, return, or payment.' });
+    } else if (isHistoricalMode) {
+      if (!['sale', 'return', 'payment', 'historical_reference', ''].includes(type)) {
+        errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Type', message: 'Type must be sale, return, payment, or historical_reference' });
+      }
+    } else if (!['sale', 'return', 'payment'].includes(type)) {
+      errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Type', message: 'Type must be sale, return, or payment' });
+    }
     if (!['Cash', 'Credit', 'Online'].includes(paymentMethod)) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Payment Method', message: 'Payment Method is invalid' });
     if (paymentMethod === 'Credit' && !customer) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Customer', message: 'Credit transactions require an existing customer (Customer ID preferred, else phone/name match)' });
     if (Number.isFinite(saleCashPaidRaw) && saleCashPaidRaw < 0) errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Sale Cash Paid', message: 'Sale Cash Paid cannot be negative' });
@@ -820,7 +828,8 @@ export const importTransactionsFromFile = async (
 
     const taxable = subtotal - discount;
     const tax = taxable * (taxRate / 100);
-    const computedTotal = type === 'return' ? -(taxable + tax) : (taxable + tax);
+    const normalizedKind = type === 'historical_reference' ? 'sale' : type;
+    const computedTotal = normalizedKind === 'return' ? -(taxable + tax) : (taxable + tax);
 
     const providedSubtotal = toNum(row0['Subtotal']);
     const providedDiscount = toNum(row0['Discount']);
@@ -843,7 +852,7 @@ export const importTransactionsFromFile = async (
     const computedTx: Transaction = {
       id: txId,
       date: new Date(date).toISOString(),
-      type: type as Transaction['type'],
+      type: normalizedKind as Transaction['type'],
       customerId: customer?.id,
       customerName: customer?.name || customerNameFromFile || undefined,
       paymentMethod: paymentMethod as Transaction['paymentMethod'],
@@ -920,13 +929,42 @@ export const importTransactionsFromFile = async (
   if (errors.length) return { totalRows: rows.length, importedRows: 0, errors, warnings, summary: 'Validation failed. No transactions imported.' };
 
   if (isHistoricalMode) {
-    await addHistoricalTransactions(importTx);
+    const normalizedRows: Transaction[] = [];
+    let sales = 0;
+    let payments = 0;
+    let returns = 0;
+    let unknown = 0;
+    let matchedCustomers = 0;
+    let unmatchedCustomers = 0;
 
-    onProgress?.({ phase: 'completed', processed: importTx.length, total: importTx.length, message: 'Historical transaction import completed.' });
-    const summary = warnings.length
-      ? `Imported ${importTx.length} historical transactions with ${warnings.length} warning(s).`
-      : `Imported ${importTx.length} historical transactions successfully.`;
-    return { totalRows: rows.length, importedRows: importTx.length, errors: [], warnings, summary };
+    for (const tx of importTx) {
+      const normalized = normalizeHistoricalTransactionForImport(tx as any, data.customers || []);
+      if (!normalized) {
+        unknown += 1;
+        continue;
+      }
+      if (normalized.type === 'sale' || normalized.type === 'historical_reference') sales += 1;
+      else if (normalized.type === 'payment') payments += 1;
+      else if (normalized.type === 'return') returns += 1;
+      if (normalized.customerId) matchedCustomers += 1;
+      else unmatchedCustomers += 1;
+      normalizedRows.push(normalized);
+    }
+
+    await addHistoricalTransactions(normalizedRows);
+
+    if (unmatchedCustomers > 0) {
+      warnings.push({
+        sheet: 'Transactions',
+        row: 1,
+        field: 'Customer',
+        message: `${unmatchedCustomers} historical rows imported without customer match. They will appear by embedded name only.`,
+      });
+    }
+
+    onProgress?.({ phase: 'completed', processed: normalizedRows.length, total: normalizedRows.length, message: 'Historical transaction import completed.' });
+    const summary = `Imported ${normalizedRows.length} historical transactions (parsed=${rows.length}, sales=${sales}, payments=${payments}, returns=${returns}, unknown=${unknown}, matchedCustomers=${matchedCustomers}, unmatchedCustomers=${unmatchedCustomers})${warnings.length ? ` with ${warnings.length} warning(s)` : ''}.`;
+    return { totalRows: rows.length, importedRows: normalizedRows.length, errors: [], warnings, summary };
   }
 
   await runThrottled(importTx, tx => {

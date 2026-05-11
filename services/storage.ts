@@ -20,6 +20,7 @@ import {
   DeleteCompensationRecord,
   UpdatedTransactionRecord,
   CashAdjustment,
+  UpfrontOrderLedgerEffect,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
@@ -687,6 +688,19 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
   const totalDue = roundCurrency(Math.max(0, runningDue));
   const storeCredit = roundCurrency(Math.max(0, runningStoreCredit));
   return { totalDue, storeCredit, activeSalesTotal, activePaymentsTotal, activeReturnsTotal };
+};
+
+
+export const getHistoricalAwareSaleSettlement = (transaction: Transaction): { cashPaid: number; onlinePaid: number; creditDue: number } => {
+  const base = getSaleSettlementBreakdown(transaction);
+  if (base.cashPaid > 0 || base.onlinePaid > 0 || base.creditDue > 0) return base;
+  const amount = Math.max(0, Math.abs(Number((transaction as any).total || (transaction as any).amount || 0)));
+  const explicitDue = Number((transaction as any).creditDue || (transaction as any).creditAmount || 0);
+  if (Number.isFinite(explicitDue) && explicitDue > 0) return { cashPaid: 0, onlinePaid: 0, creditDue: explicitDue };
+  const pm = String((transaction as any).paymentMethod || '').toLowerCase();
+  if (pm === 'online') return { cashPaid: 0, onlinePaid: amount, creditDue: 0 };
+  if (pm === 'credit') return { cashPaid: 0, onlinePaid: 0, creditDue: amount };
+  return { cashPaid: amount, onlinePaid: 0, creditDue: 0 };
 };
 
 export const getCanonicalCustomerBalanceSnapshot = (customers: Customer[], transactions: Transaction[]) => {
@@ -1569,6 +1583,103 @@ const defaultProfile: StoreProfile = {
   invoiceFormat: 'standard'
 };
 
+const DEFAULT_SALES_INVOICE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: '' });
+const DEFAULT_SALES_CREDIT_NOTE_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'CN-' });
+const DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'RV-' });
+const DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES = Object.freeze({ nextNumber: 101, padding: 5, prefix: 'SPV-' });
+
+const formatSeriesNumber = (nextNumber: number, padding: number, prefix = ''): string => {
+  const safePadding = Number.isFinite(padding) && padding > 0 ? Math.floor(padding) : 5;
+  const safeNumber = Number.isFinite(nextNumber) && nextNumber > 0 ? Math.floor(nextNumber) : 1;
+  return `${prefix}${String(safeNumber).padStart(safePadding, '0')}`;
+};
+
+const ensureDocumentSeriesDefaults = (state: AppState): AppState => ({
+  ...state,
+  documentSeries: {
+    salesInvoice: {
+      ...DEFAULT_SALES_INVOICE_SERIES,
+      ...(state.documentSeries?.salesInvoice || {}),
+    },
+    salesCreditNote: {
+      ...DEFAULT_SALES_CREDIT_NOTE_SERIES,
+      ...(state.documentSeries?.salesCreditNote || {}),
+    },
+    customerPaymentReceipt: {
+      ...DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES,
+      ...(state.documentSeries?.customerPaymentReceipt || {}),
+    },
+    supplierPaymentVoucher: {
+      ...DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES,
+      ...(state.documentSeries?.supplierPaymentVoucher || {}),
+    },
+  },
+});
+
+const allocateSalesInvoiceNumber = (state: AppState): { state: AppState; invoiceNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.salesInvoice!;
+  const invoiceNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || '');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        salesInvoice: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    invoiceNo,
+  };
+};
+
+const allocateSalesCreditNoteNumber = (state: AppState): { state: AppState; creditNoteNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.salesCreditNote!;
+  const creditNoteNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || 'CN-');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        salesCreditNote: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    creditNoteNo,
+  };
+};
+
+const allocateCustomerPaymentReceiptNumber = (state: AppState): { state: AppState; receiptNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.customerPaymentReceipt!;
+  const receiptNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || 'RV-');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        customerPaymentReceipt: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    receiptNo,
+  };
+};
+
+const allocateSupplierPaymentVoucherNumber = (state: AppState): { state: AppState; voucherNo: string } => {
+  const normalized = ensureDocumentSeriesDefaults(state);
+  const series = normalized.documentSeries!.supplierPaymentVoucher!;
+  const voucherNo = formatSeriesNumber(series.nextNumber, series.padding, series.prefix || 'SPV-');
+  return {
+    state: {
+      ...normalized,
+      documentSeries: {
+        ...normalized.documentSeries,
+        supplierPaymentVoucher: { ...series, nextNumber: series.nextNumber + 1 },
+      },
+    },
+    voucherNo,
+  };
+};
+
 const initialData: AppState = {
   products: [],
   transactions: [],
@@ -1592,6 +1703,12 @@ const initialData: AppState = {
   purchaseParties: [],
   purchaseOrders: [],
   supplierPayments: [],
+  documentSeries: {
+    salesInvoice: { ...DEFAULT_SALES_INVOICE_SERIES },
+    salesCreditNote: { ...DEFAULT_SALES_CREDIT_NOTE_SERIES },
+    customerPaymentReceipt: { ...DEFAULT_CUSTOMER_PAYMENT_RECEIPT_SERIES },
+    supplierPaymentVoucher: { ...DEFAULT_SUPPLIER_PAYMENT_VOUCHER_SERIES },
+  },
   variantsMaster: [],
   colorsMaster: []
 };
@@ -1883,6 +2000,9 @@ const syncFromCloud = async () => {
                 const hydratedProducts = subcollectionProducts;
                 const hydratedCustomers = subcollectionCustomers;
                 const hydratedTransactions = subcollectionTransactions;
+                const fallbackFreightInquiries = Array.isArray(memoryState.freightInquiries) ? memoryState.freightInquiries : [];
+                const fallbackFreightConfirmedOrders = Array.isArray(memoryState.freightConfirmedOrders) ? memoryState.freightConfirmedOrders : [];
+                const fallbackFreightPurchases = Array.isArray(memoryState.freightPurchases) ? memoryState.freightPurchases : [];
                 memoryState = {
                     ...initialData,
                     ...cloudData,
@@ -1898,9 +2018,9 @@ const syncFromCloud = async () => {
                     expenseCategories: cloudData.expenseCategories || ['General'],
                     expenseActivities: cloudData.expenseActivities || [],
                     cashAdjustments: cloudData.cashAdjustments || [],
-                    freightInquiries: cloudData.freightInquiries || [],
-                    freightConfirmedOrders: cloudData.freightConfirmedOrders || [],
-                    freightPurchases: cloudData.freightPurchases || [],
+                    freightInquiries: cloudData.freightInquiries ?? fallbackFreightInquiries,
+                    freightConfirmedOrders: cloudData.freightConfirmedOrders ?? fallbackFreightConfirmedOrders,
+                    freightPurchases: cloudData.freightPurchases ?? fallbackFreightPurchases,
                     purchaseReceiptPostings: cloudData.purchaseReceiptPostings || [],
                     freightBrokers: cloudData.freightBrokers || [],
                     purchaseParties: cloudData.purchaseParties || [],
@@ -2434,6 +2554,33 @@ const uploadProductImageIfNeeded = async (product: Product): Promise<Product> =>
   }
 };
 
+const sanitizeFreightImageFields = <T extends Record<string, any>>(entity: T): T => {
+  const next: Record<string, any> = { ...entity };
+  const blockedKeys = ['imagePreview', 'preview', 'imageBase64', 'dataUrl', 'localPreview', 'file', 'imageFile', 'rawImage'];
+  blockedKeys.forEach((key) => { if (key in next) delete next[key]; });
+  const sanitizeImageValue = (value: unknown): string => {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    if (/^data:image/i.test(trimmed)) return '';
+    if (/^blob:/i.test(trimmed)) return '';
+    if (!/^https?:\/\//i.test(trimmed)) return '';
+    return trimmed;
+  };
+  next.productPhoto = sanitizeImageValue(next.productPhoto);
+  next.image = sanitizeImageValue(next.image);
+  next.imageUrl = sanitizeImageValue(next.imageUrl);
+  return next as T;
+};
+
+const resolveFreightProductImageUrl = (...candidates: unknown[]): string => {
+  for (const candidate of candidates) {
+    const sanitized = sanitizeFreightImageFields({ productPhoto: candidate as any }).productPhoto;
+    if (sanitized) return sanitized;
+  }
+  return '';
+};
+
 const syncToCloud = async (data: AppState) => {
     if (!db || !isCloudSynced || !auth) return;
     const user = auth.currentUser;
@@ -2454,7 +2601,7 @@ const syncToCloud = async (data: AppState) => {
 
     try {
         // Keep subcollection-owned entities out of root store writes to avoid array-overwrite blast radius.
-        const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, deletedTransactions: _omitDeletedTransactions, ...rootStateWithoutMigratedEntities } = data;
+        const { products: _omitProducts, customers: _omitCustomers, transactions: _omitTransactions, deletedTransactions: _omitDeletedTransactions, freightInquiries: _omitFreightInquiries, freightConfirmedOrders: _omitFreightConfirmedOrders, freightPurchases: _omitFreightPurchases, ...rootStateWithoutMigratedEntities } = data;
         const normalizedState = { ...rootStateWithoutMigratedEntities };
         const cleanData = sanitizeData(normalizedState);
         if (!cleanData || typeof cleanData !== 'object' || Object.keys(cleanData).length === 0) {
@@ -3264,14 +3411,140 @@ export const updateCustomer = (customer: Customer): Customer[] => {
     return newCustomers;
 }
 
+const normalizeUpfrontPaymentMethod = (raw?: string): UpfrontOrderLedgerEffect['paymentMethod'] => {
+  const method = String(raw || '').trim().toLowerCase();
+  if (!method) return 'Unknown';
+  if (method.includes('cash')) return 'Cash';
+  if (method.includes('online') || method.includes('bank') || method.includes('upi') || method.includes('card')) return 'Online';
+  if (method.includes('mixed')) return 'Mixed';
+  if (method.includes('advance')) return 'Advance';
+  return 'Unknown';
+};
+
+/**
+ * Phase 2 helper only (read-model):
+ * Builds normalized custom/upfront-order accounting effect rows without mutating state.
+ * Not wired into Cashbook/Finance/Statements yet.
+ * Legacy no-history orders are emitted as informational-only rows with zero accounting effect.
+ */
+export const buildUpfrontOrderLedgerEffects = (
+  upfrontOrders: UpfrontOrder[],
+  customers: Pick<Customer, 'id' | 'name'>[] = []
+): UpfrontOrderLedgerEffect[] => {
+  const customerMap = new Map(customers.map((c) => [c.id, c.name]));
+  const safeOrders = Array.isArray(upfrontOrders) ? upfrontOrders : [];
+  const effects: UpfrontOrderLedgerEffect[] = [];
+
+  safeOrders.forEach((order) => {
+    const orderDate = order.date || order.createdAt || order.updatedAt || new Date(0).toISOString();
+    const customerName = (order as any).customerName || customerMap.get(order.customerId) || 'Unknown Customer';
+    const productName = String(order.productName || 'Custom Order').trim() || 'Custom Order';
+    const totalAmount = Math.max(0, Number(order.finalTotal ?? order.totalCost ?? (((order.orderTotalCustomer || 0) + (order.expenseAmount || 0)) || 0)));
+    const remainingAmount = Math.max(0, Number(order.remainingAmount || 0));
+    const history = Array.isArray(order.paymentHistory) ? order.paymentHistory : [];
+
+    if (!history.length) {
+      effects.push({
+        id: `upfront-ledger-${order.id}-legacy`,
+        orderId: order.id,
+        date: orderDate,
+        customerId: order.customerId,
+        customerName,
+        productName,
+        description: `Legacy custom order — payment breakdown not available. • ${productName}`,
+        type: 'legacy_custom_order_info',
+        paymentMethod: 'Unknown',
+        cashIn: 0,
+        bankIn: 0,
+        receivableIncrease: 0,
+        receivableDecrease: 0,
+        totalAmount,
+        paidAmount: Math.max(0, Number(order.advancePaid || 0)),
+        remainingAmount,
+        source: 'upfront_order',
+        isLegacyInfoOnly: true,
+      });
+      return;
+    }
+
+    effects.push({
+      id: `upfront-ledger-${order.id}-receivable`,
+      orderId: order.id,
+      date: orderDate,
+      customerId: order.customerId,
+      customerName,
+      productName,
+      description: `Custom Order Receivable — ${productName}`,
+      type: 'custom_order_receivable',
+      paymentMethod: 'Unknown',
+      cashIn: 0,
+      bankIn: 0,
+      receivableIncrease: totalAmount,
+      receivableDecrease: 0,
+      totalAmount,
+      paidAmount: 0,
+      remainingAmount,
+      source: 'upfront_order',
+    });
+
+    history.forEach((payment, idx) => {
+      const amount = Math.max(0, Number(payment.amount || 0));
+      const method = normalizeUpfrontPaymentMethod(payment.method);
+      effects.push({
+        id: `upfront-ledger-${order.id}-payment-${payment.id || idx}`,
+        orderId: order.id,
+        paymentId: payment.id || `${idx}`,
+        date: payment.paidAt || orderDate,
+        customerId: order.customerId,
+        customerName,
+        productName,
+        description: `${payment.kind === 'initial_advance' ? 'Custom Order Advance' : 'Custom Order Payment'} — ${productName}`,
+        type: 'custom_order_payment',
+        paymentMethod: method,
+        cashIn: method === 'Cash' ? amount : 0,
+        bankIn: method === 'Online' ? amount : 0,
+        receivableIncrease: 0,
+        receivableDecrease: amount,
+        totalAmount,
+        paidAmount: amount,
+        remainingAmount: Math.max(0, Number(payment.remainingAfterPayment ?? remainingAmount)),
+        source: 'upfront_order',
+      });
+    });
+  });
+
+  return effects.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime() || a.id.localeCompare(b.id));
+};
+
 export const addUpfrontOrder = (order: UpfrontOrder): AppState => {
     const data = loadData();
     assertUpfrontOrderPayload(order, new Set(data.customers.map(c => c.id)));
+    const createdAt = order.createdAt || order.date || new Date().toISOString();
+    const normalizedOrder: UpfrontOrder = {
+      ...order,
+      createdAt,
+      updatedAt: new Date().toISOString(),
+      initialAdvancePaid: Number.isFinite(order.initialAdvancePaid as any) ? order.initialAdvancePaid : Math.max(0, Number(order.advancePaid || 0)),
+      paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : (
+        Math.max(0, Number(order.advancePaid || 0)) > 0
+          ? [{
+            id: `upfront-pay-${order.id}-initial`,
+            paidAt: createdAt,
+            amount: Math.max(0, Number(order.advancePaid || 0)),
+            method: 'Advance',
+            note: 'Initial advance',
+            kind: 'initial_advance',
+            remainingAfterPayment: Math.max(0, Number(order.remainingAmount || 0)),
+            advancePaidAfterPayment: Math.max(0, Number(order.advancePaid || 0)),
+          }]
+          : []
+      ),
+    };
 
-    const newOrders = [...data.upfrontOrders, order];
+    const newOrders = [...data.upfrontOrders, normalizedOrder];
     const newState = { ...data, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'addUpfrontOrder', auditOperation: 'CREATE' });
-    emitBehaviorStateChange({ type: 'order_created', entityId: order.id, to: order.status, metadata: { customerId: order.customerId, totalCost: order.totalCost } });
+    emitBehaviorStateChange({ type: 'order_created', entityId: normalizedOrder.id, to: normalizedOrder.status, metadata: { customerId: normalizedOrder.customerId, totalCost: normalizedOrder.totalCost } });
     return newState;
 };
 
@@ -3316,9 +3589,23 @@ export const collectUpfrontPayment = (orderId: string, amount: number): AppState
 
     const updatedOrder: UpfrontOrder = {
         ...order,
+        updatedAt: new Date().toISOString(),
         advancePaid: newAdvance,
         remainingAmount: Math.max(0, newRemaining),
-        status: newStatus
+        status: newStatus,
+        paymentHistory: [
+          ...(Array.isArray(order.paymentHistory) ? order.paymentHistory : []),
+          {
+            id: `upfront-pay-${order.id}-${Date.now()}`,
+            paidAt: new Date().toISOString(),
+            amount,
+            method: 'Advance',
+            note: 'Additional payment',
+            kind: 'additional_payment',
+            remainingAfterPayment: Math.max(0, newRemaining),
+            advancePaidAfterPayment: newAdvance,
+          },
+        ],
     };
 
     const newOrders = data.upfrontOrders.map(o => o.id === orderId ? updatedOrder : o);
@@ -3425,16 +3712,17 @@ const hasLinkedPurchase = (confirmedOrderId: string) => {
 
 export const createFreightInquiry = async (inquiry: FreightInquiry): Promise<FreightInquiry> => {
   const data = loadData();
-  const next = [inquiry, ...(data.freightInquiries || [])];
+  const next = [sanitizeFreightImageFields(inquiry), ...((data.freightInquiries || []).map(item => sanitizeFreightImageFields(item)))];
   await saveData({ ...data, freightInquiries: next }, { throwOnError: true, reason: 'createFreightInquiry', auditOperation: 'CREATE' });
-  return inquiry;
+  return next[0];
 };
 
 export const updateFreightInquiry = async (inquiry: FreightInquiry): Promise<FreightInquiry> => {
   const data = loadData();
-  const next = (data.freightInquiries || []).map(item => item.id === inquiry.id ? inquiry : item);
+  const safeInquiry = sanitizeFreightImageFields(inquiry);
+  const next = (data.freightInquiries || []).map(item => item.id === safeInquiry.id ? safeInquiry : sanitizeFreightImageFields(item));
   await saveData({ ...data, freightInquiries: next }, { throwOnError: true, reason: 'updateFreightInquiry', auditOperation: 'UPDATE' });
-  return inquiry;
+  return safeInquiry;
 };
 
 export const getFreightConfirmedOrders = (): FreightConfirmedOrder[] => {
@@ -3465,7 +3753,7 @@ export const convertInquiryToConfirmedOrder = async (
   payload?: Partial<FreightConfirmedOrder> & { allowDuplicate?: boolean }
 ): Promise<FreightConfirmedOrder> => {
   const data = loadData();
-  const inquiry = (data.freightInquiries || []).find(item => item.id === inquiryId && !item.isDeleted);
+  const inquiry = (data.freightInquiries || []).map(item => sanitizeFreightImageFields(item)).find(item => item.id === inquiryId && !item.isDeleted);
   if (!inquiry) {
     failValidation('FREIGHT_INQUIRY_NOT_FOUND', 'Freight inquiry not found.', { inquiryId });
   }
@@ -3484,7 +3772,7 @@ export const convertInquiryToConfirmedOrder = async (
     sourceProductId: inquiry.sourceProductId || inquiry.inventoryProductId,
     source: inquiry.source,
     inventoryProductId: inquiry.inventoryProductId,
-    productPhoto: inquiry.productPhoto,
+    productPhoto: resolveFreightProductImageUrl(inquiry.productPhoto, (inquiry as any).imageUrl, (inquiry as any).image),
     productName: inquiry.productName,
     variant: inquiry.variant,
     color: inquiry.color,
@@ -3529,9 +3817,9 @@ export const convertInquiryToConfirmedOrder = async (
     lines: (payload?.lines || lines).map(line => normalizeProcurementLine(line, inquiry.source)),
   };
 
-  const nextOrders = [order, ...(data.freightConfirmedOrders || [])];
+  const nextOrders = [sanitizeFreightImageFields(order), ...((data.freightConfirmedOrders || []).map(item => sanitizeFreightImageFields(item)))];
   await saveData({ ...data, freightConfirmedOrders: nextOrders }, { throwOnError: true, reason: 'convertInquiryToConfirmedOrder', auditOperation: 'CREATE' });
-  return order;
+  return nextOrders[0];
 };
 
 export const getFreightPurchases = (): FreightPurchase[] => {
@@ -3664,7 +3952,7 @@ export const receiveFreightPurchaseIntoInventory = async (purchaseId: string): P
     buyPrice,
     sellPrice,
     stock: qty,
-    image: purchase.productPhoto || '',
+    image: resolveFreightProductImageUrl((purchase as any).productPhoto, (purchase as any).imageUrl, (purchase as any).image),
     category: purchase.category || 'Uncategorized',
     variants: variant ? [variant] : [],
     colors: color ? [color] : [],
@@ -3885,12 +4173,18 @@ const stripSupplierPaymentAllocations = (orders: PurchaseOrder[], supplierPaymen
 });
 
 export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerEntry, 'id' | 'createdAt' | 'updatedAt' | 'allocations'>) => {
-  const data = loadData();
+  let data = ensureDocumentSeriesDefaults(loadData());
   const now = new Date().toISOString();
   const paymentId = `spp-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const amount = Math.max(0, Number(payload.amount) || 0);
   const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], payload.partyId, paymentId, amount, payload.method, payload.note, payload.paidAt || now);
-  const payment: SupplierPaymentLedgerEntry = { ...payload, id: paymentId, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations };
+  let voucherNo = payload.voucherNo;
+  if (!voucherNo) {
+    const allocated = allocateSupplierPaymentVoucherNumber(data);
+    data = allocated.state;
+    voucherNo = allocated.voucherNo;
+  }
+  const payment: SupplierPaymentLedgerEntry = { ...payload, id: paymentId, voucherNo, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations };
   await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: [payment, ...(data.supplierPayments || [])] }, { throwOnError: true, reason: 'createSupplierPayment', auditOperation: 'CREATE' });
   return payment;
 };
@@ -4164,8 +4458,8 @@ export const receivePurchaseOrder = async (orderId: string, method: PurchasePric
 };
 
 export const processTransaction = (transaction: Transaction): AppState => {
-  const data = loadData();
-  const effectiveTransaction: Transaction = transaction.type === 'sale'
+  let data = ensureDocumentSeriesDefaults(loadData());
+  let effectiveTransaction: Transaction = transaction.type === 'sale'
     ? { ...transaction, saleSettlement: getSaleSettlementBreakdown(transaction) }
     : transaction.type === 'return'
       ? { ...transaction, returnHandlingMode: getResolvedReturnHandlingMode(transaction) }
@@ -4192,6 +4486,20 @@ export const processTransaction = (transaction: Transaction): AppState => {
   assertPaymentMethodByType(effectiveTransaction.type, effectiveTransaction.paymentMethod);
   assertTransactionFinancials(effectiveTransaction);
   assertTransactionInventoryRules(effectiveTransaction, data.products, data.transactions);
+
+  if (effectiveTransaction.type === 'sale' && !effectiveTransaction.invoiceNo) {
+    const allocated = allocateSalesInvoiceNumber(data);
+    data = allocated.state;
+    effectiveTransaction = { ...effectiveTransaction, invoiceNo: allocated.invoiceNo };
+  } else if (effectiveTransaction.type === 'return' && !effectiveTransaction.creditNoteNo) {
+    const allocated = allocateSalesCreditNoteNumber(data);
+    data = allocated.state;
+    effectiveTransaction = { ...effectiveTransaction, creditNoteNo: allocated.creditNoteNo };
+  } else if (effectiveTransaction.type === 'payment' && !effectiveTransaction.receiptNo) {
+    const allocated = allocateCustomerPaymentReceiptNumber(data);
+    data = allocated.state;
+    effectiveTransaction = { ...effectiveTransaction, receiptNo: allocated.receiptNo };
+  }
 
   const newTransactions = [effectiveTransaction, ...data.transactions];
   let newProducts = [...data.products];
@@ -4568,6 +4876,96 @@ export const addHistoricalTransactions = async (transactions: Transaction[]): Pr
   });
 
   return memoryState.transactions;
+};
+
+type HistoricalImportKind = 'sale' | 'payment' | 'return' | 'historical_reference' | 'unknown';
+
+const normalizeHistoricalPaymentMethod = (value: any): Transaction['paymentMethod'] => {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (!raw) return 'Cash';
+  if (raw === 'cash') return 'Cash';
+  if (raw === 'online' || raw === 'on-line' || raw === 'upi' || raw === 'card' || raw === 'bank') return 'Online';
+  if (raw === 'credit' || raw === 'credit a/c' || raw === 'credit ac' || raw === 'due' || raw === 'udhaar' || raw === 'advance adjust') return 'Credit';
+  if (raw === 'mixed' || raw === 'split') return 'Mixed';
+  return 'Cash';
+};
+
+const normalizeDigits = (value: any) => String(value ?? '').replace(/\D/g, '');
+const normalizeText = (value: any) => String(value ?? '').trim().toLowerCase();
+const toNumber = (value: any) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : NaN;
+};
+
+export const normalizeHistoricalTransactionForImport = (rawRow: Partial<Transaction> & Record<string, any>, customers: Customer[]): Transaction | null => {
+  const items = Array.isArray(rawRow.items) ? rawRow.items : [];
+  const totalFromFields = [rawRow.total, rawRow.amount, rawRow.grandTotal, rawRow.billTotal, rawRow['Bill Total'], rawRow['Total'], rawRow['Amount'], rawRow['Paid Amount'], rawRow.paidAmount].map(toNumber).find(Number.isFinite);
+  const hasSaleSignal = items.length > 0 || (Number.isFinite(totalFromFields) && Number(totalFromFields) > 0 && !rawRow.amount);
+  const rawType = normalizeText(rawRow.type);
+  const detectedType: HistoricalImportKind = ['sale','sell','payment','credit received','return','sales return','historical_reference'].includes(rawType)
+    ? (rawType === 'sell' ? 'sale' : rawType === 'credit received' ? 'payment' : rawType === 'sales return' ? 'return' : rawType) as HistoricalImportKind
+    : (hasSaleSignal ? 'historical_reference' : 'unknown');
+  if (detectedType === 'unknown') return null;
+
+  const rawPhone = normalizeDigits(rawRow.customerPhone);
+  const rawName = String(rawRow.customerName ?? '').trim();
+  const byPhone = rawPhone ? customers.filter(c => normalizeDigits(c.phone) === rawPhone) : [];
+  const byName = rawName ? customers.filter(c => normalizeText(c.name) === normalizeText(rawName)) : [];
+  const matchedCustomer = byPhone.length === 1 ? byPhone[0] : (byName.length === 1 ? byName[0] : undefined);
+  const paymentMethod = normalizeHistoricalPaymentMethod(rawRow.paymentMethod);
+  const txType: Transaction['type'] = detectedType === 'historical_reference' && hasSaleSignal ? 'historical_reference' : (detectedType as Transaction['type']);
+  const resolvedTotal = Number.isFinite(totalFromFields) ? Number(totalFromFields) : 0;
+
+  const tx: Transaction = {
+    ...(rawRow as Transaction),
+    id: String(rawRow.id || '').trim(),
+    date: rawRow.date ? new Date(rawRow.date).toISOString() : new Date().toISOString(),
+    type: txType,
+    total: resolvedTotal,
+    customerId: matchedCustomer?.id,
+    customerName: matchedCustomer?.name || rawName || undefined,
+    customerPhone: matchedCustomer?.phone || rawPhone || undefined,
+    paymentMethod,
+    source: 'historical_import',
+    isHistorical: true,
+    billRef: rawRow.billRef || undefined,
+    invoiceNo: rawRow.invoiceNo || undefined,
+    receiptNo: rawRow.receiptNo || undefined,
+    creditNoteNo: rawRow.creditNoteNo || undefined,
+    legacyRef: rawRow.legacyRef || undefined,
+    sourceRef: rawRow.sourceRef || undefined,
+  };
+
+  if (txType === 'sale' || txType === 'historical_reference') {
+    const absTotal = Math.max(0, Math.abs(resolvedTotal));
+    const explicitCash = [rawRow?.saleSettlement?.cashPaid, rawRow.cashPaid].map(toNumber).find(Number.isFinite);
+    const explicitOnline = [rawRow?.saleSettlement?.onlinePaid, rawRow.onlinePaid].map(toNumber).find(Number.isFinite);
+    const explicitDue = [rawRow?.saleSettlement?.creditDue, rawRow.creditDue, rawRow.creditAmount, rawRow['Credit Amount'], rawRow.balance, rawRow['Balance']].map(toNumber).find(Number.isFinite);
+    const explicitPaid = [rawRow.paidAmount, rawRow['Paid Amount']].map(toNumber).find(Number.isFinite);
+
+    let cashPaid = Number.isFinite(explicitCash) ? Math.max(0, Number(explicitCash)) : 0;
+    let onlinePaid = Number.isFinite(explicitOnline) ? Math.max(0, Number(explicitOnline)) : 0;
+    let creditDue = Number.isFinite(explicitDue) ? Math.max(0, Number(explicitDue)) : 0;
+
+    if (Number.isFinite(explicitPaid) && explicitPaid > 0 && (cashPaid + onlinePaid) === 0) {
+      if (paymentMethod === 'Online') onlinePaid = Math.max(0, Number(explicitPaid));
+      else cashPaid = Math.max(0, Number(explicitPaid));
+    }
+
+    if ((cashPaid + onlinePaid + creditDue) <= 0) {
+      if (paymentMethod === 'Online') onlinePaid = absTotal;
+      else if (paymentMethod === 'Credit') creditDue = absTotal;
+      else cashPaid = absTotal;
+    }
+
+    if (creditDue <= 0) {
+      creditDue = Math.max(0, absTotal - (cashPaid + onlinePaid));
+    }
+
+    tx.saleSettlement = { cashPaid, onlinePaid, creditDue };
+  }
+
+  return tx;
 };
 
 export const deleteTransaction = (
