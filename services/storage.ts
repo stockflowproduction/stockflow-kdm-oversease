@@ -16,6 +16,7 @@ import {
   PurchaseOrderLine,
   PurchaseParty,
   SupplierPaymentLedgerEntry,
+  PartyCreditLedgerEntry,
   DeletedTransactionRecord,
   DeleteCompensationRecord,
   UpdatedTransactionRecord,
@@ -311,6 +312,59 @@ export const clampCreditDueAmount = (value: number) => {
   const rounded = roundCurrency(toFiniteNonNegative(value));
   if (rounded > 0 && rounded < MICRO_CREDIT_DUE_THRESHOLD) return 0;
   return rounded;
+};
+
+export const getCustomerCustomOrderPaymentApplications = (customerId: string, transactions: Transaction[]) => (
+  transactions
+    .filter((tx) => tx.type === 'payment' && tx.customerId === customerId)
+    .reduce((sum, tx) => sum + Math.max(0, toFiniteNumber((tx as any).paymentAppliedToCustomOrderReceivable, 0)), 0)
+);
+
+export const getCustomerCompositeReceivableBreakdown = (
+  customerId: string,
+  customers: Customer[],
+  transactions: Transaction[],
+  upfrontOrders: UpfrontOrder[],
+) => {
+  const snapshot = getCanonicalCustomerBalanceSnapshot(customers, transactions);
+  const canonicalDue = Math.max(0, Number(snapshot.balances.get(customerId)?.totalDue || 0));
+  const storeCredit = Math.max(0, Number(snapshot.balances.get(customerId)?.storeCredit || 0));
+  const customOrderDueFromUpfrontEffects = buildUpfrontOrderLedgerEffects(
+    upfrontOrders.filter((o) => o.customerId === customerId),
+    customers.filter((c) => c.id === customerId),
+  ).reduce((sum, effect) => {
+    if (effect.type === 'legacy_custom_order_info') return sum;
+    return sum + Math.max(0, Number(effect.receivableIncrease || 0)) - Math.max(0, Number(effect.receivableDecrease || 0));
+  }, 0);
+  const externalCustomOrderPaymentApplications = getCustomerCustomOrderPaymentApplications(customerId, transactions);
+  const customOrderDue = Math.max(0, roundCurrency(customOrderDueFromUpfrontEffects - externalCustomOrderPaymentApplications));
+  const totalDue = Math.max(0, roundCurrency(canonicalDue + customOrderDue));
+  return { canonicalDue, customOrderDue, totalDue, storeCredit, externalCustomOrderPaymentApplications };
+};
+
+export const allocateCustomerPaymentAgainstCompositeReceivable = ({
+  paymentAmount,
+  canonicalDue,
+  customOrderDue,
+}: {
+  paymentAmount: number;
+  canonicalDue: number;
+  customOrderDue: number;
+}) => {
+  const safePayment = Math.max(0, toFiniteNumber(paymentAmount, 0));
+  const safeCanonicalDue = Math.max(0, toFiniteNumber(canonicalDue, 0));
+  const safeCustomOrderDue = Math.max(0, toFiniteNumber(customOrderDue, 0));
+  const appliedToCanonicalReceivable = Math.min(safePayment, safeCanonicalDue);
+  const afterCanonical = Math.max(0, safePayment - appliedToCanonicalReceivable);
+  const appliedToCustomOrderReceivable = Math.min(afterCanonical, safeCustomOrderDue);
+  const paymentAppliedToReceivable = roundCurrency(appliedToCanonicalReceivable + appliedToCustomOrderReceivable);
+  const storeCreditCreated = roundCurrency(Math.max(0, safePayment - paymentAppliedToReceivable));
+  return {
+    appliedToCanonicalReceivable: roundCurrency(appliedToCanonicalReceivable),
+    appliedToCustomOrderReceivable: roundCurrency(appliedToCustomOrderReceivable),
+    paymentAppliedToReceivable,
+    storeCreditCreated,
+  };
 };
 const toWholeMoney = (value: number) => roundMoneyWhole(toFiniteNumber(value, 0));
 const getWholePayableAfterStoreCredit = (transaction: Transaction) =>
@@ -673,9 +727,11 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit));
       } else if (tx.type === 'payment') {
         activePaymentsTotal += amount;
-        const paymentToDue = Math.min(runningDue, amount);
-        runningDue = roundCurrency(runningDue - paymentToDue);
-        const paymentRemainder = roundCurrency(Math.max(0, amount - paymentToDue));
+        const explicitApplied = Math.max(0, toFiniteNumber((tx as any).paymentAppliedToReceivable, 0));
+        const explicitStoreCredit = Math.max(0, toFiniteNumber((tx as any).storeCreditCreated, 0));
+        const paymentToDue = explicitApplied > 0 ? Math.min(amount, explicitApplied) : Math.min(runningDue, amount);
+        runningDue = roundCurrency(Math.max(0, runningDue - paymentToDue));
+        const paymentRemainder = roundCurrency(explicitApplied > 0 || explicitStoreCredit > 0 ? Math.max(0, explicitStoreCredit || (amount - paymentToDue)) : Math.max(0, amount - paymentToDue));
         if (paymentRemainder > 0) runningStoreCredit = roundCurrency(runningStoreCredit + paymentRemainder);
       } else if (tx.type === 'return') {
         activeReturnsTotal += amount;
@@ -4164,6 +4220,36 @@ const allocateSupplierPaymentAcrossOrders = (
   return { nextOrders, allocations };
 };
 
+const applyPartyCreditToOrder = (
+  order: PurchaseOrder,
+  amount: number,
+  sourceType: 'purchase' | 'freight' = 'purchase',
+  sourceRef?: string,
+) => {
+  const safeAmount = Math.max(0, Number(amount) || 0);
+  if (safeAmount <= 0) return order;
+  const orderTotal = Math.max(0, Number(order.totalAmount || 0));
+  const paidSoFar = Math.max(0, Number(order.totalPaid || 0));
+  const remaining = Math.max(0, Number((orderTotal - paidSoFar).toFixed(2)));
+  const applied = Math.min(remaining, safeAmount);
+  if (applied <= 0) return order;
+  const paymentEntry = {
+    id: `pop-credit-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    paidAt: new Date().toISOString(),
+    amount: Number(applied.toFixed(2)),
+    method: 'party_credit' as const,
+    note: sourceRef ? `Party credit applied • ${sourceRef}` : 'Party credit applied',
+    sourceType,
+  };
+  return {
+    ...order,
+    totalPaid: Number((paidSoFar + applied).toFixed(2)),
+    paymentHistory: [...(order.paymentHistory || []), paymentEntry],
+    remainingAmount: Math.max(0, Number((orderTotal - (paidSoFar + applied)).toFixed(2))),
+    updatedAt: new Date().toISOString(),
+  };
+};
+
 const stripSupplierPaymentAllocations = (orders: PurchaseOrder[], supplierPaymentId: string) => orders.map((order) => {
   const nextHistory = (order.paymentHistory || []).filter((payment: any) => payment.supplierPaymentId !== supplierPaymentId);
   if (nextHistory.length === (order.paymentHistory || []).length) return order;
@@ -4172,21 +4258,69 @@ const stripSupplierPaymentAllocations = (orders: PurchaseOrder[], supplierPaymen
   return { ...order, paymentHistory: nextHistory, totalPaid, remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))), updatedAt: new Date().toISOString() };
 });
 
-export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerEntry, 'id' | 'createdAt' | 'updatedAt' | 'allocations'>) => {
+export const createSupplierPayment = async (payload: Omit<SupplierPaymentLedgerEntry, 'id' | 'createdAt' | 'updatedAt' | 'allocations'> & { payableApplied?: number; partyCreditCreated?: number }) => {
   let data = ensureDocumentSeriesDefaults(loadData());
   const now = new Date().toISOString();
   const paymentId = `spp-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const amount = Math.max(0, Number(payload.amount) || 0);
-  const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], payload.partyId, paymentId, amount, payload.method, payload.note, payload.paidAt || now);
+  const payableApplied = Math.max(0, Math.min(amount, Number(payload.payableApplied ?? amount) || 0));
+  const partyCreditCreated = Math.max(0, Number(payload.partyCreditCreated ?? Math.max(0, amount - payableApplied)) || 0);
+  const { nextOrders, allocations } = allocateSupplierPaymentAcrossOrders(data.purchaseOrders || [], payload.partyId, paymentId, payableApplied, payload.method, payload.note, payload.paidAt || now);
   let voucherNo = payload.voucherNo;
   if (!voucherNo) {
     const allocated = allocateSupplierPaymentVoucherNumber(data);
     data = allocated.state;
     voucherNo = allocated.voucherNo;
   }
-  const payment: SupplierPaymentLedgerEntry = { ...payload, id: paymentId, voucherNo, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations };
-  await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: [payment, ...(data.supplierPayments || [])] }, { throwOnError: true, reason: 'createSupplierPayment', auditOperation: 'CREATE' });
+  const payment: SupplierPaymentLedgerEntry = { ...payload, id: paymentId, voucherNo, amount: Number(amount.toFixed(2)), paidAt: payload.paidAt || now, createdAt: now, updatedAt: now, allocations, paymentAppliedToPayable: Number(payableApplied.toFixed(2)), partyCreditCreated: Number(partyCreditCreated.toFixed(2)) };
+  const nextPartyCredits = [...(data.partyCreditLedger || [])];
+  if (partyCreditCreated > 0) {
+    const creditEntry: PartyCreditLedgerEntry = {
+      id: `pcl-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      partyId: payload.partyId,
+      partyName: payload.partyName,
+      amountCreated: Number(partyCreditCreated.toFixed(2)),
+      remainingAmount: Number(partyCreditCreated.toFixed(2)),
+      sourcePaymentId: paymentId,
+      sourceVoucherNo: voucherNo,
+      method: payload.method,
+      paidAt: payload.paidAt || now,
+      note: payload.note,
+      type: 'supplier_overpayment',
+      usageHistory: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    nextPartyCredits.unshift(creditEntry);
+  }
+  await saveData({ ...data, purchaseOrders: nextOrders, supplierPayments: [payment, ...(data.supplierPayments || [])], partyCreditLedger: nextPartyCredits }, { throwOnError: true, reason: 'createSupplierPayment', auditOperation: 'CREATE' });
   return payment;
+};
+
+export const applyPartyCreditToPurchaseOrder = async (orderId: string, creditAmount: number, sourceRef?: string) => {
+  const data = loadData();
+  const order = (data.purchaseOrders || []).find((o) => o.id === orderId);
+  if (!order) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase order not found.', { orderId });
+  const availableEntries = (data.partyCreditLedger || []).filter((entry) => entry.partyId === order.partyId && Math.max(0, Number(entry.remainingAmount || 0)) > 0);
+  let remaining = Math.max(0, Number(creditAmount) || 0);
+  if (remaining <= 0) return order;
+  let nextOrder = order;
+  const nextCredits = (data.partyCreditLedger || []).map((entry) => ({ ...entry, usageHistory: [...(entry.usageHistory || [])] }));
+  for (const entry of availableEntries) {
+    if (remaining <= 0) break;
+    const nextEntry = nextCredits.find((e) => e.id === entry.id);
+    if (!nextEntry) continue;
+    const usable = Math.min(remaining, Math.max(0, Number(nextEntry.remainingAmount || 0)));
+    if (usable <= 0) continue;
+    nextEntry.remainingAmount = Number((Math.max(0, Number(nextEntry.remainingAmount || 0)) - usable).toFixed(2));
+    nextEntry.updatedAt = new Date().toISOString();
+    nextEntry.usageHistory = [...(nextEntry.usageHistory || []), { id: `pcu-${Date.now()}-${Math.floor(Math.random() * 100000)}`, amount: Number(usable.toFixed(2)), usedAt: new Date().toISOString(), sourceRef: sourceRef || order.billNumber || order.id.slice(-6), sourceType: 'purchase' }];
+    nextOrder = applyPartyCreditToOrder(nextOrder, usable, 'purchase', sourceRef || order.billNumber || order.id.slice(-6));
+    remaining = Number((remaining - usable).toFixed(2));
+  }
+  const nextOrders = (data.purchaseOrders || []).map((o) => (o.id === orderId ? nextOrder : o));
+  await saveData({ ...data, purchaseOrders: nextOrders, partyCreditLedger: nextCredits }, { throwOnError: true, reason: 'applyPartyCreditToPurchaseOrder', auditOperation: 'UPDATE' });
+  return nextOrder;
 };
 
 export const updateSupplierPayment = async (paymentId: string, updates: Partial<Pick<SupplierPaymentLedgerEntry, 'amount' | 'method' | 'note' | 'paidAt'>>) => {

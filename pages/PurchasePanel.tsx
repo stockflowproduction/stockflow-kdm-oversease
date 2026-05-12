@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
-import { createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
+import { applyPartyCreditToPurchaseOrder, createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
 import { runProcurementShadowCompare } from '../services/procurementApi';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
@@ -189,6 +189,7 @@ export default function PurchasePanel() {
   const [partialPaymentNote, setPartialPaymentNote] = useState('');
   const [receiveTargetOrder, setReceiveTargetOrder] = useState<PurchaseOrder | null>(null);
   const [receivePriceMethod, setReceivePriceMethod] = useState<ReceivePriceMethod>('no_change');
+  const [partyCreditToApply, setPartyCreditToApply] = useState<number | ''>('');
 
   const refresh = () => {
     const data = loadData();
@@ -304,6 +305,10 @@ export default function PurchasePanel() {
   const hasMeaningfulVariantChoices = sourceMode === 'inventory' ? selectableInventoryVariants.length > 0 : true;
   const canGoVariantsNext = sourceMode === 'new' ? true : (!hasMeaningfulVariantChoices || selectedVariantKeys.length > 0);
   const canGoReviewNext = !!partyId && activeLines.length > 0 && activeLines.every(l => toNum(l.quantity) > 0 && toNum(l.unitCost) > 0);
+  const selectedPartyCreditAvailable = useMemo(() => {
+    if (!partyId) return 0;
+    return (loadData().partyCreditLedger || []).filter((entry) => entry.partyId === partyId).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+  }, [partyId, orders.length]);
 
   const stepMeta = [
     { id: 'product', label: 'Product' },
@@ -510,7 +515,11 @@ export default function PurchasePanel() {
     const gstRate = gstPercent === '' ? 0 : Math.max(0, Number(gstPercent) || 0);
     const gstAmount = Number(((taxableAmount * gstRate) / 100).toFixed(2));
     const initialPaid = Math.max(0, Number(initialPaidAmount) || 0);
+    const availablePartyCredit = (loadData().partyCreditLedger || []).filter((entry) => entry.partyId === party.id).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+    const requestedPartyCredit = Math.max(0, Number(partyCreditToApply) || 0);
     if (initialPaid > taxableAmount + gstAmount) return;
+    const maxCreditUsable = Math.max(0, Number((taxableAmount + gstAmount - initialPaid).toFixed(2)));
+    const partyCreditApplied = Math.min(requestedPartyCredit, availablePartyCredit, maxCreditUsable);
     const order: PurchaseOrder = {
       id: editingOrderId || `po-${uid()}`,
       partyId: party.id,
@@ -545,8 +554,10 @@ export default function PurchasePanel() {
 
     if (editingOrderId) await updatePurchaseOrder(order);
     else await createPurchaseOrder(order);
+    if (partyCreditApplied > 0) await applyPartyCreditToPurchaseOrder(order.id, partyCreditApplied, order.billNumber || order.id.slice(-6));
     setIsModalOpen(false);
     resetWizard();
+    setPartyCreditToApply('');
     refresh();
   };
 
@@ -1057,6 +1068,7 @@ export default function PurchasePanel() {
                   <div><Label>Bill Date</Label><Input type="date" value={billDate} onChange={e => setBillDate(e.target.value)} /></div>
                   <div><Label>GST %</Label><Input type="number" value={gstPercent} onChange={e => setGstPercent(e.target.value === '' ? '' : Number(e.target.value))} placeholder="e.g. 18" /></div>
                   <div><Label>Initial Paid Amount</Label><Input type="number" value={initialPaidAmount} onChange={e => setInitialPaidAmount(e.target.value === '' ? '' : Number(e.target.value))} placeholder="e.g. 1000" /></div>
+                  <div><Label>Apply Party Credit</Label><Input type="number" min="0" value={partyCreditToApply} onChange={e => setPartyCreditToApply(e.target.value === '' ? '' : Number(e.target.value))} placeholder="0" /><p className="text-[11px] text-emerald-700 mt-1">Party Credit Available ₹{formatNumber(selectedPartyCreditAvailable)}</p></div>
                   <div className="md:col-span-2"><Label>Notes</Label><Input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes" /></div>
                 </div>
               </div>
