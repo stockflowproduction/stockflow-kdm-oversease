@@ -74,6 +74,9 @@ export interface Transaction {
   total: number;
   storeCreditUsed?: number;
   storeCreditCreated?: number;
+  paymentAppliedToReceivable?: number;
+  paymentAppliedToCanonicalReceivable?: number;
+  paymentAppliedToCustomOrderReceivable?: number;
   cashReceived?: number;
   changeReturned?: number;
   returnHandlingMode?: 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
@@ -521,15 +524,42 @@ export interface PurchaseOrder {
     id: string;
     paidAt: string;
     amount: number;
-    method?: 'cash' | 'online';
+    method?: 'cash' | 'online' | 'party_credit';
     note?: string;
     supplierPaymentId?: string;
+    creditLedgerEntryId?: string;
+    sourceType?: 'purchase' | 'freight';
   }>;
   receivedQuantity?: number;
   createdAt: string;
   updatedAt: string;
   createdBy?: string;
   updatedBy?: string;
+}
+
+export interface PartyCreditUsage {
+  id: string;
+  amount: number;
+  usedAt: string;
+  sourceRef?: string;
+  sourceType?: 'purchase' | 'freight';
+}
+
+export interface PartyCreditLedgerEntry {
+  id: string;
+  partyId?: string;
+  partyName: string;
+  amountCreated: number;
+  remainingAmount: number;
+  sourcePaymentId?: string;
+  sourceVoucherNo?: string;
+  method: 'cash' | 'online' | 'Cash' | 'Online' | string;
+  paidAt: string;
+  note?: string;
+  type: 'supplier_overpayment';
+  usageHistory?: PartyCreditUsage[];
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface SupplierPaymentLedgerEntry {
@@ -545,6 +575,8 @@ export interface SupplierPaymentLedgerEntry {
   updatedAt?: string;
   deletedAt?: string;
   allocations?: Array<{ orderId: string; orderRef?: string; amount: number }>;
+  paymentAppliedToPayable?: number;
+  partyCreditCreated?: number;
 }
 
 export interface ExpenseActivity {
@@ -676,6 +708,7 @@ export interface AppState {
   purchaseParties?: PurchaseParty[];
   purchaseOrders?: PurchaseOrder[];
   supplierPayments?: SupplierPaymentLedgerEntry[];
+  partyCreditLedger?: PartyCreditLedgerEntry[];
   variantsMaster?: string[];
   colorsMaster?: string[];
   migrationMarkers?: MigrationMarkers;

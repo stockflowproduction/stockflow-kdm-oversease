@@ -86,3 +86,13 @@ npm run test
 ```
 
 If your change only touches documentation or planning artifacts, note that in the PR so reviewers can skip runtime validation.
+
+## Documentation-only change checklist
+
+When you only change markdown/planning artifacts in the repository root, use this minimal checklist:
+
+```bash
+git diff --name-only
+```
+
+Confirm the diff includes only documentation files, then mention "docs-only" in your PR summary.
