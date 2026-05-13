@@ -411,9 +411,11 @@ const getSessionCashTotals = (
   sessionStartIso: string,
   sessionEndIso?: string,
   sessionId?: string,
-  upfrontOrdersInput?: UpfrontOrder[]
+  upfrontOrdersInput?: UpfrontOrder[],
+  supplierPaymentsInput?: any[]
 ) => {
   const upfrontOrders = Array.isArray(upfrontOrdersInput) ? upfrontOrdersInput : [];
+  const supplierPayments = Array.isArray(supplierPaymentsInput) ? supplierPaymentsInput : [];
   const start = new Date(sessionStartIso).getTime();
   const end = sessionEndIso ? new Date(sessionEndIso).getTime() : Number.POSITIVE_INFINITY;
 
@@ -443,12 +445,24 @@ const getSessionCashTotals = (
       return eventTime >= start && eventTime <= end;
     })
     .reduce((sum, record) => sum + Math.max(0, Number(record.amount) || 0), 0);
-  const supplierCashPayments = (purchaseOrders || []).reduce((sum, order) => sum + (order.paymentHistory || []).reduce((inner, payment) => {
+  // ACTIVE RECOMPUTE MODEL:
+  // Prefer active supplierPayments ledger for cash-out; fallback to legacy PO paymentHistory rows
+  // only when no supplierPaymentId exists.
+  const supplierCashPaymentsFromLedger = supplierPayments.reduce((sum, payment) => {
+    const paidAt = new Date(payment.paidAt || payment.createdAt).getTime();
+    if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return sum;
+    if (payment.deletedAt) return sum;
+    if ((payment.method || 'cash') !== 'cash') return sum;
+    return sum + Math.max(0, Number(payment.amount) || 0);
+  }, 0);
+  const legacySupplierCashPayments = (purchaseOrders || []).reduce((sum, order) => sum + (order.paymentHistory || []).reduce((inner, payment: any) => {
+    if (payment?.supplierPaymentId) return inner;
     const paidAt = new Date(payment.paidAt).getTime();
     if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return inner;
     if ((payment.method || 'cash') !== 'cash') return inner;
     return inner + Math.max(0, Number(payment.amount) || 0);
   }, 0), 0);
+  const supplierCashPayments = supplierCashPaymentsFromLedger + legacySupplierCashPayments;
   const scopedCashAdjustments = (cashAdjustments || [])
     .filter((entry) => {
       const at = new Date(entry.createdAt).getTime();
@@ -789,7 +803,7 @@ export default function Finance() {
     let over = 0;
 
     closed.forEach(session => {
-      const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, session.id, upfrontOrders);
+      const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, session.id, upfrontOrders, data.supplierPayments || []);
       const systemCashTotal = session.systemCashTotal ?? computedTotals.systemCashTotal;
       const difference = session.difference ?? ((session.closingBalance ?? 0) - (session.openingBalance + systemCashTotal));
       if (difference === 0) matched += 1;
@@ -1885,7 +1899,7 @@ export default function Finance() {
     if (!Number.isFinite(counted) || counted < 0) return setErrors('Please enter a valid closing cash value.');
 
     const closedAt = new Date().toISOString();
-    const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, freshCashAdjustments, fresh.deleteCompensations || [], fresh.purchaseOrders || [], freshOpenSession.startTime, closedAt, freshOpenSession.id, Array.isArray(fresh.upfrontOrders) ? fresh.upfrontOrders : []);
+    const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, freshCashAdjustments, fresh.deleteCompensations || [], fresh.purchaseOrders || [], freshOpenSession.startTime, closedAt, freshOpenSession.id, Array.isArray(fresh.upfrontOrders) ? fresh.upfrontOrders : [], fresh.supplierPayments || []);
     const expectedClosing = freshOpenSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
     financeLog.shift('CLOSE', {
@@ -2220,7 +2234,7 @@ export default function Finance() {
     const corrected = (data.cashSessions || []).map(session => {
       if (session.status !== 'closed' || !session.endTime) return session;
 
-      const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, session.id, upfrontOrders);
+      const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, session.id, upfrontOrders, data.supplierPayments || []);
       const expectedClosing = session.openingBalance + systemCashTotal;
       const difference = (session.closingBalance ?? 0) - expectedClosing;
 
@@ -2679,7 +2693,7 @@ export default function Finance() {
               </div>
             )}
             {editingClosingSession && editingClosingSession.status === 'closed' && (() => {
-              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], editingClosingSession.startTime, editingClosingSession.endTime, undefined, upfrontOrders);
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], editingClosingSession.startTime, editingClosingSession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
               const expectedClosing = editingClosingSession.openingBalance + (editingClosingSession.systemCashTotal ?? computedTotals.systemCashTotal);
               const previewClosing = Number(editingClosingAmount);
               const previewVariance = Number.isFinite(previewClosing) ? previewClosing - expectedClosing : (editingClosingSession.difference ?? 0);
@@ -2734,7 +2748,7 @@ export default function Finance() {
               </CardHeader>
               <CardContent className="space-y-3 pt-5">
                 {filteredCashHistory.map(session => {
-                  const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, undefined, upfrontOrders);
+                  const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, undefined, upfrontOrders, data.supplierPayments || []);
                   const systemCashTotal = session.systemCashTotal ?? computedTotals.systemCashTotal;
                   const sessionExpenseTotal = session.sessionExpenseTotal ?? computedTotals.expenseTotal;
                   const difference = session.difference ?? ((session.closingBalance ?? 0) - (session.openingBalance + systemCashTotal));
@@ -2802,7 +2816,7 @@ export default function Finance() {
             </Card>
 
             {activeHistorySession && (() => {
-              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], activeHistorySession.startTime, activeHistorySession.endTime, undefined, upfrontOrders);
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], activeHistorySession.startTime, activeHistorySession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
               const systemCashTotal = activeHistorySession.systemCashTotal ?? computedTotals.systemCashTotal;
               const sessionExpenseTotal = activeHistorySession.sessionExpenseTotal ?? computedTotals.expenseTotal;
               const difference = activeHistorySession.difference ?? ((activeHistorySession.closingBalance ?? 0) - (activeHistorySession.openingBalance + systemCashTotal));
@@ -2981,7 +2995,7 @@ export default function Finance() {
             {deletingSessionId && (() => {
               const deletingSession = cashSessions.find(session => session.id === deletingSessionId);
               if (!deletingSession || deletingSession.status !== 'closed') return null;
-              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], deletingSession.startTime, deletingSession.endTime, undefined, upfrontOrders);
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], deletingSession.startTime, deletingSession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
               const systemCashTotal = deletingSession.systemCashTotal ?? computedTotals.systemCashTotal;
               const expectedClosing = deletingSession.openingBalance + systemCashTotal;
               const countedClosing = deletingSession.closingBalance ?? 0;
