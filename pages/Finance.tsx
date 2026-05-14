@@ -168,6 +168,16 @@ const getCashbookAuditSignals = (
 
 const FINANCE_DIAGNOSTIC_DEBUG_ENABLED = String((import.meta as any).env?.VITE_FINANCE_DIAGNOSTIC_DEBUG || '').toLowerCase() === 'true';
 const FINANCE_SHIFT_RECON_DEBUG_ENABLED = Boolean((import.meta as any).env?.DEV) && String((import.meta as any).env?.VITE_FINANCE_SHIFT_DEBUG || '').toLowerCase() === 'true';
+const getSupplierPaymentMethodForDrawer = (rawMethod: unknown): 'cash' | 'non_cash' => {
+  const method = String(rawMethod || '').trim().toLowerCase();
+  if (method === 'cash') return 'cash';
+  if (method === 'online' || method === 'bank') return 'non_cash';
+  return 'cash';
+};
+const getSupplierPaymentTimestamp = (payment: any): number => {
+  const at = new Date(payment?.paidAt || payment?.paymentDate || payment?.date || payment?.createdAt).getTime();
+  return Number.isFinite(at) ? at : Number.NaN;
+};
 const financeShiftDiag = (tag: string, payload: Record<string, unknown>) => {
   if (!FINANCE_DIAGNOSTIC_DEBUG_ENABLED) return;
   console.log(tag, payload);
@@ -449,17 +459,48 @@ const getSessionCashTotals = (
   // Prefer active supplierPayments ledger for cash-out; fallback to legacy PO paymentHistory rows
   // only when no supplierPaymentId exists.
   const supplierCashPaymentsFromLedger = supplierPayments.reduce((sum, payment) => {
-    const paidAt = new Date(payment.paidAt || payment.createdAt).getTime();
-    if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return sum;
-    if (payment.deletedAt) return sum;
-    if ((payment.method || 'cash') !== 'cash') return sum;
-    return sum + Math.max(0, Number(payment.amount) || 0);
+    const rawAmount = (payment as any)?.amount ?? (payment as any)?.total ?? (payment as any)?.paidAmount ?? (payment as any)?.paymentAmount ?? 0;
+    const normalizedAmount = Math.max(0, Number(rawAmount) || 0);
+    const selectedDate = (payment as any)?.paidAt || (payment as any)?.paymentDate || (payment as any)?.date || (payment as any)?.createdAt || null;
+    const paidAt = getSupplierPaymentTimestamp(payment);
+    const normalizedMethod = getSupplierPaymentMethodForDrawer((payment as any)?.method);
+    const isDeleted = Boolean((payment as any)?.deletedAt || (payment as any)?.isDeleted === true);
+    const isCash = normalizedMethod === 'cash';
+    const isInSession = Number.isFinite(paidAt) && paidAt >= start && paidAt <= end;
+    let excludedReason = '';
+    if (!Number.isFinite(paidAt)) excludedReason = 'invalid_date';
+    else if (!isInSession) excludedReason = 'outside_session_window';
+    else if (isDeleted) excludedReason = 'deleted';
+    else if (!isCash) excludedReason = 'non_cash_method';
+    else if (normalizedAmount <= 0) excludedReason = 'non_positive_amount';
+    const included = excludedReason === '';
+    if (FINANCE_SHIFT_RECON_DEBUG_ENABLED) {
+      console.log('[FINANCE_SUPPLIER_PAYMENT_TRACE]', {
+        id: (payment as any)?.id,
+        voucherNo: (payment as any)?.voucherNo,
+        partyName: (payment as any)?.partyName || 'Supplier',
+        rawAmount,
+        normalizedAmount,
+        rawMethod: (payment as any)?.method,
+        normalizedMethod,
+        rawDates: { paidAt: (payment as any)?.paidAt, paymentDate: (payment as any)?.paymentDate, date: (payment as any)?.date, createdAt: (payment as any)?.createdAt },
+        selectedDate,
+        sessionStart: sessionStartIso,
+        sessionEnd: sessionEndIso || null,
+        isDeleted,
+        isCash,
+        isInSession,
+        included,
+        excludedReason: included ? null : excludedReason,
+      });
+    }
+    return included ? (sum + normalizedAmount) : sum;
   }, 0);
   const legacySupplierCashPayments = (purchaseOrders || []).reduce((sum, order) => sum + (order.paymentHistory || []).reduce((inner, payment: any) => {
     if (payment?.supplierPaymentId) return inner;
     const paidAt = new Date(payment.paidAt).getTime();
     if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return inner;
-    if ((payment.method || 'cash') !== 'cash') return inner;
+    if (getSupplierPaymentMethodForDrawer(payment.method) !== 'cash') return inner;
     return inner + Math.max(0, Number(payment.amount) || 0);
   }, 0), 0);
   const supplierCashPayments = supplierCashPaymentsFromLedger + legacySupplierCashPayments;
@@ -486,23 +527,32 @@ const getSessionCashTotals = (
 
   const totals = {
     cashSales,
-    cashRefunds: cashRefunds + deleteCompensationOutflow,
+    cashRefunds,
+    deleteCompensationRefunds: deleteCompensationOutflow,
     customerCashCollections: cashCollections,
     customOrderCashCollections: customOrderCashIn,
     cashCollections: cashCollections + customOrderCashIn,
-    expenseTotal: expenseTotal + supplierCashPayments + cashWithdrawn,
-    systemCashTotal: cashSales + cashCollections + customOrderCashIn + cashAdded - cashWithdrawn - cashRefunds - deleteCompensationOutflow - expenseTotal - supplierCashPayments
+    cashAdditions: cashAdded,
+    supplierCashPayments,
+    expenses: expenseTotal,
+    cashWithdrawals: cashWithdrawn,
+    expenseTotal,
+    systemCashTotal: cashSales + cashCollections + customOrderCashIn + cashAdded - cashRefunds - deleteCompensationOutflow - supplierCashPayments - expenseTotal - cashWithdrawn
   };
   if (FINANCE_SHIFT_RECON_DEBUG_ENABLED) {
-    console.log('[FINANCE_SHIFT_RECON]', {
-      sessionId: sessionId || null,
-      salesCash: cashSales,
-      customerCollections: cashCollections,
-      customOrderCashCollections: customOrderCashIn,
-      supplierCashOut: supplierCashPayments,
-      expenses: expenseTotal,
-      refunds: cashRefunds + deleteCompensationOutflow,
+    console.log('[FINANCE_CASH_RECON]', {
+      openingBalance: 0,
+      cashAtSale: totals.cashSales,
+      customerCashCollections: totals.customerCashCollections,
+      customOrderCashCollections: totals.customOrderCashCollections,
+      cashAdditions: totals.cashAdditions,
+      cashRefunds: totals.cashRefunds,
+      deleteCompensationRefunds: totals.deleteCompensationRefunds,
+      supplierCashPayments: totals.supplierCashPayments,
+      expenses: totals.expenses,
+      cashWithdrawals: totals.cashWithdrawals,
       systemCashTotal: totals.systemCashTotal,
+      expectedClosing: totals.systemCashTotal,
     });
   }
   financeLog.cash('RESULT', {
@@ -558,9 +608,10 @@ const buildShiftCashMovementBreakdown = (
   });
   const supplierPayments = ((state as any).supplierPayments || []) as any[];
   supplierPayments.forEach((p) => {
-    const at = new Date(p.paidAt).getTime();
-    if (!Number.isFinite(at) || at < start || at > end || p.deletedAt || p.method !== 'cash') return;
-    pushRow({ id: `sp-${p.id}`, date: p.paidAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.voucherNo || p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
+    const at = getSupplierPaymentTimestamp(p);
+    const normalizedMethod = getSupplierPaymentMethodForDrawer(p.method);
+    if (!Number.isFinite(at) || at < start || at > end || p.deletedAt || normalizedMethod !== 'cash') return;
+    pushRow({ id: `sp-${p.id}`, date: p.paidAt || p.paymentDate || p.date || p.createdAt, type: 'Party Payment', direction: 'out', name: p.partyName || 'Supplier', ref: p.voucherNo || p.id.slice(-6), description: p.note || 'Cash supplier payment', amount: Math.max(0, Number(p.amount) || 0), source: 'supplierPayments' });
   });
   const legacySupplierMap = new Map<string, { date: string; party: string; note: string; amount: number }>();
   (state.purchaseOrders || []).forEach((o) => (o.paymentHistory || []).forEach((ph: any) => {
@@ -981,12 +1032,13 @@ export default function Finance() {
         data.transactions,
         expenses,
         cashAdjustments,
-        [],
+        data.deleteCompensations || [],
         data.purchaseOrders || [],
         openSession.startTime,
         undefined,
         openSession.id,
-        upfrontOrders
+        upfrontOrders,
+        data.supplierPayments || []
       );
     }
 
@@ -1002,7 +1054,8 @@ export default function Finance() {
       startOfTodayIso,
       endOfTodayIso,
       undefined,
-      upfrontOrders
+      upfrontOrders,
+      data.supplierPayments || []
     );
   }, [
     openSession?.id,
@@ -1012,6 +1065,7 @@ export default function Finance() {
     cashAdjustments,
     data.deleteCompensations,
     data.purchaseOrders,
+    data.supplierPayments,
     upfrontOrders,
   ]);
 
@@ -1023,46 +1077,31 @@ export default function Finance() {
     const customerCashCollections = dailyCashTotals.customerCashCollections ?? Math.max(0, dailyCashTotals.cashCollections - (dailyCashTotals.customOrderCashCollections || 0));
     const customOrderCashCollections = dailyCashTotals.customOrderCashCollections || 0;
     const cashCollections = customerCashCollections + customOrderCashCollections;
-    const cashRefunds = dailyCashTotals.cashRefunds;
-    const expenseCashOutflow = dailyCashTotals.expenseTotal;
-    const netCashMovementAfterExpenses = cashAtSale + cashCollections - cashRefunds - expenseCashOutflow;
-    return { cashAtSale, customerCashCollections, customOrderCashCollections, cashCollections, cashRefunds, expenseCashOutflow, netCashMovementAfterExpenses };
+    const cashRefunds = dailyCashTotals.cashRefunds || 0;
+    const deleteCompensationRefunds = dailyCashTotals.deleteCompensationRefunds || 0;
+    const supplierCashPayments = dailyCashTotals.supplierCashPayments || 0;
+    const expenseCashOutflow = dailyCashTotals.expenses ?? dailyCashTotals.expenseTotal ?? 0;
+    const cashWithdrawals = dailyCashTotals.cashWithdrawals || 0;
+    const netCashMovementAfterExpenses = cashAtSale + cashCollections + (dailyCashTotals.cashAdditions || 0) - cashRefunds - deleteCompensationRefunds - supplierCashPayments - expenseCashOutflow - cashWithdrawals;
+    return { cashAtSale, customerCashCollections, customOrderCashCollections, cashCollections, cashRefunds, deleteCompensationRefunds, supplierCashPayments, expenseCashOutflow, cashWithdrawals, netCashMovementAfterExpenses };
   }, [dailyCashTotals]);
   const expectedClosingForOpenSession = openSession ? (openSession.openingBalance + dailyCashTotals.systemCashTotal) : 0;
   const expectedClosingBreakdown = useMemo(() => {
     if (!openSession) return null;
-    const start = new Date(openSession.startTime).getTime();
-    const end = Number.POSITIVE_INFINITY;
-    const scopedCashAdjustments = cashAdjustments.filter((entry) => {
-      const at = new Date(entry.createdAt).getTime();
-      return Number.isFinite(at) && at >= start && at <= end;
-    });
-    const cashAdditions = scopedCashAdjustments.filter(entry => entry.type === 'cash_addition').reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
-    const cashWithdrawals = scopedCashAdjustments.filter(entry => entry.type === 'cash_withdrawal').reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
-    const deleteCompensationRefunds = (data.deleteCompensations || []).filter((d) => {
-      const at = new Date(d.createdAt).getTime();
-      return Number.isFinite(at) && at >= start && at <= end;
-    }).reduce((sum, d) => sum + Math.max(0, Number(d.amount) || 0), 0);
-    const supplierCashPayments = (data.purchaseOrders || []).reduce((sum, order) => sum + (order.paymentHistory || []).reduce((inner, payment) => {
-      const paidAt = new Date(payment.paidAt).getTime();
-      if (!Number.isFinite(paidAt) || paidAt < start || paidAt > end) return inner;
-      if ((payment.method || 'cash') !== 'cash') return inner;
-      return inner + Math.max(0, Number(payment.amount) || 0);
-    }, 0), 0);
-    const customerCashCollections = (data.transactions || []).filter(t => {
-      if (t.type !== 'payment' || t.paymentMethod !== 'Cash') return false;
-      const txTime = resolveTransactionTimeForSession(t);
-      return Number.isFinite(txTime) && txTime >= start && txTime <= end;
-    }).reduce((sum, t) => sum + Math.abs(t.total), 0);
-    const customOrderCashCollections = buildUpfrontOrderLedgerEffects(upfrontOrders)
-      .filter(effect => effect.type === 'custom_order_payment' && Math.max(0, Number(effect.cashIn || 0)) > 0 && effect.isLegacyInfoOnly !== true)
-      .filter(effect => {
-        const at = new Date(effect.date).getTime();
-        return Number.isFinite(at) && at >= start && at <= end;
-      })
-      .reduce((sum, effect) => sum + Math.max(0, Number(effect.cashIn || 0)), 0);
-    return { openingCash: openSession.openingBalance, cashAtSale: dailyCashTotals.cashSales, customerCashCollections, customOrderCashCollections, cashAdditions, cashRefunds: dailyCashTotals.cashRefunds - deleteCompensationRefunds, supplierCashPayments, expenses: dailyCashTotals.expenseTotal - supplierCashPayments - cashWithdrawals, cashWithdrawals, deleteCompensationRefunds, expectedClosing: expectedClosingForOpenSession };
-  }, [openSession, cashAdjustments, data.deleteCompensations, data.purchaseOrders, data.transactions, upfrontOrders, dailyCashTotals, expectedClosingForOpenSession]);
+    return {
+      openingCash: openSession.openingBalance,
+      cashAtSale: dailyCashTotals.cashSales || 0,
+      customerCashCollections: dailyCashTotals.customerCashCollections || 0,
+      customOrderCashCollections: dailyCashTotals.customOrderCashCollections || 0,
+      cashAdditions: dailyCashTotals.cashAdditions || 0,
+      cashRefunds: dailyCashTotals.cashRefunds || 0,
+      deleteCompensationRefunds: dailyCashTotals.deleteCompensationRefunds || 0,
+      supplierCashPayments: dailyCashTotals.supplierCashPayments || 0,
+      expenses: dailyCashTotals.expenses ?? dailyCashTotals.expenseTotal ?? 0,
+      cashWithdrawals: dailyCashTotals.cashWithdrawals || 0,
+      expectedClosing: expectedClosingForOpenSession,
+    };
+  }, [openSession, dailyCashTotals, expectedClosingForOpenSession]);
 
   const closingVariance = openSession ? (closingCountTotal - expectedClosingForOpenSession) : 0;
 
@@ -3351,6 +3390,8 @@ export default function Finance() {
                 <div>Supplier Cash Payments: <b>{formatINR(expectedClosingBreakdown.supplierCashPayments)}</b></div>
                 <div>Expenses: <b>{formatINR(expectedClosingBreakdown.expenses)}</b></div>
                 <div>Cash Withdrawals: <b>{formatINR(expectedClosingBreakdown.cashWithdrawals)}</b></div>
+                <div>Cash In = <b>{formatINR(expectedClosingBreakdown.cashAtSale + expectedClosingBreakdown.customerCashCollections + expectedClosingBreakdown.customOrderCashCollections + expectedClosingBreakdown.cashAdditions)}</b></div>
+                <div>Cash Out = <b>{formatINR(expectedClosingBreakdown.cashRefunds + expectedClosingBreakdown.deleteCompensationRefunds + expectedClosingBreakdown.supplierCashPayments + expectedClosingBreakdown.expenses + expectedClosingBreakdown.cashWithdrawals)}</b></div>
                 <div className="pt-2 border-t">Expected Closing = Opening + Cash In - Cash Out = <b>{formatINR(expectedClosingBreakdown.expectedClosing)}</b></div>
                 <div className="pt-2 flex justify-end"><Button variant="outline" onClick={() => setIsExpectedClosingBreakdownOpen(false)}>Close</Button></div>
               </CardContent>

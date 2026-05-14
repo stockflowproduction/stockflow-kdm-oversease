@@ -1,4 +1,4 @@
-Inventory App
+## Inventory App
 
 ## Migration rollout quick guide (safe order)
 

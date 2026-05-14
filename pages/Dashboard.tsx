@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
-import { Customer, PartyCreditLedgerEntry, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
+import { CashAdjustment, Customer, DeleteCompensationRecord, Expense, PartyCreditLedgerEntry, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
 import { allocateCustomerPaymentAgainstCompositeReceivable, buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
@@ -49,10 +49,10 @@ const toDateTimeLocalValue = (date: Date) => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
-function ActionModal({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: React.ReactNode }) {
+function ActionModal({ open, title, onClose, children, zIndexClass = 'z-[90]' }: { open: boolean; title: string; onClose: () => void; children: React.ReactNode; zIndexClass?: string }) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[90] bg-black/40 flex items-center justify-center p-4">
+    <div className={`fixed inset-0 ${zIndexClass} bg-black/40 flex items-center justify-center p-4`}>
       <div className="w-full max-w-md rounded-xl border bg-white shadow-xl">
         <div className="flex items-center justify-between border-b px-4 py-3">
           <h3 className="font-semibold">{title}</h3>
@@ -90,6 +90,10 @@ export default function Dashboard() {
   const [supplierPayments, setSupplierPayments] = useState<SupplierPaymentLedgerEntry[]>([]);
   const [partyCreditLedger, setPartyCreditLedger] = useState<PartyCreditLedgerEntry[]>([]);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [cashAdjustments, setCashAdjustments] = useState<CashAdjustment[]>([]);
+  const [deleteCompensations, setDeleteCompensations] = useState<DeleteCompensationRecord[]>([]);
+  const [cashSessions, setCashSessions] = useState<any[]>([]);
 
   const [receivingCustomer, setReceivingCustomer] = useState<CustomerReceivableRow | null>(null);
   const [receiveAmount, setReceiveAmount] = useState('');
@@ -106,6 +110,12 @@ export default function Dashboard() {
   const [payError, setPayError] = useState<string | null>(null);
   const [statementCustomerId, setStatementCustomerId] = useState<string | null>(null);
   const [statementPartyId, setStatementPartyId] = useState<string | null>(null);
+  const [editingSupplierPayment, setEditingSupplierPayment] = useState<SupplierPaymentLedgerEntry | null>(null);
+  const [editSupplierAmount, setEditSupplierAmount] = useState('');
+  const [editSupplierMethod, setEditSupplierMethod] = useState<'cash' | 'online' | 'bank'>('cash');
+  const [editSupplierNote, setEditSupplierNote] = useState('');
+  const [editSupplierDateTime, setEditSupplierDateTime] = useState(() => toDateTimeLocalValue(new Date()));
+  const [editSupplierError, setEditSupplierError] = useState<string | null>(null);
   const [isGeneratingCustomerPdf, setIsGeneratingCustomerPdf] = useState(false);
   const [isGeneratingPartyPdf, setIsGeneratingPartyPdf] = useState(false);
   const [statementPdfError, setStatementPdfError] = useState<string | null>(null);
@@ -121,6 +131,10 @@ export default function Dashboard() {
     setSupplierPayments(data.supplierPayments || []);
     setPartyCreditLedger(data.partyCreditLedger || []);
     setUpfrontOrders(data.upfrontOrders || []);
+    setExpenses(data.expenses || []);
+    setCashAdjustments(data.cashAdjustments || []);
+    setDeleteCompensations(data.deleteCompensations || []);
+    setCashSessions(data.cashSessions || []);
   };
 
   useEffect(() => {
@@ -215,6 +229,28 @@ export default function Dashboard() {
   const payAmountValid = Number.isFinite(payAmountValue) && payAmountValue > 0;
   const payCurrentPayable = Math.max(0, Number(payingParty?.payable || 0));
   const payExtraToPartyCredit = payAmountValid ? Math.max(0, payAmountValue - payCurrentPayable) : 0;
+  const openCashSession = useMemo(() => (cashSessions || []).find((session: any) => session?.status === 'open' && !session?.deletedAt), [cashSessions]);
+  const availableDrawerCash = useMemo(() => {
+    if (!openCashSession?.startTime) return null;
+    const start = new Date(openCashSession.startTime).getTime();
+    if (!Number.isFinite(start)) return null;
+    const inWindow = (iso: string) => {
+      const at = new Date(iso).getTime();
+      return Number.isFinite(at) && at >= start;
+    };
+    const cashSales = transactions.filter((tx) => inWindow(tx.date) && tx.type === 'sale').reduce((sum, tx) => sum + Math.max(0, Number(getSaleSettlementBreakdown(tx).cashPaid || 0)), 0);
+    const cashCollections = transactions.filter((tx) => inWindow(tx.date) && tx.type === 'payment' && tx.paymentMethod === 'Cash').reduce((sum, tx) => sum + Math.max(0, Math.abs(Number(tx.total || 0))), 0);
+    const cashRefunds = transactions.filter((tx) => inWindow(tx.date) && tx.type === 'return' && tx.paymentMethod === 'Cash').reduce((sum, tx) => sum + Math.max(0, Math.abs(Number(tx.total || 0))), 0);
+    const expenseCash = expenses.filter((e) => inWindow(e.createdAt)).reduce((sum, e) => sum + Math.max(0, Number(e.amount || 0)), 0);
+    const deleteCompCash = deleteCompensations.filter((d) => inWindow(d.createdAt)).reduce((sum, d) => sum + Math.max(0, Number(d.amount || 0)), 0);
+    const supplierCash = supplierPayments.filter((p) => !p.deletedAt && (p.method || 'cash') === 'cash' && inWindow(p.paidAt || p.createdAt)).reduce((sum, p) => sum + Math.max(0, Number(p.amount || 0)), 0);
+    const cashAdded = cashAdjustments.filter((a) => inWindow(a.createdAt) && a.type === 'cash_addition').reduce((sum, a) => sum + Math.max(0, Number(a.amount || 0)), 0);
+    const cashWithdrawn = cashAdjustments.filter((a) => inWindow(a.createdAt) && a.type === 'cash_withdrawal').reduce((sum, a) => sum + Math.max(0, Number(a.amount || 0)), 0);
+    const customOrderCash = buildUpfrontOrderLedgerEffects(upfrontOrders).filter((effect) => effect.type === 'custom_order_payment' && effect.isLegacyInfoOnly !== true && inWindow(effect.date)).reduce((sum, effect) => sum + Math.max(0, Number(effect.cashIn || 0)), 0);
+    return Number(openCashSession.openingBalance || 0) + cashSales + cashCollections + customOrderCash + cashAdded - cashWithdrawn - cashRefunds - deleteCompCash - expenseCash - supplierCash;
+  }, [openCashSession, transactions, expenses, deleteCompensations, supplierPayments, cashAdjustments, upfrontOrders]);
+  const cashOverdrawAmount = payMethod === 'cash' && payAmountValid && availableDrawerCash !== null ? Math.max(0, payAmountValue - Math.max(0, availableDrawerCash)) : 0;
+  const isCashOverdraw = payMethod === 'cash' && cashOverdrawAmount > 0;
 
   
 const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
@@ -253,6 +289,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   }, [parties, orders]);
   const allPartyDashboardRows = useMemo<PartyPayableRow[]>(() => {
     const partyMap = new Map<string, PartyPayableRow>();
+    const activeSupplierEntries = (supplierPayments || []).filter((sp) => !sp.deletedAt);
+    const activeSupplierPaymentIds = new Set(activeSupplierEntries.map((sp) => sp.id));
+    const activeSupplierVouchers = new Set(activeSupplierEntries.filter((sp) => !!sp.voucherNo).map((sp) => String(sp.voucherNo)));
     parties.forEach((p) => partyMap.set(p.id, { ...p, payable: 0, dueOrders: [], partyCredit: 0 }));
     orders.forEach((o) => {
       if (!partyMap.has(o.partyId)) {
@@ -268,7 +307,112 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     partyMap.forEach((party, id) => {
       const partyDueOrders = dueOrders.filter((o) => o.partyId === id);
       const payable = partyDueOrders.reduce((sum, o) => sum + Math.max(0, Number(o.remainingAmount || 0)), 0);
-      const partyCredit = (partyCreditLedger || []).filter((entry) => entry.partyId === id).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      const partyOrders = orders.filter((o) => o.partyId === id);
+      const partyTotalPurchase = partyOrders.reduce((sum, order) => sum + Math.max(0, Number(order.totalAmount || 0)), 0);
+      const partySupplierPayments = activeSupplierEntries.filter((payment) => (
+        payment.partyId
+          ? payment.partyId === id
+          : String(payment.partyName || '').trim().toLowerCase() === String(party.name || '').trim().toLowerCase()
+      ));
+      const partyTotalPaid = partySupplierPayments.reduce((sum, payment) => sum + Math.max(0, Number(payment.amount || 0)), 0);
+      const partyLevelCreditCap = Math.max(0, Number((partyTotalPaid - partyTotalPurchase).toFixed(2)));
+      const ledgerCredit = (partyCreditLedger || []).filter((entry) => {
+        if (entry.partyId !== id) return false;
+        if (entry.type !== 'supplier_overpayment') return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+        const linkedActivePayment = (entry.sourcePaymentId && activeSupplierPaymentIds.has(entry.sourcePaymentId))
+          || (entry.sourceVoucherNo && activeSupplierVouchers.has(String(entry.sourceVoucherNo)));
+        if (linkedActivePayment) return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+        const usedAmount = (entry.usageHistory || []).reduce((acc, usage) => acc + Math.max(0, Number(usage.amount) || 0), 0);
+        return usedAmount > 0;
+      }).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      const rawDerivedFallback = partySupplierPayments.reduce((sum, payment) => {
+        const fullAmount = Math.max(0, Number(payment.amount || 0));
+        const explicitCredit = Math.max(0, Number(payment.partyCreditCreated || 0));
+        const appliedToPayable = Math.max(0, Number(payment.paymentAppliedToPayable || 0));
+        const allocationTotal = Array.isArray(payment.allocations)
+          ? payment.allocations.reduce((acc, allocation) => acc + Math.max(0, Number(allocation.amount || 0)), 0)
+          : 0;
+        const derivedCreditFromApplied = (fullAmount > appliedToPayable) ? Number((fullAmount - appliedToPayable).toFixed(2)) : 0;
+        const derivedCreditFromAllocations = (fullAmount > allocationTotal) ? Number((fullAmount - allocationTotal).toFixed(2)) : 0;
+        const derivedCredit = explicitCredit > 0
+          ? explicitCredit
+          : (appliedToPayable > 0 && fullAmount > appliedToPayable)
+            ? derivedCreditFromApplied
+            : (fullAmount > allocationTotal)
+              ? derivedCreditFromAllocations
+              : 0;
+        if (derivedCredit <= 0) return sum;
+        const linkedLedgerExists = (partyCreditLedger || []).some((entry) => (
+          entry.partyId === id
+          && (
+            (entry.sourcePaymentId && entry.sourcePaymentId === payment.id)
+            || (entry.sourceVoucherNo && payment.voucherNo && String(entry.sourceVoucherNo) === String(payment.voucherNo))
+          )
+          && Math.max(0, Number(entry.remainingAmount || 0)) > 0
+        ));
+        const linkedLedgerCredit = linkedLedgerExists
+          ? (partyCreditLedger || []).filter((entry) => (
+            entry.partyId === id
+            && (
+              (entry.sourcePaymentId && entry.sourcePaymentId === payment.id)
+              || (entry.sourceVoucherNo && payment.voucherNo && String(entry.sourceVoucherNo) === String(payment.voucherNo))
+            )
+            && Math.max(0, Number(entry.remainingAmount || 0)) > 0
+          )).reduce((acc, entry) => acc + Math.max(0, Number(entry.remainingAmount || 0)), 0)
+          : 0;
+        const fallbackCreditUsed = !linkedLedgerExists && derivedCredit > 0 ? derivedCredit : 0;
+        const shouldTrace = (String(payment.partyName || '').trim().toLowerCase() === 'k') || fullAmount > 0;
+        if ((import.meta as any).env?.DEV && shouldTrace) {
+          console.info('[PARTY_CREDIT_RECON]', {
+            id: payment.id,
+            voucherNo: payment.voucherNo || null,
+            partyId: payment.partyId || id,
+            partyName: payment.partyName || party.name,
+            amount: fullAmount,
+            paymentAppliedToPayable: appliedToPayable,
+            partyCreditCreated: explicitCredit,
+            allocations: payment.allocations || [],
+            allocationTotal,
+            derivedCreditFromApplied,
+            derivedCreditFromAllocations,
+            linkedLedgerCreditFound: linkedLedgerExists,
+            ledgerCredit: linkedLedgerCredit,
+            fallbackCreditUsed,
+          });
+        }
+        if (linkedLedgerExists) return sum;
+        if ((import.meta as any).env?.DEV) {
+          console.warn('[PARTY_CREDIT_RECON]', {
+            id: payment.id,
+            voucherNo: payment.voucherNo || null,
+            partyId: payment.partyId || id,
+            partyName: payment.partyName || party.name,
+            reason: 'derived fallback from active supplier payment because ledger credit is missing',
+            fallbackCreditUsed,
+          });
+        }
+        return sum + derivedCredit;
+      }, 0);
+      const availableFallbackCap = Math.max(0, Number((partyLevelCreditCap - ledgerCredit).toFixed(2)));
+      const fallbackCredit = Math.min(rawDerivedFallback, availableFallbackCap);
+      const partyCredit = ledgerCredit + fallbackCredit;
+      if ((import.meta as any).env?.DEV) {
+        const reconPayload: Record<string, unknown> = {
+          partyId: id,
+          partyName: party.name,
+          partyTotalPurchase,
+          partyTotalPaid,
+          partyLevelCreditCap,
+          ledgerCredit,
+          rawDerivedFallback,
+          cappedFallbackCredit: fallbackCredit,
+          finalPartyCredit: partyCredit,
+        };
+        if (rawDerivedFallback > fallbackCredit) {
+          reconPayload.reason = 'fallback capped by party-level overpayment to avoid stale allocation inflation';
+        }
+        console.info('[PARTY_CREDIT_RECON]', reconPayload);
+      }
       partyMap.set(id, { ...party, payable, dueOrders: partyDueOrders, partyCredit });
     });
     return Array.from(partyMap.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -473,6 +617,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     if (!payingParty) return;
     const amount = Number(payAmount);
     if (!Number.isFinite(amount) || amount <= 0) return setPayError('Enter valid amount greater than zero.');
+    if (payMethod === 'cash' && availableDrawerCash !== null && amount > Math.max(0, availableDrawerCash)) {
+      return setPayError(`Cash payment exceeds available drawer cash by ${formatINRPrecise(amount - Math.max(0, availableDrawerCash))}.`);
+    }
     const paymentDate = payDateTime ? new Date(payDateTime) : new Date();
     if (Number.isNaN(paymentDate.getTime())) return setPayError('Please select a valid payment date.');
 
@@ -584,15 +731,27 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     const supplierPaymentId = row.id.replace('sp-', '');
     const payment = supplierPayments.find(item => item.id === supplierPaymentId && !item.deletedAt);
     if (!payment) return;
-    const amountInput = window.prompt('Edit payment amount', String(payment.amount));
-    if (amountInput == null) return;
-    const amount = Number(amountInput);
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    const methodInput = window.prompt('Method (cash/online)', payment.method) || payment.method;
-    const method = methodInput.toLowerCase() === 'online' ? 'online' : 'cash';
-    const note = window.prompt('Note', payment.note || '') ?? payment.note;
-    await updateSupplierPayment(payment.id, { amount, method, note });
-    refresh();
+    setEditSupplierError(null);
+    setEditingSupplierPayment(payment);
+    setEditSupplierAmount(String(payment.amount || 0));
+    setEditSupplierMethod(((String(payment.method || 'cash').toLowerCase() === 'online' || String(payment.method || 'cash').toLowerCase() === 'bank') ? String(payment.method || 'cash').toLowerCase() : 'cash') as 'cash' | 'online' | 'bank');
+    setEditSupplierNote(payment.note || '');
+    setEditSupplierDateTime(toDateTimeLocalValue(new Date(payment.paidAt || payment.createdAt || new Date().toISOString())));
+  };
+  const handleSaveEditedSupplierPayment = async () => {
+    if (!editingSupplierPayment) return;
+    setEditSupplierError(null);
+    const amount = Number(editSupplierAmount);
+    if (!Number.isFinite(amount) || amount <= 0) return setEditSupplierError('Enter valid amount greater than zero.');
+    const paymentDate = editSupplierDateTime ? new Date(editSupplierDateTime) : new Date();
+    if (Number.isNaN(paymentDate.getTime())) return setEditSupplierError('Please select a valid payment date.');
+    try {
+      await updateSupplierPayment(editingSupplierPayment.id, { amount, method: editSupplierMethod === 'bank' ? 'online' : editSupplierMethod, note: editSupplierNote.trim(), paidAt: paymentDate.toISOString() });
+      setEditingSupplierPayment(null);
+      refresh();
+    } catch (error) {
+      setEditSupplierError(error instanceof Error ? error.message : 'Unable to update supplier payment.');
+    }
   };
 
   const handleDeleteSupplierPayment = async (row: LedgerRow) => {
@@ -784,12 +943,24 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
                 <option value="online">Online</option>
               </Select>
             </div>
+            {payMethod === 'cash' && (
+              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                {availableDrawerCash === null
+                  ? 'No active cash shift found. Cash availability guard is not active.'
+                  : `Available drawer cash: ${formatINRPrecise(Math.max(0, availableDrawerCash))}`}
+              </div>
+            )}
+            {isCashOverdraw && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                Cash payment exceeds available drawer cash by {formatINRPrecise(cashOverdrawAmount)}. Add cash to drawer or edit opening balance before paying.
+              </div>
+            )}
             <div>
               <Label>Note</Label>
               <Input value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="Optional reference" />
             </div>
             {payError && <p className="text-xs text-red-600">{payError}</p>}
-            <Button className="w-full" onClick={() => void handlePay()}>{payExtraToPartyCredit > 0 ? 'Pay & Save Extra as Party Credit' : 'Pay'}</Button>
+            <Button className="w-full" disabled={!payAmountValid || isCashOverdraw} onClick={() => void handlePay()}>{payExtraToPartyCredit > 0 ? 'Pay & Save Extra as Party Credit' : 'Pay'}</Button>
           </div>
         )}
       </ActionModal>
@@ -825,6 +996,22 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           </div>
         )}
       </StatementModal>
+      <ActionModal open={!!editingSupplierPayment} title="Edit Supplier Payment" onClose={() => setEditingSupplierPayment(null)} zIndexClass="z-[120]">
+        {editingSupplierPayment && (
+          <div className="space-y-3">
+            <div className="text-sm"><span className="font-medium">Party:</span> {editingSupplierPayment.partyName}</div>
+            <div className="text-sm"><span className="font-medium">Existing Amount:</span> {formatINRPrecise(editingSupplierPayment.amount || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Existing Payable Applied:</span> {formatINRPrecise(editingSupplierPayment.paymentAppliedToPayable || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Existing Party Credit:</span> {formatINRPrecise(editingSupplierPayment.partyCreditCreated || 0)}</div>
+            <div><Label>Amount</Label><Input type="number" min="0" step="0.01" value={editSupplierAmount} onChange={(e) => setEditSupplierAmount(e.target.value)} /></div>
+            <div><Label>Payment Date</Label><Input type="datetime-local" value={editSupplierDateTime} onChange={(e) => setEditSupplierDateTime(e.target.value)} /></div>
+            <div><Label>Method</Label><Select value={editSupplierMethod} onChange={(e) => setEditSupplierMethod(e.target.value as 'cash' | 'online' | 'bank')}><option value="cash">Cash</option><option value="online">Online</option><option value="bank">Bank</option></Select></div>
+            <div><Label>Note</Label><Input value={editSupplierNote} onChange={(e) => setEditSupplierNote(e.target.value)} /></div>
+            {editSupplierError && <p className="text-xs text-red-600">{editSupplierError}</p>}
+            <Button className="w-full" disabled={!Number.isFinite(Number(editSupplierAmount)) || Number(editSupplierAmount) <= 0} onClick={() => void handleSaveEditedSupplierPayment()}>Save Changes</Button>
+          </div>
+        )}
+      </ActionModal>
 
       <StatementModal open={!!selectedParty && !!partyStatement} title="Party Statement" subtitle={selectedParty ? `${selectedParty.name} • ${selectedParty.phone || '-'}` : undefined} onClose={() => setStatementPartyId(null)}>
         {selectedParty && partyStatement && (

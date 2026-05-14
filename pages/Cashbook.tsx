@@ -75,6 +75,10 @@ const getCashbookPaymentMethod = (tx: any): PayType => {
   if (m.includes('credit') || m.includes('due') || m.includes('store')) return 'credit';
   return 'na';
 };
+const getSupplierPaymentMethod = (method: unknown): 'cash' | 'online' => {
+  const normalized = String(method || '').toLowerCase();
+  return normalized === 'online' || normalized === 'bank' ? 'online' : 'cash';
+};
 const getCashbookMoney = (tx: any, candidates: string[]) => candidates.map((k) => toNum(tx?.[k])).find((v) => v > 0) || 0;
 
 const getCashbookSaleBreakdown = (tx: Transaction, txAny: any) => {
@@ -227,15 +231,21 @@ export default function Cashbook() {
       .filter((sp) => !sp.deletedAt)
       .map((sp) => {
         const amount = Math.max(0, Number(sp.amount || 0));
-        const isOnline = (sp.method || 'cash') === 'online';
+        const paymentMethod = getSupplierPaymentMethod(sp.method);
+        const isOnline = paymentMethod === 'online';
+        const payableApplied = Math.max(0, Number(sp.payableApplied || 0));
+        const partyCreditCreated = Math.max(0, Number(sp.partyCreditCreated || 0));
+        const overpaymentText = partyCreditCreated > 0
+          ? ` • Payable reduced ${fmt(payableApplied)} • Party credit added ${fmt(partyCreditCreated)}`
+          : '';
         return {
           id: `sp-${sp.id}`,
           date: sp.paidAt || sp.createdAt,
           type: 'supplier_payment',
-          description: `Supplier Payment #${sp.voucherNo || String(sp.id || '').slice(-6)} — ${sp.partyName || 'Supplier'}`,
+          description: `Supplier Payment — ${sp.partyName || 'Supplier'} — ${paymentMethod}${overpaymentText}`,
           reference: sp.voucherNo || sp.id,
           party: sp.partyName || 'Supplier',
-          payment: isOnline ? 'online' : 'cash',
+          payment: paymentMethod,
           cashIn: 0, cashOut: isOnline ? 0 : amount, bankIn: 0, bankOut: isOnline ? amount : 0,
           receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: amount, storeCreditIncrease: 0, storeCreditDecrease: 0,
         };
@@ -577,7 +587,7 @@ export default function Cashbook() {
       });
     });
     safeSupplierPayments.filter((sp: any) => !sp.deletedAt).forEach((sp: any) => {
-      const amount = Math.max(0, Number(sp.amount || 0)); const isOnline = (sp.method || 'cash') === 'online';
+      const amount = Math.max(0, Number(sp.amount || 0)); const method = getSupplierPaymentMethod(sp.method); const isOnline = method === 'online';
       const ref = sp.voucherNo || String(sp.id || '').slice(-6);
       rowsOut.push({ id: `reg-sp-${sp.id}`, date: sp.paidAt || sp.createdAt, customerName: sp.partyName || 'Supplier', billRef: ref, invoiceNumber: '', creditAc: 'Cash Withdrawn', paymentType: isOnline ? 'Online' : 'Cash', details: `Supplier Payment #${ref} — ${sp.partyName || 'Supplier'}`, avaiQty: '—', sellingQty: '', sellingPrice: '', billTotal: '', total: fmt(amount), balanceInr: '', creditAmount: '', buyingPrice: '—', totalBuyingPrice: '—', profit: '—', column1: '', column2: '', column3: '', cashIn: 0, cashOut: isOnline ? 0 : amount });
     });

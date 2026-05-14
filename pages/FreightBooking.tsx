@@ -624,14 +624,6 @@ export default function FreightBooking() {
     refresh();
   };
 
-  const createBrokerQuick = async () => {
-    const name = window.prompt('Enter broker name')?.trim();
-    if (!name) return;
-    const broker = await createFreightBroker({ name });
-    setBrokerId(broker.id);
-    refresh();
-  };
-
   const addCategoryQuick = async () => {
     const name = newProductCategory.trim();
     if (!name) return;
