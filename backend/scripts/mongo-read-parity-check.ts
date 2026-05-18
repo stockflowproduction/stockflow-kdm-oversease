@@ -136,11 +136,9 @@ function sumRevenue(items: TransactionDto[]): number {
 
 async function run(): Promise<void> {
   if (process.argv.includes('--help') || process.argv.includes('-h')) {
-    console.log(USAGE);
     return;
   }
 
-  console.log('[PARITY][START]');
   let opts: Options;
   try {
     opts = parseArgs(process.argv.slice(2));
@@ -240,7 +238,6 @@ async function run(): Promise<void> {
     const mongoTransactionsData = await mongoTransactions.findAll(opts.storeId);
     const mongoDeletedData = await mongoDeletedTransactions.findAll(opts.storeId);
 
-    console.log('[PARITY][COUNTS]');
     report.counts = {
       products: { baseline: baselineProducts.length, mongo: mongoProductsData.length },
       customers: { baseline: baselineCustomers.length, mongo: mongoCustomersData.length },
@@ -255,7 +252,6 @@ async function run(): Promise<void> {
       report.warnings.push('Service baseline appears empty while Mongo has data. Try --baselineSnapshot=<path-to-mongo-ready-snapshot.json>.');
     }
 
-    console.log('[PARITY][IDS]');
     const idDiff = (base: Array<{ id: string }>, mongo: Array<{ id: string }>) => {
       const b = new Set(base.map((x) => x.id));
       const m = new Set(mongo.map((x) => x.id));
@@ -278,7 +274,6 @@ async function run(): Promise<void> {
       deletedTransactions: sampleDiff<DeletedTransactionDto>(baselineDeleted, mongoDeletedData, ['id', 'originalTransactionId'], opts.sampleSize),
     };
 
-    console.log('[PARITY][FINANCIAL]');
     const baseTypes = baselineTransactions.reduce((acc: Record<string, number>, x) => ({ ...acc, [x.type]: (acc[x.type] ?? 0) + 1 }), {});
     const mongoTypes = mongoTransactionsData.reduce((acc: Record<string, number>, x) => ({ ...acc, [x.type]: (acc[x.type] ?? 0) + 1 }), {});
     report.financialDiff = {
@@ -341,7 +336,6 @@ async function run(): Promise<void> {
     }
   }
 
-  console.log('[PARITY][RESULT]');
   writeFileSync(outJson, JSON.stringify(report, null, 2), 'utf8');
   const md = `# Mongo Read Parity Report\n\n- Decision: ${report.decision}\n\n## Blockers\n${report.blockers.map((x: string) => `- ${x}`).join('\n') || '- None'}\n\n## Warnings\n${report.warnings.map((x: string) => `- ${x}`).join('\n') || '- None'}\n\n## Counts\n\n\`\`\`json\n${JSON.stringify(report.counts, null, 2)}\n\`\`\`\n\n## ID Diff\n\n\`\`\`json\n${JSON.stringify(report.idDiff, null, 2)}\n\`\`\`\n\n## Financial Diff\n\n\`\`\`json\n${JSON.stringify(report.financialDiff, null, 2)}\n\`\`\`\n`;
   writeFileSync(outMd, md, 'utf8');

@@ -110,12 +110,7 @@ const run = async () => {
   };
 
   if (json) {
-    console.log(JSON.stringify(output, null, 2));
   } else {
-    console.log(`Image migration verification (${output.scope})`);
-    console.log(`- products collection: total=${summary.productsCollection.total} cloudinary=${summary.productsCollection.cloudinary} firebase_storage=${summary.productsCollection.firebase_storage} missing=${summary.productsCollection.missing} other=${summary.productsCollection.other}`);
-    console.log(`- stores[].products: total=${summary.storesArrayProducts.total} cloudinary=${summary.storesArrayProducts.cloudinary} firebase_storage=${summary.storesArrayProducts.firebase_storage} missing=${summary.storesArrayProducts.missing} other=${summary.storesArrayProducts.other}`);
-    console.log(`Pending Firebase Storage images: ${pendingFirebaseStorage}`);
   }
 
   if (pendingFirebaseStorage > 0) {
@@ -124,6 +119,5 @@ const run = async () => {
 };
 
 run().catch((error) => {
-  console.error('[verify-image-migration] failed', error);
   process.exit(1);
 });

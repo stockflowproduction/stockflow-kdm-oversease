@@ -7,7 +7,6 @@ const HELP = `Usage:\n  node --experimental-strip-types migration/phase3f/genera
 const main = () => {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log(HELP);
     return;
   }
 
@@ -118,7 +117,6 @@ const main = () => {
   ensureDir(outDir);
   fs.writeFileSync(path.join(outDir, 'dry-run-report.md'), `${report}\n`, 'utf8');
 
-  console.log('[phase3f/report] dry-run-report.md generated');
 };
 
 main();

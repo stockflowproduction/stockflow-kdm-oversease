@@ -15,7 +15,6 @@ export const generateProductDescription = async (name: string, category: string)
     // Use .text property directly (not a method).
     return response.text || "No description generated.";
   } catch (error) {
-    console.error("Gemini Error:", error);
     return "Failed to generate description. Please try again.";
   }
 };
@@ -33,7 +32,6 @@ export const analyzeSales = async (transactions: any[]): Promise<string> => {
     // Use .text property directly (not a method).
     return response.text || "No insights available.";
   } catch (error) {
-    console.error("Gemini Error:", error);
     return "Failed to analyze data.";
   }
 };

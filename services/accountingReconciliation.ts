@@ -45,17 +45,4 @@ export const logReceivableReconciliationIfNeeded = (result: ReturnType<typeof re
   if (!isDev && !debug) return;
   if (result.ok && !debug) return;
   const tag = result.ok ? '[RECEIVABLE_RECON] ok' : '[RECEIVABLE_RECON] mismatch detected';
-  console.groupCollapsed(`${tag} (${result.sourceLabel})`);
-  console.table({
-    expectedReceivable: result.expectedReceivable,
-    txReceivable: result.txReceivable,
-    customReceivable: result.customReceivable,
-    dashboardReceivable: result.dashboardReceivable,
-    cashbookReceivable: result.cashbookReceivable,
-    customerProjectionReceivable: result.customerProjectionReceivable,
-    deltaDashboard: result.differences.dashboard,
-    deltaCashbook: result.differences.cashbook,
-    deltaCustomerProjection: result.differences.customerProjection,
-  });
-  console.groupEnd();
 };

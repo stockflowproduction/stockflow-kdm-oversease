@@ -108,11 +108,9 @@ const run = async () => {
     batch.ops += 1;
     await flushBatch(batch, dryRun);
 
-    console.log(`[backfill] store=${storeDoc.id} tx=${txSnap.size} stats=${statsMap.size} dryRun=${dryRun}`);
   }
 };
 
 run().catch((error) => {
-  console.error('[backfill] failed', error);
   process.exit(1);
 });

@@ -190,7 +190,7 @@ Key UX confusions (verified):
 ---
 
 ## Section 17 — Logging / Observability Audit
-- **Verified:** debug logs present in finance/cashbook paths (`console.log` gated in places but not uniformly).
+- **Verified:** debug logs present in finance/cashbook paths (`logging` gated in places but not uniformly).
 - **P2 risk:** logging strategy is mixed (audit-style + ad hoc console) and may miss critical business event breadcrumbs.
 - **P2 security risk:** potential PII in verbose logs if enabled in production-like environments.
 

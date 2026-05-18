@@ -180,7 +180,6 @@ const getSupplierPaymentTimestamp = (payment: any): number => {
 };
 const financeShiftDiag = (tag: string, payload: Record<string, unknown>) => {
   if (!FINANCE_DIAGNOSTIC_DEBUG_ENABLED) return;
-  console.log(tag, payload);
 };
 
 const getStorageKeysSafely = (storageKind: 'local' | 'session') => {
@@ -276,7 +275,6 @@ const getReturnFinancialEffectsForFinance = (transaction: Transaction) => {
     return { affectsCash: allocation.cashRefund > 0 };
   } catch (error) {
     if ((import.meta as any).env?.DEV) {
-      console.warn('[FINANCE_DETAIL_GUARD]', { scope: 'return_effects', txId: transaction?.id, error });
     }
     return { affectsCash: false };
   }
@@ -475,24 +473,6 @@ const getSessionCashTotals = (
     else if (normalizedAmount <= 0) excludedReason = 'non_positive_amount';
     const included = excludedReason === '';
     if (FINANCE_SHIFT_RECON_DEBUG_ENABLED) {
-      console.log('[FINANCE_SUPPLIER_PAYMENT_TRACE]', {
-        id: (payment as any)?.id,
-        voucherNo: (payment as any)?.voucherNo,
-        partyName: (payment as any)?.partyName || 'Supplier',
-        rawAmount,
-        normalizedAmount,
-        rawMethod: (payment as any)?.method,
-        normalizedMethod,
-        rawDates: { paidAt: (payment as any)?.paidAt, paymentDate: (payment as any)?.paymentDate, date: (payment as any)?.date, createdAt: (payment as any)?.createdAt },
-        selectedDate,
-        sessionStart: sessionStartIso,
-        sessionEnd: sessionEndIso || null,
-        isDeleted,
-        isCash,
-        isInSession,
-        included,
-        excludedReason: included ? null : excludedReason,
-      });
     }
     return included ? (sum + normalizedAmount) : sum;
   }, 0);
@@ -540,20 +520,6 @@ const getSessionCashTotals = (
     systemCashTotal: cashSales + cashCollections + customOrderCashIn + cashAdded - cashRefunds - deleteCompensationOutflow - supplierCashPayments - expenseTotal - cashWithdrawn
   };
   if (FINANCE_SHIFT_RECON_DEBUG_ENABLED) {
-    console.log('[FINANCE_CASH_RECON]', {
-      openingBalance: 0,
-      cashAtSale: totals.cashSales,
-      customerCashCollections: totals.customerCashCollections,
-      customOrderCashCollections: totals.customOrderCashCollections,
-      cashAdditions: totals.cashAdditions,
-      cashRefunds: totals.cashRefunds,
-      deleteCompensationRefunds: totals.deleteCompensationRefunds,
-      supplierCashPayments: totals.supplierCashPayments,
-      expenses: totals.expenses,
-      cashWithdrawals: totals.cashWithdrawals,
-      systemCashTotal: totals.systemCashTotal,
-      expectedClosing: totals.systemCashTotal,
-    });
   }
   financeLog.cash('RESULT', {
     sessionId: sessionId || null,
@@ -1857,7 +1823,6 @@ export default function Finance() {
       refreshData();
       setErrors(null);
     } catch (error) {
-      console.error('[finance] Persist failed', error);
       setErrors('Unable to save finance data. Please try again.');
     }
   };
@@ -2259,7 +2224,6 @@ export default function Finance() {
       setPaymentMethod('Cash');
       setErrors(null);
     } catch (error) {
-      console.error('[finance] Collect payment failed', error);
       setErrors('Unable to collect payment. Please try again.');
     }
   };
@@ -2908,7 +2872,6 @@ export default function Finance() {
                 movement = buildShiftCashMovementBreakdown(data as AppState, activeHistorySession, computedTotals);
               } catch (error) {
                 if ((import.meta as any).env?.DEV) {
-                  console.warn('[FINANCE_DETAIL_GUARD]', { scope: 'shift_breakdown', sessionId: activeHistorySession.id, error });
                 }
               }
 

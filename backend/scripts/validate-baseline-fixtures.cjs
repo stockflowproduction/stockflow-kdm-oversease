@@ -20,7 +20,6 @@ let hasFailure = false;
 for (const group of groupsToCheck) {
   const paths = extractPaths(group);
   if (paths.length === 0) {
-    console.error(`[FAIL] No fixture entries found for group: ${group}`);
     hasFailure = true;
     continue;
   }
@@ -28,7 +27,6 @@ for (const group of groupsToCheck) {
   for (const relPath of paths) {
     const full = path.resolve(__dirname, '..', relPath.replace(/^backend\//, ''));
     if (!fs.existsSync(full)) {
-      console.error(`[FAIL] Missing fixture file: ${full}`);
       hasFailure = true;
       continue;
     }
@@ -36,12 +34,9 @@ for (const group of groupsToCheck) {
     try {
       const parsed = JSON.parse(fs.readFileSync(full, 'utf8'));
       if (!parsed.name) {
-        console.error(`[FAIL] Fixture missing name: ${full}`);
         hasFailure = true;
       }
     } catch (err) {
-      console.error(`[FAIL] Invalid JSON fixture: ${full}`);
-      console.error(String(err));
       hasFailure = true;
     }
   }
@@ -55,7 +50,6 @@ const requiredSpecs = [
 
 for (const spec of requiredSpecs) {
   if (!fs.existsSync(spec)) {
-    console.error(`[FAIL] Missing baseline spec: ${spec}`);
     hasFailure = true;
   }
 }
@@ -64,4 +58,3 @@ if (hasFailure) {
   process.exit(1);
 }
 
-console.log('[OK] Baseline fixture preflight passed for products + customers + transactions_create.');

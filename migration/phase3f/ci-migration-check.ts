@@ -12,7 +12,6 @@ const HELP = `Usage:
 
 const main = () => {
   const args = parseArgs(process.argv.slice(2));
-  if (args.help) return void console.log(HELP);
 
   const env = String(args.env || '');
   const snapshot = String(args.snapshot || '');
@@ -34,13 +33,10 @@ const main = () => {
   }
 
   if (blockers.length > 0) {
-    console.error('[phase3f/ci-check] NO-GO');
-    for (const b of blockers) console.error(`- ${b}`);
     process.exitCode = 1;
     return;
   }
 
-  console.log('[phase3f/ci-check] GO');
 };
 
 main();

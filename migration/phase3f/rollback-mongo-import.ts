@@ -63,7 +63,6 @@ const writeMd = (filePath: string, report: Record<string, any>) => {
 const main = async () => {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log(HELP);
     return;
   }
 
@@ -112,7 +111,6 @@ const main = async () => {
     ensureDir(outDir);
     writeJson(path.join(outDir, 'rollback-report.json'), report);
     writeMd(path.join(outDir, 'rollback-report.md'), report);
-    console.log('[phase3f/rollback] Blocked by safety checks. Report generated without DB operations.');
     process.exitCode = 1;
     return;
   }
@@ -136,7 +134,6 @@ const main = async () => {
     ensureDir(outDir);
     writeJson(path.join(outDir, 'rollback-report.json'), report);
     writeMd(path.join(outDir, 'rollback-report.md'), report);
-    console.log('[phase3f/rollback] Mongo unavailable; generated report without DB operations.');
     process.exitCode = 1;
     return;
   }
@@ -176,12 +173,10 @@ const main = async () => {
   writeJson(path.join(outDir, 'rollback-report.json'), report);
   writeMd(path.join(outDir, 'rollback-report.md'), report);
 
-  console.log(`[phase3f/rollback] ${dryRun ? 'Dry-run rollback report generated' : 'Rollback execution completed'}`);
 
   if (report.blockers.length > 0) process.exitCode = 1;
 };
 
 main().catch((error) => {
-  console.error('[phase3f/rollback] Failed:', error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });

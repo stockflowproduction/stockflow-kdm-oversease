@@ -26,7 +26,6 @@ if (firebaseConfig.apiKey && firebaseConfig.apiKey !== "your_api_key") {
         db = getFirestore(app);
         auth = getAuth(app);
     } catch (e) {
-        console.error("Firebase initialization failed", e);
     }
 }
 

@@ -28,7 +28,6 @@ const main = async () => {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help) {
-    console.log(HELP);
     return;
   }
 
@@ -101,10 +100,8 @@ const main = async () => {
   writeJson(path.join(outDir, 'raw-firestore-snapshot.json'), snapshot);
   writeJson(path.join(outDir, 'export-manifest.json'), exportManifest);
 
-  console.log(`[phase3f/export] Export complete for ${uid} -> ${outDir}`);
 };
 
 main().catch((error) => {
-  console.error('[phase3f/export] Failed:', error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });

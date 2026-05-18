@@ -140,10 +140,8 @@ async function run(): Promise<void> {
   writeFileSync(outMd, md, 'utf8');
 
   await client.close();
-  console.log(`Readiness report written: ${outJson} and ${outMd}`);
 }
 
 run().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });

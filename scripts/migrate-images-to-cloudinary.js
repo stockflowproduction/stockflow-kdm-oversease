@@ -16,7 +16,6 @@ const requiredEnv = [
 
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
 if (missingEnv.length > 0) {
-  console.error('[migration] Missing required environment variables:', missingEnv.join(', '));
   process.exit(1);
 }
 
@@ -89,30 +88,25 @@ const migrateDocImageField = async ({ docRef, docData, imageField, sourceLabel }
 
   if (!imageUrl || typeof imageUrl !== 'string') {
     stats.skipped += 1;
-    console.log(`[skip] ${sourceLabel}/${docRef.id}: no ${imageField}`);
     return;
   }
 
   if (isCloudinaryUrl(imageUrl)) {
     stats.skipped += 1;
-    console.log(`[skip] ${sourceLabel}/${docRef.id}: already Cloudinary`);
     return;
   }
 
   if (!isFirebaseStorageUrl(imageUrl)) {
     stats.skipped += 1;
-    console.log(`[skip] ${sourceLabel}/${docRef.id}: unsupported image provider`);
     return;
   }
 
   if (isDryRun) {
     stats.migrated += 1;
-    console.log(`[dry-run] would migrate ${sourceLabel}/${docRef.id}`);
     return;
   }
 
   try {
-    console.log(`[start] migrating ${sourceLabel}/${docRef.id}`);
     const imageBuffer = await fetchImageBuffer(imageUrl);
     const publicId = `${sourceLabel.replace(/[^a-zA-Z0-9_-]/g, '_')}_${docRef.id}_${Date.now()}`;
     const uploadResult = await uploadBufferToCloudinary(imageBuffer, publicId);
@@ -124,17 +118,14 @@ const migrateDocImageField = async ({ docRef, docData, imageField, sourceLabel }
     });
 
     stats.migrated += 1;
-    console.log(`[migrated] ${sourceLabel}/${docRef.id} -> ${uploadResult.secure_url}`);
   } catch (error) {
     stats.failed += 1;
     failures.push({ sourceLabel, id: docRef.id, error: error?.message || String(error) });
-    console.error(`[failed] ${sourceLabel}/${docRef.id}:`, error);
   }
 };
 
 const migrateProductsCollection = async () => {
   const snapshot = await db.collection('products').get();
-  console.log(`[scan] products collection docs: ${snapshot.size}`);
 
   for (const docSnap of snapshot.docs) {
     const data = docSnap.data();
@@ -150,7 +141,6 @@ const migrateProductsCollection = async () => {
 
 const migrateStoresArrayProducts = async () => {
   const storesSnapshot = await db.collection('stores').get();
-  console.log(`[scan] stores docs: ${storesSnapshot.size}`);
 
   for (const storeDoc of storesSnapshot.docs) {
     const data = storeDoc.data();
@@ -170,30 +160,25 @@ const migrateStoresArrayProducts = async () => {
 
       if (!imageUrl || typeof imageUrl !== 'string') {
         stats.skipped += 1;
-        console.log(`[skip] ${sourceLabel}: no ${imageField}`);
         continue;
       }
 
       if (isCloudinaryUrl(imageUrl)) {
         stats.skipped += 1;
-        console.log(`[skip] ${sourceLabel}: already Cloudinary`);
         continue;
       }
 
       if (!isFirebaseStorageUrl(imageUrl)) {
         stats.skipped += 1;
-        console.log(`[skip] ${sourceLabel}: unsupported image provider`);
         continue;
       }
 
       if (isDryRun) {
         stats.migrated += 1;
-        console.log(`[dry-run] would migrate ${sourceLabel}`);
         continue;
       }
 
       try {
-        console.log(`[start] migrating ${sourceLabel}`);
         const imageBuffer = await fetchImageBuffer(imageUrl);
         const publicId = `${storeDoc.id}_${product.id || i}_${Date.now()}`;
         const uploadResult = await uploadBufferToCloudinary(imageBuffer, publicId);
@@ -207,43 +192,30 @@ const migrateStoresArrayProducts = async () => {
 
         changed = true;
         stats.migrated += 1;
-        console.log(`[migrated] ${sourceLabel} -> ${uploadResult.secure_url}`);
       } catch (error) {
         stats.failed += 1;
         failures.push({ sourceLabel, id: String(product.id || i), error: error?.message || String(error) });
-        console.error(`[failed] ${sourceLabel}:`, error);
       }
     }
 
     if (changed && !isDryRun) {
       await storeDoc.ref.update({ products: updatedProducts });
-      console.log(`[firestore] updated store ${storeDoc.id} products array`);
     }
   }
 };
 
 const main = async () => {
-  console.log('=== Image Migration: Firebase Storage -> Cloudinary ===');
-  console.log(`[mode] ${isDryRun ? 'DRY RUN' : 'LIVE MIGRATION'}`);
 
   await migrateProductsCollection();
   await migrateStoresArrayProducts();
 
-  console.log('\n=== Migration Summary ===');
-  console.log(`Total scanned: ${stats.scanned}`);
-  console.log(`Total migrated: ${stats.migrated}`);
-  console.log(`Total skipped: ${stats.skipped}`);
-  console.log(`Total failed: ${stats.failed}`);
 
   if (failures.length > 0) {
-    console.log('\n=== Failures ===');
     for (const failure of failures) {
-      console.log(`- ${failure.sourceLabel} (${failure.id}): ${failure.error}`);
     }
   }
 };
 
 main().catch((error) => {
-  console.error('[migration] Fatal error:', error);
   process.exit(1);
 });

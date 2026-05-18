@@ -160,6 +160,7 @@ export default function FreightBooking() {
   const [pickerProductForVariant, setPickerProductForVariant] = useState<Product | null>(null);
   const [visibleInquiryCount, setVisibleInquiryCount] = useState(25);
   const [visibleConfirmedCount, setVisibleConfirmedCount] = useState(25);
+  const [notice, setNotice] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
 
   const refresh = () => {
     const data = loadData();
@@ -177,7 +178,7 @@ export default function FreightBooking() {
       await convertInquiryToConfirmedOrder(inquiry.id);
       refresh();
     } catch (error: any) {
-      alert(error?.message || 'Order could not be confirmed because saved freight data is too large/invalid. Image data was removed; please try again.');
+      setNotice({ type: 'error', message: error?.message || 'Order could not be confirmed because saved freight data is too large/invalid. Image data was removed; please try again.' });
     } finally {
       setConvertingInquiryId(null);
     }
@@ -192,7 +193,7 @@ export default function FreightBooking() {
       await receiveFreightPurchaseIntoInventory(purchase.id);
       refresh();
     } catch (error: any) {
-      alert(error?.message || 'Unable to receive into inventory.');
+      setNotice({ type: 'error', message: error?.message || 'Unable to receive into inventory.' });
     } finally {
       setMaterializingOrderId(null);
     }
@@ -630,7 +631,7 @@ export default function FreightBooking() {
     const exists = categories.some(c => c.toLowerCase() === name.toLowerCase());
     if (exists) {
       setNewCategoryError('Category already exists.');
-      alert('Category already exists.');
+      setNotice({ type: 'error', message: 'Category already exists.' });
       return;
     }
     await addCategory(name);
@@ -663,7 +664,7 @@ export default function FreightBooking() {
       try {
         uploadedImageUrl = await uploadImageFileToCloudinary(newProductImageFile);
       } catch (error) {
-        alert('Image upload failed. Please try again or remove the image.');
+        setNotice({ type: 'error', message: 'Image upload failed. Please try again or remove the image.' });
         throw error;
       }
     }
@@ -790,6 +791,11 @@ export default function FreightBooking() {
 
   return (
     <div className="space-y-4">
+      {notice && (
+        <div className={`rounded-xl border px-3 py-2 text-sm ${notice.type === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+          {notice.message}
+        </div>
+      )}
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Freight Booking</h1>
         <p className="text-sm text-muted-foreground">Create and manage freight inquiries.</p>

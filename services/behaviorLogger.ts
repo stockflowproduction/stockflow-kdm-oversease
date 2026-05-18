@@ -166,7 +166,6 @@ export const logError = (type: ErrorLog['type'], message: string, stack?: string
     time: new Date().toISOString(),
   };
   boundedPush(getLogsStore().errors, entry);
-  console.error(`[ERROR] ${type} | ${message} | tab: ${entry.tab}`);
 };
 
 const flushApiBatch = () => {

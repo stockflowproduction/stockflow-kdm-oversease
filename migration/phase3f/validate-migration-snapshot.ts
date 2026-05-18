@@ -11,7 +11,6 @@ type ValidationIssue = { severity: 'warning' | 'blocker'; code: string; message:
 const main = () => {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log(HELP);
     return;
   }
 
@@ -197,7 +196,6 @@ const main = () => {
   writeJson(path.join(outDir, 'validation-report.json'), report);
   fs.writeFileSync(path.join(outDir, 'validation-report.md'), `${md}\n`, 'utf8');
 
-  console.log(`[phase3f/validate] Validation complete. Decision=${report.goNoGo}`);
 };
 
 main();

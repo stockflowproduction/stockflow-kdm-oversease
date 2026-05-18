@@ -54,7 +54,6 @@ export const login = async (email: string, password: string): Promise<{ success:
 
     return { success: true };
   } catch (error: any) {
-    console.error('Firebase Login Error:', error);
     return { success: false, message: GENERIC_AUTH_ERROR };
   }
 };
@@ -81,7 +80,6 @@ export const register = async (email: string, password: string, name: string): P
 
     return { success: true };
   } catch (error: any) {
-    console.error('Firebase Register Error:', error);
     if (error.code === 'auth/email-already-in-use') {
       return { success: false, message: 'Unable to complete the request. Please use a different email or log in.' };
     }
@@ -96,7 +94,6 @@ export const resetPassword = async (email: string): Promise<{ success: boolean; 
     await sendPasswordResetEmail(auth, email);
     return { success: true, message: GENERIC_RESET_RESPONSE };
   } catch (error: any) {
-    console.error('Firebase Reset Password Error:', error);
     return { success: true, message: GENERIC_RESET_RESPONSE };
   }
 };
@@ -115,7 +112,6 @@ export const resendVerificationEmail = async (email: string, password: string): 
     await signOut(auth);
     return { success: true, message: 'If the email address is valid, a verification link has been sent.' };
   } catch (error: any) {
-    console.error('Firebase Resend Verification Error:', error);
     return { success: true, message: 'If the email address is valid, a verification link has been sent.' };
   }
 };

@@ -74,7 +74,6 @@ const driftPct = (expected: number, actual: number) => {
 
 const main = async () => {
   const args = parseArgs(process.argv.slice(2));
-  if (args.help) return void console.log(HELP);
 
   const snapshotPath = String(args.snapshot || '');
   const mongoUri = String(args.mongoUri || '');
@@ -303,6 +302,5 @@ const main = async () => {
 };
 
 main().catch((error) => {
-  console.error('[phase3f/full-cycle] Failed:', error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });

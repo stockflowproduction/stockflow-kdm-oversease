@@ -712,7 +712,6 @@ export default function Sales() {
               setCustomerSearch(finalCustomer.name);
               setCustomerTab('search');
           } catch (error) {
-              console.error('[sales] add customer failed', error);
               setCheckoutError(error instanceof Error ? error.message : 'Failed to create customer. Please try again.');
               return;
           }
@@ -1252,18 +1251,6 @@ export default function Sales() {
       sourceTransactionDate: selectedReturnTx.date,
       notes: `Return against sale bill ${selectedReturnTx.id}`,
     };
-    console.info('[FIN][RETURN][CHOICE_ENFORCEMENT]', {
-      txId: tx.id,
-      sourceTransactionId: selectedReturnTx.id,
-      operatorChoice: mixedReturnChoice,
-      finalReturnHandlingMode: tx.returnHandlingMode,
-      finalPaymentMethod: tx.paymentMethod,
-      dueReduction: returnPreview.dueReduction,
-      refundableRemainder: Math.max(0, returnPreview.total - returnPreview.dueReduction),
-      cashRefund: returnPreview.cashRefund,
-      onlineRefund: returnPreview.onlineRefund,
-      storeCreditCreated: returnPreview.storeCreditCreated,
-    });
     try {
       const newState = processTransaction(tx);
       setProducts(newState.products);

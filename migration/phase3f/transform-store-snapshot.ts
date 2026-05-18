@@ -35,7 +35,6 @@ const normalizeTxType = (rawType: string | null) => {
 const main = () => {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log(HELP);
     return;
   }
 
@@ -241,7 +240,6 @@ const main = () => {
   writeJson(path.join(outDir, 'mongo-ready-snapshot.json'), mongoReady);
   writeJson(path.join(outDir, 'transform-warnings.json'), warnings);
 
-  console.log(`[phase3f/transform] Wrote mongo-ready snapshot with ${warnings.length} warning(s)`);
 };
 
 main();

@@ -20,6 +20,7 @@ export default function Settings() {
   const [newPinInput, setNewPinInput] = useState('');
   const [confirmPinInput, setConfirmPinInput] = useState('');
   const [pinMessage, setPinMessage] = useState<string | null>(null);
+  const [uploadMessage, setUploadMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
   useEffect(() => {
     const refreshData = () => {
@@ -86,10 +87,12 @@ export default function Settings() {
     if (!file || !file.type.startsWith('image/')) return;
     try {
       setUploadingField('signature');
+      setUploadMessage(null);
       const url = await uploadImageFileToCloudinary(file);
       setProfile(prev => ({ ...prev, signatureImage: url }));
+      setUploadMessage({ type: 'success', text: 'Signature uploaded successfully.' });
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'Signature upload failed.');
+      setUploadMessage({ type: 'error', text: error instanceof Error ? error.message : 'Signature upload failed.' });
     } finally {
       setUploadingField(null);
     }
@@ -101,10 +104,12 @@ export default function Settings() {
     if (!file.type.startsWith('image/')) return;
     try {
       setUploadingField('logo');
+      setUploadMessage(null);
       const url = await uploadImageFileToCloudinary(file);
       setProfile(prev => ({ ...prev, logoImage: url }));
+      setUploadMessage({ type: 'success', text: 'Logo uploaded successfully.' });
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'Logo upload failed.');
+      setUploadMessage({ type: 'error', text: error instanceof Error ? error.message : 'Logo upload failed.' });
     } finally {
       setUploadingField(null);
     }
@@ -115,6 +120,7 @@ export default function Settings() {
     if (!file.type.startsWith('image/')) return;
     try {
       setUploadingField('catalog');
+      setUploadMessage(null);
       const url = await uploadImageFileToCloudinary(file);
       setProfile(prev => ({
         ...prev,
@@ -122,8 +128,9 @@ export default function Settings() {
         customerCatalogFirstPageName: file.name || '',
         customerCatalogFirstPageMimeType: file.type || 'image/png',
       }));
+      setUploadMessage({ type: 'success', text: 'Catalog first page uploaded successfully.' });
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'Catalog first page upload failed.');
+      setUploadMessage({ type: 'error', text: error instanceof Error ? error.message : 'Catalog first page upload failed.' });
     } finally {
       setUploadingField(null);
     }
@@ -146,6 +153,11 @@ export default function Settings() {
       {uploadingField && (
         <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-primary">
           Uploading {uploadingField} image to Cloudinary…
+        </div>
+      )}
+      {uploadMessage && (
+        <div className={`rounded-md border px-3 py-2 text-xs ${uploadMessage.type === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+          {uploadMessage.text}
         </div>
       )}
 

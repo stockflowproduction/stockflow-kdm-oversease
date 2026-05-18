@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -59,7 +59,6 @@ export default function Customers() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isUpfrontOrderModalOpen, setIsUpfrontOrderModalOpen] = useState(false);
   const [isCollectPaymentModalOpen, setIsCollectPaymentModalOpen] = useState(false);
-  const [isAdminPasswordModalOpen, setIsAdminPasswordModalOpen] = useState(false);
   const [editingUpfrontOrder, setEditingUpfrontOrder] = useState<UpfrontOrder | null>(null);
   const [selectedUpfrontOrder, setSelectedUpfrontOrder] = useState<UpfrontOrder | null>(null);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
@@ -108,7 +107,6 @@ export default function Customers() {
   const [allOrdersStatus, setAllOrdersStatus] = useState<'all' | 'pending' | 'paid'>('all');
   const [allOrdersSort, setAllOrdersSort] = useState<'newest' | 'oldest'>('newest');
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
-  const [adminPassword, setAdminPassword] = useState('');
   const [collectAmount, setCollectAmount] = useState('');
 
   // Filter & Sort State
@@ -119,6 +117,12 @@ export default function Customers() {
   const [customerPage, setCustomerPage] = useState(1);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [editingCustomerTx, setEditingCustomerTx] = useState<Transaction | null>(null);
+  const [editTxAmount, setEditTxAmount] = useState('');
+  const [editTxDate, setEditTxDate] = useState('');
+  const [editTxMethod, setEditTxMethod] = useState<'Cash' | 'Online'>('Cash');
+  const [editTxNotes, setEditTxNotes] = useState('');
+  const [editTxError, setEditTxError] = useState<string | null>(null);
 
   const refreshData = () => {
     try {
@@ -137,7 +141,6 @@ export default function Customers() {
           else setViewingCustomer(null);
       }
     } catch (error) {
-      console.error('[customers] load failed', error);
       setLoadError('Unable to load customer data right now. Please try again.');
     } finally {
       setIsInitialLoading(false);
@@ -337,7 +340,6 @@ export default function Customers() {
 
       closeCustomerEditor();
     } catch (error) {
-      console.error('[customers] update customer failed', error);
       setCustomerEditError(error instanceof Error ? error.message : 'Customer update failed. Please try again.');
     }
   };
@@ -432,6 +434,40 @@ export default function Customers() {
       setPaymentNote('');
       setPaymentError(null);
   };
+  const toDateTimeLocalValue = (iso: string) => {
+    const date = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+  const openCustomerTransactionEditor = (tx: Transaction) => {
+    setEditingCustomerTx(tx);
+    setEditTxAmount(String(Math.abs(Number(tx.total || 0))));
+    setEditTxDate(toDateTimeLocalValue(tx.date || new Date().toISOString()));
+    setEditTxMethod(String(tx.paymentMethod || 'Cash').toLowerCase() === 'online' ? 'Online' : 'Cash');
+    setEditTxNotes(tx.notes || '');
+    setEditTxError(null);
+  };
+  const handleSaveEditedCustomerTransaction = async () => {
+    if (!editingCustomerTx) return;
+    const amount = Number(editTxAmount);
+    if (!Number.isFinite(amount) || amount <= 0) return setEditTxError('Amount must be greater than zero.');
+    const nextDate = editTxDate ? new Date(editTxDate) : new Date(editingCustomerTx.date);
+    if (Number.isNaN(nextDate.getTime())) return setEditTxError('Please enter a valid date and time.');
+    try {
+      const updatedRows = await updateTransaction({
+        ...editingCustomerTx,
+        total: Math.abs(amount),
+        date: nextDate.toISOString(),
+        paymentMethod: editTxMethod,
+        notes: editTxNotes.trim(),
+      });
+      setTransactions(updatedRows);
+      setEditingCustomerTx(null);
+      refreshData();
+    } catch (error) {
+      setEditTxError(error instanceof Error ? error.message : 'Unable to update transaction.');
+    }
+  };
 
   const parsedPaymentAmount = Number(paymentAmount);
   const paymentAmountValid = Number.isFinite(parsedPaymentAmount) && parsedPaymentAmount > 0;
@@ -475,7 +511,6 @@ export default function Customers() {
           setIsAddModalOpen(false);
           setNewCustomer({ name: '', phone: '', gstName: '', gstNumber: '' });
       } catch (error) {
-          console.error('[customers] add customer failed', error);
           const message = error instanceof Error ? error.message : 'Failed to create customer. Please try again.';
           setAddCustomerError(message);
       }
@@ -623,28 +658,23 @@ export default function Customers() {
     setOrderPopupTab(next);
   };
 
-  const handleAdminPasswordSubmit = () => {
-      // Password check removed as per new security policy
-      setIsAdminPasswordModalOpen(false);
-      setAdminPassword('');
-      if (selectedUpfrontOrder) {
-          setEditingUpfrontOrder(selectedUpfrontOrder);
-          setUpfrontOrderForm({
-              numberOfPieces: String(selectedUpfrontOrder.piecesPerCarton || selectedUpfrontOrder.quantity || ''),
-              numberOfCartons: String(selectedUpfrontOrder.numberOfCartons || 1),
-              pricePerPiece: String(selectedUpfrontOrder.pricePerPiece || selectedUpfrontOrder.cartonPriceAdmin || ''),
-              pricePerPieceCustomer: String(selectedUpfrontOrder.customerPricePerPiece || selectedUpfrontOrder.cartonPriceCustomer || ''),
-              expenseAmount: String(selectedUpfrontOrder.expenseAmount || 0),
-              paidNowCash: String(selectedUpfrontOrder.paidNowCash || 0),
-              paidNowOnline: String(selectedUpfrontOrder.paidNowOnline || 0),
-              reminderDate: selectedUpfrontOrder.reminderDate || '',
-              notes: selectedUpfrontOrder.notes || '',
-              selectedVariant: selectedUpfrontOrder.selectedVariant || '',
-              selectedColor: selectedUpfrontOrder.selectedColor || '',
-          });
-          setIsUpfrontOrderModalOpen(true);
-          setSelectedUpfrontOrder(null);
-      }
+  const openUpfrontOrderEditor = (order: UpfrontOrder) => {
+    setEditingUpfrontOrder(order);
+    setUpfrontOrderForm({
+      numberOfPieces: String(order.piecesPerCarton || order.quantity || ''),
+      numberOfCartons: String(order.numberOfCartons || 1),
+      pricePerPiece: String(order.pricePerPiece || order.cartonPriceAdmin || ''),
+      pricePerPieceCustomer: String(order.customerPricePerPiece || order.cartonPriceCustomer || ''),
+      expenseAmount: String(order.expenseAmount || 0),
+      paidNowCash: String(order.paidNowCash || 0),
+      paidNowOnline: String(order.paidNowOnline || 0),
+      reminderDate: order.reminderDate || '',
+      notes: order.notes || '',
+      selectedVariant: order.selectedVariant || '',
+      selectedColor: order.selectedColor || '',
+    });
+    setIsUpfrontOrderModalOpen(true);
+    setSelectedUpfrontOrder(null);
   };
 
   const handleDeleteCustomer = () => {
@@ -1043,8 +1073,29 @@ export default function Customers() {
                                             <div className={`text-sm sm:text-base font-black ${tx.type === 'payment' ? 'text-blue-700' : isSplitSale ? 'text-orange-700' : (tx.paymentMethod === 'Credit' ? 'text-orange-700' : 'text-green-700')}`}>
                                                 {tx.type === 'payment' ? '-' : ''}₹{formatMoneyPrecise(Math.abs(tx.total))}
                                             </div>
-                                            {tx.type !== 'payment' && (
-                                                <div className="flex items-center gap-1">
+                                            <div className="flex items-center gap-1">
+                                                {tx.type === 'payment' ? (
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        className="h-7 w-7 text-muted-foreground hover:text-primary"
+                                                        onClick={(e) => { e.stopPropagation(); openCustomerTransactionEditor(tx); }}
+                                                        title="Edit payment transaction"
+                                                    >
+                                                        <Edit className="w-3.5 h-3.5" />
+                                                    </Button>
+                                                ) : (
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        disabled
+                                                        className="h-7 w-7 text-slate-300"
+                                                        title="Sale/return edits are available from Transactions to keep stock and accounting safe."
+                                                    >
+                                                        <Edit className="w-3.5 h-3.5" />
+                                                    </Button>
+                                                )}
+                                                {tx.type !== 'payment' && (
                                                     <Button 
                                                         variant="ghost" 
                                                         size="icon" 
@@ -1054,9 +1105,9 @@ export default function Customers() {
                                                     >
                                                         <FileText className="w-3.5 h-3.5" />
                                                     </Button>
-                                                    <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
-                                                </div>
-                                            )}
+                                                )}
+                                                <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500 transition-colors" />
+                                            </div>
                                         </div>
                                     </div>
                                   );
@@ -1096,7 +1147,7 @@ export default function Customers() {
                                                         variant="ghost" 
                                                         size="icon" 
                                                         className="h-7 w-7 text-muted-foreground hover:text-primary"
-                                                        onClick={(e) => { e.stopPropagation(); setSelectedUpfrontOrder(order); setIsAdminPasswordModalOpen(true); }}
+                                                        onClick={(e) => { e.stopPropagation(); openUpfrontOrderEditor(order); }}
                                                         title="Edit Order"
                                                     >
                                                         <Edit className="w-3.5 h-3.5" />
@@ -1114,6 +1165,26 @@ export default function Customers() {
                   </CardContent>
               </Card>
           </div>
+      )}
+      {editingCustomerTx && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader>
+              <CardTitle>Edit Customer Payment</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div><Label>Amount</Label><Input type="number" min="0" step="0.01" value={editTxAmount} onChange={(e) => setEditTxAmount(e.target.value)} /></div>
+              <div><Label>Date & Time</Label><Input type="datetime-local" value={editTxDate} onChange={(e) => setEditTxDate(e.target.value)} /></div>
+              <div><Label>Method</Label><Select value={editTxMethod} onChange={(e) => setEditTxMethod(e.target.value as 'Cash' | 'Online')}><option value="Cash">Cash</option><option value="Online">Online</option></Select></div>
+              <div><Label>Notes</Label><Input value={editTxNotes} onChange={(e) => setEditTxNotes(e.target.value)} placeholder="Optional note" /></div>
+              {editTxError && <p className="text-xs text-red-600">{editTxError}</p>}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setEditingCustomerTx(null)}>Cancel</Button>
+                <Button onClick={() => void handleSaveEditedCustomerTransaction()}>Save</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {isPaymentModalOpen && viewingCustomer && (
@@ -1478,36 +1549,6 @@ export default function Customers() {
           </div>
       )}
 
-      {/* Admin Password Modal */}
-      {isAdminPasswordModalOpen && (
-          <div className="fixed inset-0 bg-black/80 z-[70] flex items-center justify-center p-4 backdrop-blur-sm">
-              <Card className="w-full max-w-xs shadow-2xl animate-in zoom-in border-t-4 border-t-slate-800 overflow-hidden">
-                  <CardHeader className="text-center pb-4">
-                      <div className="w-12 h-12 bg-slate-100 text-slate-800 rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-slate-200">
-                          <AlertCircle className="w-6 h-6" />
-                      </div>
-                      <CardTitle className="text-lg">Admin Verification</CardTitle>
-                      <p className="text-xs text-muted-foreground">Enter password to edit order details</p>
-                  </CardHeader>
-                  <CardContent className="space-y-4 pt-6">
-                      <div className="space-y-2">
-                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Admin Password</Label>
-                        <Input 
-                            type="password" 
-                            value={adminPassword} 
-                            onChange={e => setAdminPassword(e.target.value)} 
-                            placeholder="••••••••"
-                            autoFocus 
-                        />
-                      </div>
-                      <div className="flex gap-2 pt-4 border-t">
-                          <Button variant="ghost" className="flex-1 font-bold text-xs" onClick={() => { setIsAdminPasswordModalOpen(false); setAdminPassword(''); }}>Cancel</Button>
-                          <Button className="flex-1 bg-slate-900 text-white font-bold text-xs shadow-md" onClick={handleAdminPasswordSubmit}>Verify</Button>
-                      </div>
-                  </CardContent>
-              </Card>
-          </div>
-      )}
       <UploadImportModal
         open={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}

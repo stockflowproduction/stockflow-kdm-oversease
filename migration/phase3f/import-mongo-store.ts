@@ -109,7 +109,6 @@ const writeMarkdownReport = (filePath: string, report: AnyDoc) => {
 const main = async () => {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log(HELP);
     return;
   }
 
@@ -160,7 +159,6 @@ const main = async () => {
     ensureDir(outDir);
     writeJson(path.join(outDir, 'import-report.json'), report);
     writeMarkdownReport(path.join(outDir, 'import-report.md'), report);
-    console.log(`[phase3f/import] ${write ? 'Blocked write plan generated' : 'Dry-run plan generated'}`);
     if (blockers.length > 0) process.exitCode = 1;
     return;
   }
@@ -220,10 +218,8 @@ const main = async () => {
   writeJson(path.join(outDir, 'import-report.json'), report);
   writeMarkdownReport(path.join(outDir, 'import-report.md'), report);
 
-  console.log('[phase3f/import] Import completed');
 };
 
 main().catch((error) => {
-  console.error('[phase3f/import] Failed:', error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });

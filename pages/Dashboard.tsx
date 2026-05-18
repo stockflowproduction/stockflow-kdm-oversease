@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
 import { CashAdjustment, Customer, DeleteCompensationRecord, Expense, PartyCreditLedgerEntry, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
-import { allocateCustomerPaymentAgainstCompositeReceivable, buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
+import { allocateCustomerPaymentAgainstCompositeReceivable, applyPartyCreditToPurchaseOrder, buildUpfrontOrderLedgerEffects, createSupplierPayment, deleteLegacySupplierPaymentGroup, deleteSupplierPayment, deleteTransaction, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, getPurchaseOrders, getPurchaseParties, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, updateSupplierPayment, updateTransaction } from '../services/storage';
 import { formatINRPrecise } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { generateAccountStatementPDF } from '../services/pdf';
@@ -11,7 +11,8 @@ type CustomerReceivableRow = Customer & { receivable: number };
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[]; partyCredit?: number };
 type LedgerRow = { id: string; date: string; type: string; ref: string; description: string; debit: number; credit: number; balance: number; tone?: 'due' | 'payment' | 'cash' | 'refund'; source?: 'direct' | 'legacyGroup' | 'purchase' | 'customerPayment'; allocations?: Array<{ orderId: string; orderRef: string; paymentId: string; amount: number }> };
 const formatGroupedSupplierPaymentDescription = (method: string, allocationCount: number) => {
-  const methodLabel = method === 'online' ? 'Online' : 'Cash';
+  const normalizedMethod = String(method || '').toLowerCase();
+  const methodLabel = normalizedMethod === 'online' ? 'Online' : normalizedMethod === 'bank' ? 'Bank' : 'Cash';
   if (allocationCount > 1) return `${methodLabel} supplier payment allocated across ${allocationCount} POs`;
   return `${methodLabel} supplier payment`;
 };
@@ -59,6 +60,25 @@ function ActionModal({ open, title, onClose, children, zIndexClass = 'z-[90]' }:
           <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
         </div>
         <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm', zIndexClass = 'z-[120]' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string; zIndexClass?: string }) {
+  if (!open) return null;
+  return (
+    <div className={`fixed inset-0 ${zIndexClass} bg-black/40 flex items-center justify-center p-4`}>
+      <div className="w-full max-w-md rounded-xl border bg-white shadow-xl">
+        <div className="border-b px-4 py-3">
+          <h3 className="font-semibold">{title}</h3>
+        </div>
+        <div className="space-y-4 p-4">
+          <p className="text-sm text-muted-foreground">{message}</p>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onCancel}>Cancel</Button>
+            <Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>{confirmLabel}</Button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -116,6 +136,15 @@ export default function Dashboard() {
   const [editSupplierNote, setEditSupplierNote] = useState('');
   const [editSupplierDateTime, setEditSupplierDateTime] = useState(() => toDateTimeLocalValue(new Date()));
   const [editSupplierError, setEditSupplierError] = useState<string | null>(null);
+  const [editingLegacySupplierRow, setEditingLegacySupplierRow] = useState<LedgerRow | null>(null);
+  const [editingCustomerPayment, setEditingCustomerPayment] = useState<Transaction | null>(null);
+  const [editCustomerAmount, setEditCustomerAmount] = useState('');
+  const [editCustomerMethod, setEditCustomerMethod] = useState<'Cash' | 'Online'>('Cash');
+  const [editCustomerNote, setEditCustomerNote] = useState('');
+  const [editCustomerError, setEditCustomerError] = useState<string | null>(null);
+  const [pendingSupplierDeleteRow, setPendingSupplierDeleteRow] = useState<LedgerRow | null>(null);
+  const [pendingCustomerDeleteRowId, setPendingCustomerDeleteRowId] = useState<string | null>(null);
+  const [pendingPartyCreditRepairOrder, setPendingPartyCreditRepairOrder] = useState<{ orderId: string; amount: number; orderRef: string } | null>(null);
   const [isGeneratingCustomerPdf, setIsGeneratingCustomerPdf] = useState(false);
   const [isGeneratingPartyPdf, setIsGeneratingPartyPdf] = useState(false);
   const [statementPdfError, setStatementPdfError] = useState<string | null>(null);
@@ -363,33 +392,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         const fallbackCreditUsed = !linkedLedgerExists && derivedCredit > 0 ? derivedCredit : 0;
         const shouldTrace = (String(payment.partyName || '').trim().toLowerCase() === 'k') || fullAmount > 0;
         if ((import.meta as any).env?.DEV && shouldTrace) {
-          console.info('[PARTY_CREDIT_RECON]', {
-            id: payment.id,
-            voucherNo: payment.voucherNo || null,
-            partyId: payment.partyId || id,
-            partyName: payment.partyName || party.name,
-            amount: fullAmount,
-            paymentAppliedToPayable: appliedToPayable,
-            partyCreditCreated: explicitCredit,
-            allocations: payment.allocations || [],
-            allocationTotal,
-            derivedCreditFromApplied,
-            derivedCreditFromAllocations,
-            linkedLedgerCreditFound: linkedLedgerExists,
-            ledgerCredit: linkedLedgerCredit,
-            fallbackCreditUsed,
-          });
         }
         if (linkedLedgerExists) return sum;
         if ((import.meta as any).env?.DEV) {
-          console.warn('[PARTY_CREDIT_RECON]', {
-            id: payment.id,
-            voucherNo: payment.voucherNo || null,
-            partyId: payment.partyId || id,
-            partyName: payment.partyName || party.name,
-            reason: 'derived fallback from active supplier payment because ledger credit is missing',
-            fallbackCreditUsed,
-          });
         }
         return sum + derivedCredit;
       }, 0);
@@ -411,7 +416,6 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         if (rawDerivedFallback > fallbackCredit) {
           reconPayload.reason = 'fallback capped by party-level overpayment to avoid stale allocation inflation';
         }
-        console.info('[PARTY_CREDIT_RECON]', reconPayload);
       }
       partyMap.set(id, { ...party, payable, dueOrders: partyDueOrders, partyCredit });
     });
@@ -420,9 +424,185 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const payablePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable > 0), [allPartyDashboardRows]);
   const creditPartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) > 0), [allPartyDashboardRows]);
   const zeroDuePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) <= 0), [allPartyDashboardRows]);
-
   const totalReceivable = useMemo(() => customerReceivables.reduce((sum, customer) => sum + customer.receivable, 0), [customerReceivables]);
   const totalPayable = useMemo(() => partyPayables.reduce((sum, party) => sum + party.payable, 0), [partyPayables]);
+  const isPayableTraceEnabled = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return (
+        window.location.href.includes('tracePayables=1')
+        || window.location.search.includes('tracePayables=1')
+        || window.location.hash.includes('tracePayables=1')
+        || window.localStorage.getItem('TRACE_PAYABLES') === '1'
+      );
+    } catch {
+      return false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isPayableTraceEnabled) return;
+    const normalize = (value?: string) => String(value || '').trim().toLowerCase();
+    const status = allPartyDashboardRows.length > 0 ? 'ready' : 'waiting_or_empty';
+    const summaryPayload = {
+      traceType: 'SUMMARY',
+      status,
+      timestamp: new Date().toISOString(),
+      route: typeof window !== 'undefined' ? window.location.href : '',
+      counts: {
+        orders: orders.length,
+        supplierPayments: supplierPayments.length,
+        partyCreditLedger: partyCreditLedger.length,
+        parties: parties.length,
+        allPartyDashboardRows: allPartyDashboardRows.length,
+        payableRows: payablePartyRows.length,
+        partyCreditRows: creditPartyRows.length,
+        partyWithoutDueRows: zeroDuePartyRows.length,
+      },
+      totals: {
+        totalPayable,
+      },
+      rawCounts: {
+        purchaseOrders: orders.length,
+        supplierPayments: supplierPayments.length,
+        partyCreditLedger: partyCreditLedger.length,
+        purchaseParties: parties.length,
+      },
+      chains: {
+        totalPayable: 'Total Payable <- sum payableRows.payable <- allPartyDashboardRows <- orders.remainingAmount <- loadData()',
+        partyCredit: 'Party Credit <- row.partyCredit <- ledgerCredit + fallbackCredit <- partyCreditLedger + supplierPayments fallback <- loadData()',
+        creditTabCount: 'Parties with Credit (N) <- creditPartyRows.length <- allPartyDashboardRows.filter(payable <= 0 && partyCredit > 0)',
+      },
+    };
+    console.log('[PAYABLE_TRACE_JSON] ' + JSON.stringify(summaryPayload, null, 2));
+
+    allPartyDashboardRows.forEach((row) => {
+      const matchingPurchaseOrders = orders.filter((o) => o.partyId === row.id);
+      const matchingSupplierPayments = supplierPayments.filter((sp) => !sp.deletedAt && (
+        sp.partyId === row.id || normalize(sp.partyName) === normalize(row.name)
+      ));
+      const matchingPartyCreditLedgerEntries = partyCreditLedger.filter((entry) => entry.partyId === row.id);
+      const matchedPurchaseParties = parties.filter((p) => p.id === row.id || normalize(p.name) === normalize(row.name));
+      const sourceOrders = matchingPurchaseOrders.filter((o) => Math.max(0, Number(o.remainingAmount || 0)) > 0).map((o) => ({
+        id: o.id,
+        billNumber: o.billNumber,
+        totalAmount: Number(o.totalAmount || 0),
+        totalPaid: Number(o.totalPaid || 0),
+        remainingAmount: Number(o.remainingAmount || 0),
+      }));
+      const payableResult = sourceOrders.reduce((sum, o) => sum + Math.max(0, Number(o.remainingAmount || 0)), 0);
+      const partyTotalPurchase = matchingPurchaseOrders.reduce((sum, o) => sum + Math.max(0, Number(o.totalAmount || 0)), 0);
+      const partyTotalPaid = matchingSupplierPayments.reduce((sum, p) => sum + Math.max(0, Number(p.amount || 0)), 0);
+      const partyLevelCreditCap = Math.max(0, Number((partyTotalPaid - partyTotalPurchase).toFixed(2)));
+      const ledgerCreditResult = matchingPartyCreditLedgerEntries.filter((entry) => {
+        if (entry.type !== 'supplier_overpayment') return Math.max(0, Number(entry.remainingAmount || 0)) > 0;
+        return Math.max(0, Number(entry.remainingAmount || 0)) > 0 || (entry.usageHistory || []).some((usage) => Math.max(0, Number(usage.amount || 0)) > 0);
+      }).reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      const rawDerivedFallback = matchingSupplierPayments.reduce((sum, payment) => {
+        const fullAmount = Math.max(0, Number(payment.amount || 0));
+        const explicitCredit = Math.max(0, Number(payment.partyCreditCreated || 0));
+        const appliedToPayable = Math.max(0, Number(payment.paymentAppliedToPayable || 0));
+        const allocationTotal = Array.isArray(payment.allocations)
+          ? payment.allocations.reduce((acc, allocation) => acc + Math.max(0, Number(allocation.amount || 0)), 0)
+          : 0;
+        const derivedCredit = explicitCredit > 0
+          ? explicitCredit
+          : (appliedToPayable > 0 && fullAmount > appliedToPayable)
+            ? Number((fullAmount - appliedToPayable).toFixed(2))
+            : (fullAmount > allocationTotal ? Number((fullAmount - allocationTotal).toFixed(2)) : 0);
+        return sum + Math.max(0, derivedCredit);
+      }, 0);
+      const availableFallbackCap = Math.max(0, Number((partyLevelCreditCap - ledgerCreditResult).toFixed(2)));
+      const fallbackCreditResult = Math.min(rawDerivedFallback, availableFallbackCap);
+      const finalPartyCredit = ledgerCreditResult + fallbackCreditResult;
+      const tab = row.payable > 0 ? 'Payables' : (Math.max(0, Number(row.partyCredit || 0)) > 0 ? 'Parties with Credit' : 'Parties Without Due');
+      const payload = {
+        traceType: 'PARTY_VALUE_CHAIN',
+        partyName: row.name,
+        partyId: row.id,
+        ui: {
+          tab,
+          displayedPayable: Number(row.payable || 0),
+          displayedPartyCredit: Number(row.partyCredit || 0),
+        },
+        rawInputs: {
+          matchingPurchaseOrders: matchingPurchaseOrders.map((o) => ({
+            id: o.id,
+            orderNo: o.billNumber || o.id.slice(-6),
+            partyId: o.partyId,
+            partyName: o.partyName,
+            totalAmount: Number(o.totalAmount || 0),
+            totalPaid: Number(o.totalPaid || 0),
+            remainingAmount: Number(o.remainingAmount || 0),
+            status: o.status,
+            receivedAt: (o as any).receivedAt || null,
+            createdAt: o.createdAt,
+            paymentHistory: (o.paymentHistory || []).map((h: any) => ({
+              id: h.id,
+              amount: Number(h.amount || 0),
+              method: h.method,
+              paidAt: h.paidAt,
+              date: h.date,
+              sourceType: h.sourceType,
+              sourceRef: h.sourceRef,
+              supplierPaymentId: h.supplierPaymentId,
+            })),
+          })),
+          matchingSupplierPayments: matchingSupplierPayments.map((p) => ({
+            id: p.id,
+            voucherNo: p.voucherNo,
+            partyId: p.partyId,
+            partyName: p.partyName,
+            amount: Number(p.amount || 0),
+            method: p.method,
+            paidAt: p.paidAt,
+            paymentAppliedToPayable: Number(p.paymentAppliedToPayable || 0),
+            partyCreditCreated: Number(p.partyCreditCreated || 0),
+            allocations: (p.allocations || []).map((a) => ({ orderId: a.orderId, amount: Number(a.amount || 0) })),
+            deletedAt: p.deletedAt || null,
+          })),
+          matchingPartyCreditLedgerEntries: matchingPartyCreditLedgerEntries.map((e) => ({
+            id: e.id,
+            partyId: e.partyId,
+            partyName: e.partyName,
+            amountCreated: Number(e.amountCreated || 0),
+            remainingAmount: Number(e.remainingAmount || 0),
+            sourcePaymentId: e.sourcePaymentId,
+            sourceVoucherNo: e.sourceVoucherNo,
+            usageHistory: (e.usageHistory || []).map((u) => ({ amount: Number(u.amount || 0), usedAt: u.usedAt, sourceType: u.sourceType, sourceRef: u.sourceRef })),
+          })),
+          matchedPurchaseParty: matchedPurchaseParties[0] || null,
+        },
+        calculations: {
+          payable: { formula: 'sum matching purchaseOrders.remainingAmount', result: payableResult },
+          ledgerCredit: { formula: 'sum matching partyCreditLedger.remainingAmount', result: ledgerCreditResult },
+          fallbackCredit: {
+            formula: 'supplier payment derived fallback capped by party-level overpayment',
+            partyTotalPurchase,
+            partyTotalPaid,
+            partyLevelCreditCap,
+            rawDerivedFallback,
+            cappedFallbackCredit: fallbackCreditResult,
+            result: fallbackCreditResult,
+          },
+          finalPartyCredit: { formula: 'ledgerCredit + fallbackCredit', result: finalPartyCredit },
+          tabDecision: {
+            formula: 'payable > 0 ? Payables : partyCredit > 0 ? Parties with Credit : Parties Without Due',
+            result: tab,
+          },
+        },
+        chain: {
+          payableChain: `Payable ₹${Number(row.payable || 0)} <- row.payable <- sum purchaseOrders.remainingAmount <- allPartyDashboardRows <- loadData() <- memoryState/cloud store`,
+          partyCreditChain: `Party Credit ₹${Number(row.partyCredit || 0)} <- row.partyCredit <- ledgerCredit + fallbackCredit <- partyCreditLedger.remainingAmount + supplierPayments derived fallback <- allPartyDashboardRows <- loadData() <- memoryState/cloud store`,
+        },
+      };
+      console.log('[PAYABLE_TRACE_JSON] ' + JSON.stringify(payload, null, 2));
+      if (normalize(row.name).includes('holiday') || normalize(row.name) === 'k') {
+        console.log('[PAYABLE_TRACE_JSON] ' + JSON.stringify({ ...payload, traceType: 'FOCUSED_PARTY' }, null, 2));
+      }
+    });
+  }, [isPayableTraceEnabled, totalPayable, allPartyDashboardRows, payablePartyRows, creditPartyRows, zeroDuePartyRows, orders.length, supplierPayments.length, partyCreditLedger.length, parties.length, orders, supplierPayments, partyCreditLedger, parties]);
+
   const selectedCustomer = useMemo(() => customers.find(c => c.id === statementCustomerId) || null, [customers, statementCustomerId]);
   const selectedParty = useMemo(() => parties.find(p => p.id === statementPartyId) || null, [parties, statementPartyId]);
   useEffect(() => {
@@ -452,9 +632,18 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     let totalPurchase = 0;
     let lastPaymentAt = '';
     let lastPurchaseAt = '';
+    let totalPartyCreditUsed = 0;
 
     partyOrders.forEach(order => {
       const orderTotal = Math.max(0, Number(order.totalAmount || 0));
+      const sameOrderPartyCreditUsed = Number((order.paymentHistory || []).reduce((sum, payment) => {
+        const method = String(payment.method || '').toLowerCase();
+        if (method !== 'party_credit') return sum;
+        return sum + Math.max(0, Number(payment.amount || 0));
+      }, 0).toFixed(2));
+      if (sameOrderPartyCreditUsed > 0) {
+        totalPartyCreditUsed = Number((totalPartyCreditUsed + sameOrderPartyCreditUsed).toFixed(2));
+      }
       totalPurchase += orderTotal;
       lastPurchaseAt = order.orderDate || lastPurchaseAt;
       purchaseEvents.push({
@@ -462,9 +651,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         date: order.orderDate || order.createdAt,
         type: 'purchase',
         ref: order.billNumber || order.id.slice(-6),
-        description: `PO ${order.billNumber || order.id.slice(-6)} • ${getPurchaseOrderProductSummary(order)}${order.status ? ` • ${order.status}` : ''}`,
+        description: `PO ${order.billNumber || order.id.slice(-6)} • ${getPurchaseOrderProductSummary(order)}${order.status ? ` • ${order.status}` : ''}${sameOrderPartyCreditUsed > 0 ? ` • Party Credit Applied ${formatINRPrecise(sameOrderPartyCreditUsed)}` : ''}`,
         debit: orderTotal,
-        credit: 0,
+        credit: sameOrderPartyCreditUsed,
         tone: 'due',
       });
 
@@ -493,6 +682,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         const amount = Math.max(0, Number(payment.amount || 0));
         if (amount <= 0) return;
         const method = (payment.method || 'cash').toLowerCase();
+        if (method === 'party_credit') return;
         const note = (payment.note || '').trim().toLowerCase().replace(/\s+/g, ' ');
         const minuteBucket = new Date(Math.floor(new Date(payment.paidAt).getTime() / 60000) * 60000).toISOString().slice(0, 16);
         const key = `${selectedParty.id}|${method}|${note}|${minuteBucket}`;
@@ -519,7 +709,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       });
     });
 
-    const totalPaid = Number(paymentEvents.reduce((sum, event) => sum + event.credit, 0).toFixed(2));
+    const totalActualPayments = Number(paymentEvents.reduce((sum, event) => sum + event.credit, 0).toFixed(2));
     const events: Array<{ id: string; date: string; type: 'purchase' | 'payment'; ref: string; description: string; debit: number; credit: number; tone: LedgerRow['tone'] }> = [...purchaseEvents, ...paymentEvents];
     const sortedEvents = events.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     let runningBalance = 0;
@@ -540,9 +730,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       };
     });
 
-    const remaining = Math.max(0, Number((totalPurchase - totalPaid).toFixed(2)));
+    const remaining = Math.max(0, Number((totalPurchase - totalActualPayments - totalPartyCreditUsed).toFixed(2)));
     const displayRows = [...rows].reverse();
-    return { rows, displayRows, totalPurchase, totalPaid, remaining, lastPaymentAt, lastPurchaseAt };
+    return { rows, displayRows, totalPurchase, totalActualPayments, totalPartyCreditUsed, remaining, lastPaymentAt, lastPurchaseAt };
   }, [selectedParty, orders, supplierPayments]);
 
   const openReceiveModal = (customer: CustomerReceivableRow) => {
@@ -589,19 +779,6 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     const cappedApplied = Math.min(allocation.paymentAppliedToReceivable, breakdown.totalDue);
     const cappedStoreCredit = Math.max(0, amount - cappedApplied);
     if ((import.meta as any).env?.DEV || (import.meta as any).env?.VITE_ACCOUNTING_RECONCILE_DEBUG === 'true') {
-      console.info('[RECEIVE_ALLOC_DEBUG]', {
-        customerId: receivingCustomer.id,
-        customerName: receivingCustomer.name,
-        canonicalDue: breakdown.canonicalDue,
-        customOrderDue: breakdown.customOrderDue,
-        externalCustomOrderPaymentApplications: breakdown.externalCustomOrderPaymentApplications,
-        totalDue: breakdown.totalDue,
-        storeCredit: breakdown.storeCredit,
-        paymentAmount: amount,
-        allocation,
-        cappedApplied,
-        cappedStoreCredit,
-      });
     }
     (tx as any).paymentAppliedToReceivable = cappedApplied;
     (tx as any).paymentAppliedToCanonicalReceivable = allocation.appliedToCanonicalReceivable;
@@ -716,16 +893,12 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const handleEditSupplierPayment = async (row: LedgerRow) => {
     if (row.source === 'legacyGroup') {
       if (!row.allocations?.length) return;
-      const amountInput = window.prompt('Edit payment amount', String(row.credit));
-      if (amountInput == null) return;
-      const amount = Number(amountInput);
-      if (!Number.isFinite(amount) || amount <= 0) return;
-      const methodInput = window.prompt('Method (cash/online)', row.tone === 'cash' ? 'cash' : 'online') || 'cash';
-      const method = methodInput.toLowerCase() === 'online' ? 'online' : 'cash';
-      const note = window.prompt('Note', row.description) || 'Supplier payment';
-      await deleteLegacySupplierPaymentGroup(row.allocations.map((a) => ({ orderId: a.orderId, paymentId: a.paymentId })));
-      await createSupplierPayment({ partyId: selectedParty?.id || '', partyName: selectedParty?.name || '', amount, method, paidAt: row.date, note });
-      refresh();
+      setEditSupplierError(null);
+      setEditingLegacySupplierRow(row);
+      setEditSupplierAmount(String(row.credit || 0));
+      setEditSupplierMethod(row.tone === 'cash' ? 'cash' : 'online');
+      setEditSupplierNote(row.description || 'Supplier payment');
+      setEditSupplierDateTime(toDateTimeLocalValue(new Date(row.date)));
       return;
     }
     const supplierPaymentId = row.id.replace('sp-', '');
@@ -739,14 +912,20 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     setEditSupplierDateTime(toDateTimeLocalValue(new Date(payment.paidAt || payment.createdAt || new Date().toISOString())));
   };
   const handleSaveEditedSupplierPayment = async () => {
-    if (!editingSupplierPayment) return;
+    if (!editingSupplierPayment && !editingLegacySupplierRow) return;
     setEditSupplierError(null);
     const amount = Number(editSupplierAmount);
     if (!Number.isFinite(amount) || amount <= 0) return setEditSupplierError('Enter valid amount greater than zero.');
     const paymentDate = editSupplierDateTime ? new Date(editSupplierDateTime) : new Date();
     if (Number.isNaN(paymentDate.getTime())) return setEditSupplierError('Please select a valid payment date.');
     try {
-      await updateSupplierPayment(editingSupplierPayment.id, { amount, method: editSupplierMethod === 'bank' ? 'online' : editSupplierMethod, note: editSupplierNote.trim(), paidAt: paymentDate.toISOString() });
+      if (editingLegacySupplierRow) {
+        await deleteLegacySupplierPaymentGroup(editingLegacySupplierRow.allocations?.map((a) => ({ orderId: a.orderId, paymentId: a.paymentId })) || []);
+        await createSupplierPayment({ partyId: selectedParty?.id || '', partyName: selectedParty?.name || '', amount, method: editSupplierMethod === 'online' ? 'online' : 'cash', paidAt: paymentDate.toISOString(), note: editSupplierNote.trim() || 'Supplier payment' });
+        setEditingLegacySupplierRow(null);
+      } else if (editingSupplierPayment) {
+        await updateSupplierPayment(editingSupplierPayment.id, { amount, method: editSupplierMethod === 'bank' ? 'online' : editSupplierMethod, note: editSupplierNote.trim(), paidAt: paymentDate.toISOString() });
+      }
       setEditingSupplierPayment(null);
       refresh();
     } catch (error) {
@@ -755,15 +934,22 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   };
 
   const handleDeleteSupplierPayment = async (row: LedgerRow) => {
-    if (!window.confirm('Delete this supplier payment entry?')) return;
+    setPendingSupplierDeleteRow(row);
+  };
+
+  const confirmDeleteSupplierPayment = async () => {
+    const row = pendingSupplierDeleteRow;
+    if (!row) return;
     if (row.source === 'legacyGroup') {
       if (!row.allocations?.length) return;
       await deleteLegacySupplierPaymentGroup(row.allocations.map((a) => ({ orderId: a.orderId, paymentId: a.paymentId })));
+      setPendingSupplierDeleteRow(null);
       refresh();
       return;
     }
     const supplierPaymentId = row.id.replace('sp-', '');
     await deleteSupplierPayment(supplierPaymentId);
+    setPendingSupplierDeleteRow(null);
     refresh();
   };
 
@@ -771,21 +957,60 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     const paymentId = rowId.replace('payment-', '');
     const tx = transactions.find(item => item.id === paymentId && item.type === 'payment');
     if (!tx) return;
-    const amountInput = window.prompt('Edit received amount', String(tx.total));
-    if (amountInput == null) return;
-    const total = Number(amountInput);
-    if (!Number.isFinite(total) || total <= 0) return;
-    const methodInput = window.prompt('Method (Cash/Online)', tx.paymentMethod || 'Cash') || tx.paymentMethod || 'Cash';
-    const paymentMethod = methodInput.toLowerCase() === 'online' ? 'Online' : 'Cash';
-    const notes = window.prompt('Note', tx.notes || '') ?? tx.notes;
-    await updateTransaction({ ...tx, total, paymentMethod: paymentMethod as 'Cash' | 'Online', notes });
-    refresh();
+    setEditCustomerError(null);
+    setEditingCustomerPayment(tx);
+    setEditCustomerAmount(String(tx.total || 0));
+    setEditCustomerMethod((String(tx.paymentMethod || 'Cash').toLowerCase() === 'online' ? 'Online' : 'Cash') as 'Cash' | 'Online');
+    setEditCustomerNote(tx.notes || '');
   };
 
   const handleDeleteCustomerPayment = (rowId: string) => {
-    const paymentId = rowId.replace('payment-', '');
-    if (!window.confirm('Delete this customer payment entry?')) return;
+    setPendingCustomerDeleteRowId(rowId);
+  };
+
+  const handleSaveEditedCustomerPayment = async () => {
+    if (!editingCustomerPayment) return;
+    setEditCustomerError(null);
+    const total = Number(editCustomerAmount);
+    if (!Number.isFinite(total) || total <= 0) return setEditCustomerError('Enter valid amount greater than zero.');
+    await updateTransaction({ ...editingCustomerPayment, total, paymentMethod: editCustomerMethod, notes: editCustomerNote });
+    setEditingCustomerPayment(null);
+    refresh();
+  };
+
+  const confirmDeleteCustomerPayment = () => {
+    if (!pendingCustomerDeleteRowId) return;
+    const paymentId = pendingCustomerDeleteRowId.replace('payment-', '');
     deleteTransaction(paymentId);
+    setPendingCustomerDeleteRowId(null);
+    refresh();
+  };
+
+  const getPartyCreditRepairCandidate = (row: LedgerRow) => {
+    if (row.type !== 'Purchase') return null;
+    if (!selectedParty) return null;
+    if (!row.id.startsWith('order-')) return null;
+    const orderId = row.id.replace('order-', '');
+    const order = orders.find((o) => o.id === orderId && o.partyId === selectedParty.id);
+    if (!order) return null;
+    const remainingAmount = Math.max(0, Number(order.remainingAmount || 0));
+    if (remainingAmount <= 0) return null;
+    const hasPartyCreditHistory = (order.paymentHistory || []).some((entry) => String(entry.method || '').toLowerCase() === 'party_credit' && Math.max(0, Number(entry.amount || 0)) > 0);
+    if (hasPartyCreditHistory) return null;
+    const availablePartyCredit = (partyCreditLedger || [])
+      .filter((entry) => entry.partyId === selectedParty.id)
+      .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+    if (availablePartyCredit <= 0) return null;
+    const amount = Math.min(remainingAmount, availablePartyCredit);
+    if (amount <= 0) return null;
+    return { orderId: order.id, amount: Number(amount.toFixed(2)), orderRef: order.billNumber || order.id.slice(-6) };
+  };
+
+  const confirmApplyPartyCreditRepair = async () => {
+    if (!pendingPartyCreditRepairOrder) return;
+    const { orderId, amount, orderRef } = pendingPartyCreditRepairOrder;
+    await applyPartyCreditToPurchaseOrder(orderId, amount, orderRef);
+    setPendingPartyCreditRepairOrder(null);
     refresh();
   };
 
@@ -996,13 +1221,13 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           </div>
         )}
       </StatementModal>
-      <ActionModal open={!!editingSupplierPayment} title="Edit Supplier Payment" onClose={() => setEditingSupplierPayment(null)} zIndexClass="z-[120]">
-        {editingSupplierPayment && (
+      <ActionModal open={!!editingSupplierPayment || !!editingLegacySupplierRow} title="Edit Supplier Payment" onClose={() => { setEditingSupplierPayment(null); setEditingLegacySupplierRow(null); }} zIndexClass="z-[120]">
+        {(editingSupplierPayment || editingLegacySupplierRow) && (
           <div className="space-y-3">
-            <div className="text-sm"><span className="font-medium">Party:</span> {editingSupplierPayment.partyName}</div>
-            <div className="text-sm"><span className="font-medium">Existing Amount:</span> {formatINRPrecise(editingSupplierPayment.amount || 0)}</div>
-            <div className="text-sm"><span className="font-medium">Existing Payable Applied:</span> {formatINRPrecise(editingSupplierPayment.paymentAppliedToPayable || 0)}</div>
-            <div className="text-sm"><span className="font-medium">Existing Party Credit:</span> {formatINRPrecise(editingSupplierPayment.partyCreditCreated || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Party:</span> {editingSupplierPayment?.partyName || selectedParty?.name || 'Supplier'}</div>
+            <div className="text-sm"><span className="font-medium">Existing Amount:</span> {formatINRPrecise(editingSupplierPayment?.amount || editingLegacySupplierRow?.credit || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Existing Payable Applied:</span> {formatINRPrecise(editingSupplierPayment?.paymentAppliedToPayable || 0)}</div>
+            <div className="text-sm"><span className="font-medium">Existing Party Credit:</span> {formatINRPrecise(editingSupplierPayment?.partyCreditCreated || 0)}</div>
             <div><Label>Amount</Label><Input type="number" min="0" step="0.01" value={editSupplierAmount} onChange={(e) => setEditSupplierAmount(e.target.value)} /></div>
             <div><Label>Payment Date</Label><Input type="datetime-local" value={editSupplierDateTime} onChange={(e) => setEditSupplierDateTime(e.target.value)} /></div>
             <div><Label>Method</Label><Select value={editSupplierMethod} onChange={(e) => setEditSupplierMethod(e.target.value as 'cash' | 'online' | 'bank')}><option value="cash">Cash</option><option value="online">Online</option><option value="bank">Bank</option></Select></div>
@@ -1012,6 +1237,41 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           </div>
         )}
       </ActionModal>
+      <ActionModal open={!!editingCustomerPayment} title="Edit Customer Payment" onClose={() => setEditingCustomerPayment(null)} zIndexClass="z-[120]">
+        {editingCustomerPayment && (
+          <div className="space-y-3">
+            <div><Label>Amount</Label><Input type="number" min="0" step="0.01" value={editCustomerAmount} onChange={(e) => setEditCustomerAmount(e.target.value)} /></div>
+            <div><Label>Method</Label><Select value={editCustomerMethod} onChange={(e) => setEditCustomerMethod(e.target.value as 'Cash' | 'Online')}><option value="Cash">Cash</option><option value="Online">Online</option></Select></div>
+            <div><Label>Note</Label><Input value={editCustomerNote} onChange={(e) => setEditCustomerNote(e.target.value)} /></div>
+            {editCustomerError && <p className="text-xs text-red-600">{editCustomerError}</p>}
+            <Button className="w-full" disabled={!Number.isFinite(Number(editCustomerAmount)) || Number(editCustomerAmount) <= 0} onClick={() => void handleSaveEditedCustomerPayment()}>Save Changes</Button>
+          </div>
+        )}
+      </ActionModal>
+      <ConfirmDialog
+        open={!!pendingSupplierDeleteRow}
+        title="Delete supplier payment?"
+        message="This will reverse supplier payment effects according to existing system rules."
+        onCancel={() => setPendingSupplierDeleteRow(null)}
+        onConfirm={() => void confirmDeleteSupplierPayment()}
+        confirmLabel="Delete"
+      />
+      <ConfirmDialog
+        open={!!pendingCustomerDeleteRowId}
+        title="Delete payment?"
+        message="This will reverse customer payment effects according to existing system rules."
+        onCancel={() => setPendingCustomerDeleteRowId(null)}
+        onConfirm={confirmDeleteCustomerPayment}
+        confirmLabel="Delete"
+      />
+      <ConfirmDialog
+        open={!!pendingPartyCreditRepairOrder}
+        title="Apply party credit?"
+        message={pendingPartyCreditRepairOrder ? `Apply ${formatINRPrecise(pendingPartyCreditRepairOrder.amount)} party credit to this purchase? This will reduce payable and will not affect cash/bank.` : ''}
+        onCancel={() => setPendingPartyCreditRepairOrder(null)}
+        onConfirm={() => void confirmApplyPartyCreditRepair()}
+        confirmLabel="Apply Party Credit"
+      />
 
       <StatementModal open={!!selectedParty && !!partyStatement} title="Party Statement" subtitle={selectedParty ? `${selectedParty.name} • ${selectedParty.phone || '-'}` : undefined} onClose={() => setStatementPartyId(null)}>
         {selectedParty && partyStatement && (
@@ -1025,15 +1285,18 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
             <p className="text-xs text-muted-foreground">Latest transactions shown first. Balance means balance after that transaction.</p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Purchase</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(partyStatement.totalPurchase)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Total Paid</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(partyStatement.totalPaid)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Actual Payments</div><div className="mt-1 text-lg font-semibold text-blue-700">{formatINRPrecise(partyStatement.totalActualPayments)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Party Credit Applied</div><div className="mt-1 text-lg font-semibold text-violet-700">{formatINRPrecise(partyStatement.totalPartyCreditUsed)}</div></div>
               <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Remaining Payable</div><div className="mt-1 text-lg font-semibold text-orange-700">{formatINRPrecise(partyStatement.remaining)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-3"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">Last Payment / Purchase</div><div className="mt-1 text-lg font-semibold">{partyStatement.lastPaymentAt ? new Date(partyStatement.lastPaymentAt).toLocaleDateString() : '—'} / {partyStatement.lastPurchaseAt ? new Date(partyStatement.lastPurchaseAt).toLocaleDateString() : '—'}</div></div>
             </div>
             <div className="max-h-[52vh] overflow-auto rounded-xl border">
               <table className="w-full min-w-[920px] text-sm">
                 <thead className="sticky top-0 bg-slate-50"><tr><th className="p-3 text-left whitespace-nowrap">Date</th><th className="p-3 text-left">Type</th><th className="p-3 text-left whitespace-nowrap">Ref</th><th className="p-3 text-left min-w-[260px]">Description</th><th className="p-3 text-right whitespace-nowrap">Debit</th><th className="p-3 text-right whitespace-nowrap">Credit</th><th className="p-3 text-right whitespace-nowrap">Balance</th><th className="p-3 text-left whitespace-nowrap">Actions</th></tr></thead>
                 <tbody>
-                  {partyStatement.displayRows.map((row, idx) => <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td><td className="p-3 whitespace-nowrap">{row.type === 'Payment' ? <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditSupplierPayment(row)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void handleDeleteSupplierPayment(row)}>Delete</Button></div> : '—'}</td></tr>)}
+                  {partyStatement.displayRows.map((row, idx) => {
+                    const repairCandidate = getPartyCreditRepairCandidate(row);
+                    return <tr key={row.id} className={`border-t align-top ${idx % 2 ? 'bg-slate-50/40' : ''} hover:bg-slate-50`}><td className="p-3 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td><td className="p-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${row.tone === 'due' ? 'bg-orange-50 text-orange-700' : row.tone === 'cash' ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.type}</span></td><td className="p-3 whitespace-nowrap">{row.ref}</td><td className="p-3 whitespace-normal">{row.description}</td><td className="p-3 text-right whitespace-nowrap">{row.debit ? formatINRPrecise(row.debit) : '—'}</td><td className="p-3 text-right whitespace-nowrap">{row.credit ? formatINRPrecise(row.credit) : '—'}</td><td className="p-3 text-right whitespace-nowrap font-semibold">{formatINRPrecise(row.balance)}</td><td className="p-3 whitespace-nowrap">{row.type === 'Payment' ? <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void handleEditSupplierPayment(row)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void handleDeleteSupplierPayment(row)}>Delete</Button></div> : repairCandidate ? <Button size="sm" variant="outline" onClick={() => setPendingPartyCreditRepairOrder(repairCandidate)}>Apply Party Credit</Button> : '—'}</td></tr>;
+                  })}
                 </tbody>
               </table>
             </div>

@@ -427,16 +427,6 @@ export default function Cashbook() {
     const payableDifference = dashboardPayableForComparison - ledgerPayableKpi;
 
     if (CASHBOOK_RECONCILE_DEBUG && typeof window !== 'undefined') {
-      console.table(dashboardEquivalentReceivableRows);
-      console.table(cashbookReceivableRows);
-      console.table(mismatchRows);
-      console.log('[CASHBOOK_RECON] canonicalReceivableForComparison=', canonicalReceivableForComparison);
-      console.log('[CASHBOOK_RECON] cashbookCurrentReceivable=', cashbookCurrentReceivable);
-      console.log('[CASHBOOK_RECON] ledgerReceivableKpi=', ledgerReceivableKpi);
-      console.log('[CASHBOOK_RECON] receivableDifference=', receivableDifference);
-      console.log('[CASHBOOK_RECON] dashboardPayableForComparison=', dashboardPayableForComparison);
-      console.log('[CASHBOOK_RECON] ledgerPayableKpi=', ledgerPayableKpi);
-      console.log('[CASHBOOK_RECON] payableDifference=', payableDifference);
     }
 
     return { cash, bank, receivable: ledgerReceivableKpi, payable: ledgerPayableKpi };

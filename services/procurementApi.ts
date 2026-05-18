@@ -64,27 +64,9 @@ export const runProcurementShadowCompare = async (legacy: { orders: PurchaseOrde
     const orderIdsMatch = missingOrderIds.length === 0;
 
     if (partyCountMatch && orderCountMatch && partyIdsMatch && orderIdsMatch) {
-      console.info('[PROCUREMENT][SHADOW][SUCCESS]', {
-        legacyParties: legacy.parties.length,
-        backendParties: backendParties.items.length,
-        legacyOrders: legacy.orders.length,
-        backendOrders: backendOrders.items.length,
-      });
     } else {
-      console.warn('[PROCUREMENT][SHADOW][MISMATCH]', {
-        legacyParties: legacy.parties.length,
-        backendParties: backendParties.items.length,
-        legacyOrders: legacy.orders.length,
-        backendOrders: backendOrders.items.length,
-        missingPartyIds: missingPartyIds.slice(0, 10),
-        missingOrderIds: missingOrderIds.slice(0, 10),
-      });
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error('[PROCUREMENT][SHADOW][ERROR]', {
-      message,
-      hint: 'Backend unavailable or procurement endpoints unreachable. Legacy UI remains primary.',
-    });
   }
 };

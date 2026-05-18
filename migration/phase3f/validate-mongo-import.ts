@@ -119,7 +119,6 @@ const writeMd = (filePath: string, report: any) => {
 
 const main = async () => {
   const args = parseArgs(process.argv.slice(2));
-  if (args.help) return void console.log(HELP);
 
   const mongoUri = String(args.mongoUri || '');
   const dbName = String(args.dbName || '');
@@ -239,11 +238,9 @@ const main = async () => {
   ensureDir(outDir);
   writeJson(path.join(outDir, 'mongo-import-validation.json'), report);
   writeMd(path.join(outDir, 'mongo-import-validation.md'), report);
-  console.log('[phase3f/validate-import] Mongo import validation report generated');
   if (report.blockers > 0) process.exitCode = 1;
 };
 
 main().catch((error) => {
-  console.error('[phase3f/validate-import] Failed:', error instanceof Error ? error.message : error);
   process.exitCode = 1;
 });

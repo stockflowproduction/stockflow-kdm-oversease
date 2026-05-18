@@ -16,6 +16,24 @@ import { downloadTransactionsData, downloadTransactionsTemplate, importHistorica
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 
+function ConfirmDialog({ open, title, message, onCancel, onConfirm }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4">
+      <Card className="w-full max-w-md">
+        <CardHeader><CardTitle>{title}</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">{message}</p>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onCancel}>Cancel</Button>
+            <Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>Delete</Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function Transactions() {
   const getTransactionReference = (tx: Transaction) => tx.type === 'sale'
     ? (tx.invoiceNo || tx.id.slice(-6))
@@ -61,6 +79,7 @@ export default function Transactions() {
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([]);
   const [batchEditTransactionIds, setBatchEditTransactionIds] = useState<string[]>([]);
+  const [isBatchDeleteConfirmOpen, setIsBatchDeleteConfirmOpen] = useState(false);
   const [batchEditTransactionIndex, setBatchEditTransactionIndex] = useState(0);
   const [editingAmount, setEditingAmount] = useState('');
   const [editingTxDate, setEditingTxDate] = useState('');
@@ -291,7 +310,6 @@ export default function Transactions() {
         setIsDeletedWindowed(deletedWindow.hasMore);
         setLoadError(null);
       } catch (error) {
-        console.error('[transactions] load failed', error);
         setLoadError('Unable to load transactions right now. Please try again.');
       } finally {
         setIsInitialLoading(false);
@@ -419,19 +437,6 @@ export default function Transactions() {
         setBackendShadowTransactions(all);
         setBackendShadowFetched(true);
         setBackendShadowError(null);
-        console.log('[TX_SHADOW_COMPARE]', {
-          enabled: true,
-          filtersApplied: {
-            dateFrom: dateWindow?.dateFrom || null,
-            dateTo: dateWindow?.dateTo || null,
-            type: typeFilter,
-            q: query || null,
-            pageSize,
-          },
-          unsupportedFilters,
-          shadowFetchCount: all.length,
-          mismatch: false,
-        });
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : String(error);
@@ -439,26 +444,7 @@ export default function Transactions() {
         setBackendShadowError(message);
         setBackendShadowTransactions([]);
         if (backendRenderEnabled) {
-          console.log('[TX_SOURCE_FALLBACK]', {
-            backendRenderEnabled: true,
-            reason: message,
-            fallbackMode: 'firestore',
-          });
         }
-        console.log('[TX_SHADOW_COMPARE]', {
-          enabled: true,
-          filtersApplied: {
-            filterType,
-            customStart,
-            customEnd,
-            dateWindow: buildShadowDateWindow(),
-            type: 'all',
-            q: searchTerm.trim() || null,
-          },
-          unsupportedFilters: ['transactionType (no active Transactions type filter mapped)'],
-          shadowFetchError: message,
-          mismatch: false,
-        });
       }
     };
 
@@ -606,55 +592,9 @@ export default function Transactions() {
     ];
     const mismatch = countMismatch || revenueMismatch || dateRangeMismatch || grossProfitMismatch || idMismatch;
 
-    console.log('[TX_SHADOW_COMPARE]', {
-      enabled: shadowDiagnosticEnabled,
-      filtersApplied: {
-        filterType,
-        customStart,
-        customEnd,
-        dateFrom: (() => {
-          const d = firestoreDateRange.from;
-          return d || null;
-        })(),
-        dateTo: (() => {
-          const d = firestoreDateRange.to;
-          return d || null;
-        })(),
-        type: 'all',
-        q: searchTerm.trim() || null,
-        mappedToBackend: {
-          dateFrom: true,
-          dateTo: true,
-          type: false,
-          q: true,
-        },
-      },
-      unsupportedFilters: ['transactionType (no active Transactions type filter mapped)'],
-      firestoreCount,
-      backendCount,
-      firestoreRevenue,
-      backendRevenue,
-      firestoreGrossProfit,
-      backendGrossProfit,
-      backendGrossProfitAvailable: backendGrossProfit !== null,
-      firestoreDateMin: firestoreDateRange.from,
-      firestoreDateMax: firestoreDateRange.to,
-      backendDateMin: backendDateRange.from,
-      backendDateMax: backendDateRange.to,
-      idsOnlyInFirestore,
-      idsOnlyInBackend,
-      mismatch,
-      mismatchReasons,
-    });
   }, [backendShadowTransactions, backendShadowFetched, transactions, customers, products, filterType, customStart, customEnd, searchTerm, shadowDiagnosticEnabled]);
 
   useEffect(() => {
-    console.log('[TX_SOURCE_MODE]', {
-      mode: backendRenderEnabled && backendLoadedForRender ? 'backend' : 'firestore',
-      backendRenderEnabled,
-      backendLoaded: backendLoadedForRender,
-      renderedCount: renderedTransactions.length,
-    });
   }, [backendRenderEnabled, backendLoadedForRender, renderedTransactions.length]);
 
   const loadOlderTransactionsWindow = () => {
@@ -782,13 +722,6 @@ export default function Transactions() {
         includedAfterDateFilter,
         excludedReason: payment.deletedAt ? 'deleted' : (!normalizedDate ? 'invalid_date' : (includedAfterDateFilter ? null : 'filtered_by_date')),
       };
-    });
-    console.log('[TX_SUPPLIER_PAYMENT_TRACE]', {
-      supplierPaymentsCount: (supplierPayments || []).length,
-      activeSupplierPaymentsCount: (supplierPayments || []).filter((payment) => !payment.deletedAt).length,
-      virtualSupplierRowsCount: renderedTransactions.filter((tx) => isSupplierPaymentVirtualTransaction(tx)).length,
-      currentDateFilter: filterType,
-      sampleRows,
     });
   }, [supplierPayments, renderedTransactions, dateFilteredTransactions, filterType]);
 
@@ -1035,14 +968,16 @@ export default function Transactions() {
 
   const handleBatchDeleteTransactions = () => {
     if (!selectedTransactions.length) return;
-    const confirmed = window.confirm(`Delete ${selectedTransactions.length} selected transaction${selectedTransactions.length > 1 ? 's' : ''}?`);
-    if (!confirmed) return;
+    setIsBatchDeleteConfirmOpen(true);
+  };
+  const confirmBatchDeleteTransactions = () => {
     let nextTransactions = transactions;
     selectedTransactionIds.forEach(transactionId => {
       nextTransactions = deleteTransaction(transactionId);
     });
     setTransactions(nextTransactions);
     setSelectedTransactionIds([]);
+    setIsBatchDeleteConfirmOpen(false);
   };
 
   const updateEditingItem = (index: number, patch: Partial<CartItem>) => {
@@ -1269,7 +1204,6 @@ export default function Transactions() {
 
       closeTransactionEditor();
     } catch (error) {
-      console.error('[transactions] update failed', error);
       setEditingError(error instanceof Error ? error.message : 'Transaction update failed. Please try again.');
       setEditingSectionWarning({ section: 'general', message: 'Save failed during reconcile. Review audit impact and try again.' });
     } finally {
@@ -1418,7 +1352,6 @@ export default function Transactions() {
     if (typeof window === 'undefined') return;
     const show = Boolean((import.meta as any)?.env?.DEV) || new URLSearchParams(window.location.search).get('debug') === '1';
     if (!show) return;
-    console.info('[TX][DIAGNOSTICS]', diagnostics);
   }, [diagnostics]);
 
   const stats = useMemo(() => {
@@ -2787,6 +2720,13 @@ export default function Transactions() {
         onClose={() => setIsExportModalOpen(false)} 
         onExport={handleExport}
         title={exportType === 'summary' ? "Export Transaction Report" : "Export Invoice"}
+      />
+      <ConfirmDialog
+        open={isBatchDeleteConfirmOpen}
+        title="Delete selected transactions?"
+        message={`Delete ${selectedTransactions.length} selected transaction${selectedTransactions.length > 1 ? 's' : ''}? This action will move selected transactions to the bin/history according to the existing delete flow.`}
+        onCancel={() => setIsBatchDeleteConfirmOpen(false)}
+        onConfirm={confirmBatchDeleteTransactions}
       />
     </div>
   );

@@ -277,7 +277,6 @@ export const generateProductCatalogPDF = async (
             doc.addImage(cover, format, drawX, drawY, drawW, drawH, undefined, 'FAST');
             shouldAddCatalogPageAfterCover = true;
         } catch (error) {
-            console.warn('[catalog-pdf] failed to add first page image, continuing without cover', error);
         }
     }
 
@@ -681,7 +680,6 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
         try {
             doc.addImage(profile.signatureImage, 'PNG', pageWidth - 50, bankY + 5, 35, 12, undefined, 'FAST');
         } catch (e) {
-            console.error("Signature image error", e);
         }
     }
 

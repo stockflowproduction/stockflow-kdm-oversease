@@ -287,7 +287,6 @@ export default function Financial() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    console.info('[FIN][FINANCIAL][DIAGNOSTICS]', model.diagnostics);
   }, [model.diagnostics]);
 
   const kpis = [

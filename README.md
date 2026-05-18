@@ -83,6 +83,7 @@ Before opening a PR, run a lightweight local sanity pass:
 ```bash
 npm run lint
 npm run test
+npm run build
 ```
 
 If your change only touches documentation or planning artifacts, note that in the PR so reviewers can skip runtime validation.
@@ -96,3 +97,7 @@ git diff --name-only
 ```
 
 Confirm the diff includes only documentation files, then mention "docs-only" in your PR summary.
+
+## Note
+
+This README quick guide was last reviewed on 2026-05-18.

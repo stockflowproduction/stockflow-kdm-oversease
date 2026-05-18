@@ -9,6 +9,5 @@ export const financeLog = {
   shift: (_label: string, _data: unknown) => undefined,
   load: (label: string, data: unknown) => {
     if (!FINANCE_LOAD_LOGS_ENABLED) return;
-    console.log(`[FIN][LOAD][${label}]`, data);
   },
 };

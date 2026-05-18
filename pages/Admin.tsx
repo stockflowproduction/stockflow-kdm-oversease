@@ -4,7 +4,7 @@ import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
 import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry } from '../services/storage';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp, ChevronRight } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -13,6 +13,10 @@ import { generateProductCatalogPDF } from '../services/pdf';
 import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
+function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
+  if (!open) return null;
+  return <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4"><Card className="w-full max-w-md"><CardHeader><CardTitle>{title}</CardTitle></CardHeader><CardContent className="space-y-4"><p className="text-sm text-muted-foreground">{message}</p><div className="flex justify-end gap-2"><Button variant="outline" onClick={onCancel}>Cancel</Button><Button className="bg-red-600 hover:bg-red-700" onClick={onConfirm}>{confirmLabel}</Button></div></CardContent></Card></div>;
+}
 
 export default function Admin() {
   const INVENTORY_PAGE_SIZE = 25;
@@ -104,6 +108,11 @@ export default function Admin() {
   const [showAddCategoryInline, setShowAddCategoryInline] = useState(false);
   const [newInlineCategory, setNewInlineCategory] = useState('');
   const [isPurchasePartyInputFocused, setIsPurchasePartyInputFocused] = useState(false);
+  const [pendingPurchaseReverse, setPendingPurchaseReverse] = useState<{ productId: string; historyId: string } | null>(null);
+  const [pendingDeleteProductId, setPendingDeleteProductId] = useState<string | null>(null);
+  const [isBatchDeleteConfirmOpen, setIsBatchDeleteConfirmOpen] = useState(false);
+  const [notice, setNotice] = useState<{ type: 'error' | 'success' | 'info'; message: string } | null>(null);
+  const [purchaseError, setPurchaseError] = useState<string | null>(null);
 
   const refreshData = () => {
     const data = loadData();
@@ -163,7 +172,6 @@ export default function Admin() {
                 margin: 10
             });
         } catch (e) {
-            console.error("Barcode generation failed", e);
         }
     }
   }, [barcodePreview]);
@@ -198,18 +206,22 @@ export default function Admin() {
     const entry = (purchaseTarget.purchaseHistory || []).find((h) => h.id === historyId);
     if (!entry) return;
     if (!entry.purchaseOrderId) {
-      alert('Cannot delete legacy purchase entry without linked order metadata.');
+      setNotice({ type: 'error', message: 'Cannot delete legacy purchase entry without linked order metadata.' });
       return;
     }
-    if (!window.confirm('Reverse this purchase entry? This will reduce stock and cancel linked payable order only when safe.')) return;
+    setPendingPurchaseReverse({ productId: purchaseTarget.id, historyId });
+  };
+  const confirmDeletePurchaseHistoryEntry = async () => {
+    if (!pendingPurchaseReverse) return;
     try {
-      await reverseInventoryPurchaseHistoryEntry(purchaseTarget.id, historyId);
+      await reverseInventoryPurchaseHistoryEntry(pendingPurchaseReverse.productId, pendingPurchaseReverse.historyId);
       const latest = loadData().products;
       setProducts(latest);
-      const nextTarget = latest.find((p) => p.id === purchaseTarget.id) || null;
+      const nextTarget = latest.find((p) => p.id === pendingPurchaseReverse.productId) || null;
       setPurchaseTarget(nextTarget);
+      setPendingPurchaseReverse(null);
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'Unable to reverse purchase entry safely.');
+      setNotice({ type: 'error', message: error instanceof Error ? error.message : 'Unable to reverse purchase entry safely.' });
     }
   };
 
@@ -219,6 +231,38 @@ export default function Admin() {
   ) => (
     <div className="space-y-2">
       {rows.map((h) => (
+        (() => {
+          const allOrders = loadData().purchaseOrders || [];
+          const normalizedHistoryOrderId = String((h as any).purchaseOrderId || (h as any).orderId || (h as any).poId || '').trim();
+          const normalizedReference = String(h.reference || '').trim().toLowerCase();
+          const poTokenInReference = normalizedReference.match(/\b(?:po|order)[-:\s#]*([a-z0-9-]{3,})\b/i)?.[1]?.toLowerCase() || '';
+          const linkedOrder = allOrders.find((order) => {
+            if (normalizedHistoryOrderId && order.id === normalizedHistoryOrderId) return true;
+            const orderRef = String(order.billNumber || order.id || '').trim().toLowerCase();
+            if (!orderRef) return false;
+            if (normalizedReference && (normalizedReference === orderRef || normalizedReference.includes(orderRef) || orderRef.includes(normalizedReference))) return true;
+            if (poTokenInReference && (orderRef === poTokenInReference || orderRef.includes(poTokenInReference))) return true;
+            return false;
+          });
+          const lineQty = toNonNegativeNumber(h.quantity);
+          const unitCost = toNonNegativeNumber(h.unitPrice);
+          const lineTotal = Number((lineQty * unitCost).toFixed(2));
+          const orderTotal = toNonNegativeNumber(linkedOrder?.totalAmount);
+          const orderPaid = toNonNegativeNumber(linkedOrder?.totalPaid);
+          const remainingPayable = toNonNegativeNumber(linkedOrder?.remainingAmount ?? (orderTotal - orderPaid));
+          const paymentHistory = Array.isArray(linkedOrder?.paymentHistory) ? linkedOrder?.paymentHistory : [];
+          const paymentSummary = paymentHistory.reduce((acc: { cash: number; online: number; partyCredit: number }, payment) => {
+            const amount = Math.max(0, Number(payment.amount || 0));
+            const method = String(payment.method || '').toLowerCase();
+            if (method === 'party_credit') acc.partyCredit += amount;
+            else if (method === 'online' || method === 'bank') acc.online += amount;
+            else acc.cash += amount;
+            return acc;
+          }, { cash: 0, online: 0, partyCredit: 0 });
+          const partyName = linkedOrder?.partyName || h.partyName || 'Not linked / Unknown';
+          const poLabel = linkedOrder?.billNumber || linkedOrder?.id || normalizedHistoryOrderId || '—';
+
+          return (
         <div key={h.id} className="rounded-lg border bg-muted/10 p-3 text-xs space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="font-semibold">{productName}</div>
@@ -245,6 +289,23 @@ export default function Admin() {
             <div><span className="text-muted-foreground">Reference:</span> {h.reference || '—'}</div>
             <div><span className="text-muted-foreground">Notes:</span> {h.notes || '—'}</div>
           </div>
+          <div className="rounded border bg-background p-2 space-y-2">
+            <div className="text-[10px] uppercase text-muted-foreground">Purchase Summary</div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-[11px]">
+              <div><span className="text-muted-foreground">Party:</span> <span className="font-medium">{partyName}</span></div>
+              <div><span className="text-muted-foreground">PO:</span> <span className="font-medium">{poLabel}</span></div>
+              <div><span className="text-muted-foreground">Line Total:</span> <span className="font-medium">₹{lineTotal.toFixed(2)}</span></div>
+              <div><span className="text-muted-foreground">Order Total:</span> <span className="font-medium">{linkedOrder ? `₹${orderTotal.toFixed(2)}` : '—'}</span></div>
+              <div><span className="text-muted-foreground">Paid:</span> <span className="font-medium">{linkedOrder ? `₹${orderPaid.toFixed(2)}` : '—'}</span></div>
+              <div><span className="text-muted-foreground">Remaining Payable:</span> <span className="font-medium">{linkedOrder ? `₹${remainingPayable.toFixed(2)}` : '—'}</span></div>
+              <div><span className="text-muted-foreground">Party Credit Used:</span> <span className="font-medium">{linkedOrder ? `₹${paymentSummary.partyCredit.toFixed(2)}` : '—'}</span></div>
+              <div><span className="text-muted-foreground">Cash:</span> <span className="font-medium">{linkedOrder ? `₹${paymentSummary.cash.toFixed(2)}` : '—'}</span></div>
+              <div><span className="text-muted-foreground">Online/Bank:</span> <span className="font-medium">{linkedOrder ? `₹${paymentSummary.online.toFixed(2)}` : '—'}</span></div>
+            </div>
+            {!linkedOrder && (
+              <div className="text-[11px] text-muted-foreground">Order summary unavailable.</div>
+            )}
+          </div>
           <div className="pt-1">
             <Button
               size="sm"
@@ -257,6 +318,8 @@ export default function Admin() {
             </Button>
           </div>
         </div>
+          );
+        })()
       ))}
     </div>
   );
@@ -549,13 +612,12 @@ export default function Admin() {
         closeModal();
       }
     } catch (saveError) {
-      console.error('Product save error:', saveError);
       const message = saveError instanceof Error ? saveError.message : 'Product save failed. Please try again.';
       setError(message);
       const userMessage = message.toLowerCase().includes('image upload failed')
         ? 'Image upload failed. Please try again.'
         : message;
-      alert(userMessage);
+      setNotice({ type: 'error', message: userMessage });
     } finally {
       setIsSaving(false);
     }
@@ -626,6 +688,35 @@ export default function Admin() {
   const purchaseEffectiveBankPaid = useMemo(() => Math.max(0, Number(purchaseBankPaid || 0) || 0), [purchaseBankPaid]);
   const purchaseEffectivePaidAmount = useMemo(() => Number((purchaseEffectiveCashPaid + purchaseEffectiveBankPaid).toFixed(2)), [purchaseEffectiveCashPaid, purchaseEffectiveBankPaid]);
   const purchaseRemainingDue = useMemo(() => Math.max(0, Number((purchaseTotalCost - purchaseEffectivePaidAmount).toFixed(2))), [purchaseTotalCost, purchaseEffectivePaidAmount]);
+  const normalizePartyName = (value?: string) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const partyCreditEntryMatchesParty = (entry: { partyId?: string; partyName?: string }, party: { id?: string; name?: string }) => {
+    const entryId = String(entry.partyId || '').trim();
+    const partyId = String(party.id || '').trim();
+    if (entryId && partyId && entryId === partyId) return true;
+    const entryName = normalizePartyName(entry.partyName);
+    const partyName = normalizePartyName(party.name);
+    return !!entryName && !!partyName && entryName === partyName;
+  };
+  const purchaseAvailablePartyCredit = useMemo(() => {
+    const partyName = purchasePartyName.trim();
+    if (!partyName && !selectedPurchasePartyId) return 0;
+    const parties = getPurchaseParties();
+    const matchedParty = (selectedPurchasePartyId
+      ? parties.find((p) => p.id === selectedPurchasePartyId)
+      : undefined) || parties.find((p) => normalizePartyName(p.name) === normalizePartyName(partyName));
+    const partyRef = { id: matchedParty?.id || selectedPurchasePartyId, name: matchedParty?.name || partyName };
+    return (loadData().partyCreditLedger || [])
+      .filter((entry) => Math.max(0, Number(entry.remainingAmount || 0)) > 0 && partyCreditEntryMatchesParty(entry, partyRef))
+      .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+  }, [purchasePartyName, selectedPurchasePartyId, purchaseParties.length]);
+  const purchaseCreditAppliedPreview = useMemo(
+    () => Math.min(purchaseAvailablePartyCredit, Math.max(0, Number((purchaseTotalCost - purchaseEffectivePaidAmount).toFixed(2)))),
+    [purchaseAvailablePartyCredit, purchaseTotalCost, purchaseEffectivePaidAmount]
+  );
+  const purchaseFinalPayableAfterCredit = useMemo(
+    () => Math.max(0, Number((purchaseTotalCost - purchaseEffectivePaidAmount - purchaseCreditAppliedPreview).toFixed(2))),
+    [purchaseTotalCost, purchaseEffectivePaidAmount, purchaseCreditAppliedPreview]
+  );
 
   useEffect(() => {
     if (editingProduct) return;
@@ -648,10 +739,11 @@ export default function Admin() {
 
   const handleAddPurchase = async () => {
     if (!purchaseTarget) return;
+    setPurchaseError(null);
     const qty = toNonNegativeNumber(purchaseQty);
     const unitPrice = toNonNegativeNumber(purchasePrice);
     if (qty <= 0 || unitPrice <= 0) {
-      alert('Enter valid purchase quantity and unit price.');
+      setPurchaseError('Enter valid purchase quantity and unit price.');
       return;
     }
 
@@ -669,19 +761,19 @@ export default function Admin() {
     const bankPaid = Math.max(0, Number(purchaseBankPaid) || 0);
     const paidAmount = Number((cashPaid + bankPaid).toFixed(2));
     if (!partyName) {
-      alert('Supplier/party name is required.');
+      setPurchaseError('Supplier/party name is required.');
       return;
     }
     if (!Number.isFinite(totalAmount)) {
-      alert('Total cost is invalid.');
+      setPurchaseError('Total cost is invalid.');
       return;
     }
     if (paidAmount > totalAmount + 0.0001) {
-      alert('Payment split exceeds total purchase amount. Please reduce Cash or Bank.');
+      setPurchaseError('Payment split exceeds total purchase amount. Please reduce Cash or Bank.');
       return;
     }
     if (paidAmount < 0 || !Number.isFinite(paidAmount)) {
-      alert('Paid amount must be a valid non-negative number.');
+      setPurchaseError('Paid amount must be a valid non-negative number.');
       return;
     }
 
@@ -746,6 +838,8 @@ export default function Admin() {
       lines: [line],
       totalQuantity: qty,
       totalAmount,
+      totalPaid: paidAmount,
+      remainingAmount: Math.max(0, Number((totalAmount - paidAmount).toFixed(2))),
       paymentHistory: [
         ...(cashPaid > 0 ? [{ id: `pop-init-cash-${Date.now()}`, paidAt: now, amount: cashPaid, method: 'cash' as const, note: purchasePaymentNote.trim() || reference || undefined }] : []),
         ...(bankPaid > 0 ? [{ id: `pop-init-bank-${Date.now()}`, paidAt: now, amount: bankPaid, method: 'online' as const, note: purchasePaymentNote.trim() || reference || undefined }] : []),
@@ -754,7 +848,63 @@ export default function Admin() {
       createdAt: now,
       updatedAt: now,
     };
-    await createPurchaseOrder(order);
+    const shouldTraceAdminPurchase = (() => {
+      if (typeof window === 'undefined') return false;
+      try {
+        const urlHas = new URLSearchParams(window.location.search).get('TRACE_ADMIN_PURCHASE') === '1';
+        const localHas = window.localStorage.getItem('TRACE_ADMIN_PURCHASE') === '1';
+        return urlHas || localHas;
+      } catch {
+        return false;
+      }
+    })();
+    const savedOrder = await createPurchaseOrder(order);
+    const latestData = loadData();
+    const availablePartyCredit = (latestData.partyCreditLedger || [])
+      .filter((entry) => Math.max(0, Number(entry.remainingAmount || 0)) > 0 && partyCreditEntryMatchesParty(entry, { id: party.id, name: party.name }))
+      .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+    const maxCreditUsable = Math.max(0, Number((totalAmount - paidAmount).toFixed(2)));
+    const creditToApply = Math.min(availablePartyCredit, maxCreditUsable);
+    let applyCalled = false;
+    let applyResult: any = null;
+    if (creditToApply > 0) {
+      try {
+        applyCalled = true;
+        applyResult = await applyPartyCreditToPurchaseOrder(savedOrder.id, creditToApply, savedOrder.billNumber || savedOrder.id.slice(-6));
+        const appliedAmount = Math.max(0, Number(applyResult?.appliedAmount || 0));
+        if (appliedAmount <= 0) {
+          setNotice({ type: 'error', message: 'Purchase was saved, but party credit could not be applied. Use Apply Party Credit from Party Statement to repair this purchase.' });
+        } else if (Math.abs(appliedAmount - creditToApply) > 0.01) {
+          setNotice({ type: 'info', message: `Purchase was saved, but only ₹${appliedAmount.toFixed(2)} of ₹${creditToApply.toFixed(2)} party credit was applied. Use Apply Party Credit from Party Statement if needed.` });
+        }
+      } catch (creditApplyError) {
+        setNotice({ type: 'error', message: 'Purchase was saved, but party credit could not be applied. Use Apply Party Credit from Party Statement to repair this purchase.' });
+      }
+    }
+    if (shouldTraceAdminPurchase) {
+      const postApplyData = loadData();
+      const postApplyOrder = (postApplyData.purchaseOrders || []).find((o) => o.id === savedOrder.id);
+      const postApplyLedgerRemaining = (postApplyData.partyCreditLedger || [])
+        .filter((entry) => partyCreditEntryMatchesParty(entry, { id: party.id, name: party.name }))
+        .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      console.log('[ADMIN_PURCHASE_CREDIT_TRACE] ' + JSON.stringify({
+        partyId: party.id,
+        partyName: party.name,
+        totalAmount,
+        cashPaid,
+        bankPaid,
+        maxCreditUsable,
+        availablePartyCreditBeforeSave: availablePartyCredit,
+        creditToApply,
+        orderIdBuilt: orderId,
+        createPurchaseOrderReturnShape: savedOrder ? Object.keys(savedOrder) : null,
+        applyCalled,
+        applyResult,
+        postApplyOrderPaymentHistory: postApplyOrder?.paymentHistory || [],
+        postApplyRemainingAmount: postApplyOrder?.remainingAmount,
+        postApplyLedgerRemaining,
+      }, null, 2));
+    }
     const updatedProduct: Product = {
       ...purchaseTarget,
       stock: toNonNegativeNumber(purchaseTarget.stock) + qty,
@@ -785,6 +935,7 @@ export default function Admin() {
 
     const updated = await updateProduct(updatedProduct);
     setProducts(updated);
+    setPurchaseError(null);
     setPurchaseTarget(null);
     setPurchaseQty('');
     setPurchasePrice('');
@@ -810,15 +961,17 @@ export default function Admin() {
   }, [purchaseTarget, purchaseQty, purchasePrice, selectedPurchaseVariantRow]);
 
   const handleDelete = async (id: string) => {
-    if (window.confirm('Are you sure you want to permanently delete this product?')) {
-      try {
-        const updated = await deleteProduct(id);
-        setProducts(updated);
-        setSelectedProductIds(prev => prev.filter(productId => productId !== id));
-      } catch (deleteError) {
-        console.error('Product delete error:', deleteError);
-        alert('Product deletion failed. Please try again.');
-      }
+    setPendingDeleteProductId(id);
+  };
+  const confirmDeleteProduct = async () => {
+    if (!pendingDeleteProductId) return;
+    try {
+      const updated = await deleteProduct(pendingDeleteProductId);
+      setProducts(updated);
+      setSelectedProductIds(prev => prev.filter(productId => productId !== pendingDeleteProductId));
+      setPendingDeleteProductId(null);
+    } catch (deleteError) {
+      setNotice({ type: 'error', message: 'Product deletion failed. Please try again.' });
     }
   };
 
@@ -871,7 +1024,7 @@ export default function Admin() {
   const confirmDeleteCategory = () => {
       if (!deletingCategory) return;
       if (deleteConfirmName !== deletingCategory) {
-          alert("Category name mismatch. Please enter the exact category name to confirm.");
+          setError("Category name mismatch. Please enter the exact category name to confirm.");
           return;
       }
       const newState = deleteCategory(deletingCategory);
@@ -1028,8 +1181,9 @@ export default function Admin() {
 
   const handleBatchDeleteProducts = async () => {
     if (!selectedProducts.length) return;
-    const confirmed = window.confirm(`Delete ${selectedProducts.length} selected product${selectedProducts.length > 1 ? 's' : ''}?`);
-    if (!confirmed) return;
+    setIsBatchDeleteConfirmOpen(true);
+  };
+  const confirmBatchDeleteProducts = async () => {
 
     try {
       let nextProducts = products;
@@ -1038,9 +1192,9 @@ export default function Admin() {
       }
       setProducts(nextProducts);
       setSelectedProductIds([]);
+      setIsBatchDeleteConfirmOpen(false);
     } catch (deleteError) {
-      console.error('Batch product delete error:', deleteError);
-      alert('Batch product deletion failed. Please try again.');
+      setNotice({ type: 'error', message: 'Batch product deletion failed. Please try again.' });
     }
   };
 
@@ -1152,7 +1306,7 @@ export default function Admin() {
           } catch (e) {
           }
       } else {
-          alert("Sharing not supported on this device/browser.");
+          setNotice({ type: 'info', message: 'Sharing not supported on this device/browser.' });
       }
   };
 
@@ -1487,6 +1641,7 @@ export default function Admin() {
           </div>
       </div>
 
+      {notice && <div className={`rounded-lg border px-3 py-2 text-sm ${notice.type === 'error' ? 'border-red-200 bg-red-50 text-red-700' : notice.type === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>{notice.message}</div>}
       <div className="border rounded-xl bg-card overflow-visible">
         <div className="overflow-x-auto overflow-y-visible">
           <table className="w-full text-sm">
@@ -1557,7 +1712,7 @@ export default function Admin() {
                 <td className="p-3">₹{metrics.combinedAvgBuyPrice.toFixed(2)} / ₹{metrics.combinedAvgSellPrice.toFixed(2)}</td>
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setSelectedPurchasePartyId(''); setPurchaseCashPaid(''); setPurchaseBankPaid(''); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); }}>Add Purchase</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setSelectedPurchasePartyId(''); setPurchaseCashPaid(''); setPurchaseBankPaid(''); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); setPurchaseError(null); }}>Add Purchase</Button>
                     <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
                     <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
@@ -1964,14 +2119,17 @@ export default function Admin() {
                   <div><Label>Total Amount</Label><Input value={purchaseTotalCost.toFixed(2)} readOnly className="bg-muted/30 font-medium" /></div>
                   <div><Label>Cash</Label><Input type="number" min="0" value={purchaseCashPaid} onChange={(e) => setPurchaseCashPaid(e.target.value)} /></div>
                   <div><Label>Bank</Label><Input type="number" min="0" value={purchaseBankPaid} onChange={(e) => setPurchaseBankPaid(e.target.value)} /></div>
-                  <div><Label>Credit</Label><Input value={purchaseRemainingDue.toFixed(2)} readOnly className="bg-muted/30 font-medium" /></div>
+                  <div><Label>Remaining Due Before Party Credit</Label><Input value={purchaseRemainingDue.toFixed(2)} readOnly className="bg-muted/30 font-medium" /></div>
                   <div><Label>Payment Note (optional)</Label><Input value={purchasePaymentNote} onChange={(e) => setPurchasePaymentNote(e.target.value)} /></div>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs pt-2">
                     <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">₹{purchaseTotalCost.toFixed(2)}</div></div>
                     <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Cash Paid</div><div className="font-semibold">₹{purchaseEffectiveCashPaid.toFixed(2)}</div></div>
                     <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Bank Paid</div><div className="font-semibold">₹{purchaseEffectiveBankPaid.toFixed(2)}</div></div>
                     <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Amount Paid</div><div className="font-semibold">₹{purchaseEffectivePaidAmount.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Credit / Remaining Due</div><div className="font-semibold">₹{purchaseRemainingDue.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Due Before Party Credit</div><div className="font-semibold">₹{purchaseRemainingDue.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Party Credit Available</div><div className="font-semibold">₹{purchaseAvailablePartyCredit.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Party Credit Applied</div><div className="font-semibold">₹{purchaseCreditAppliedPreview.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Final Payable After Credit</div><div className="font-semibold">₹{purchaseFinalPayableAfterCredit.toFixed(2)}</div></div>
                   </div>
                 </div>
               </div>
@@ -1980,6 +2138,7 @@ export default function Admin() {
                 <Input type="number" placeholder="New buy price (you can edit)" value={purchaseNextBuyPrice} onChange={(e) => setPurchaseNextBuyPrice(e.target.value)} />
               </div>
               <p className="text-xs text-muted-foreground">Click Average Price to auto-fill, or edit manually before applying.</p>
+              {purchaseError && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{purchaseError}</div>}
               <div className="sticky bottom-0 mt-2 flex flex-col gap-2 rounded-lg border bg-background/95 p-3 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
                 <div className="text-sm">
                   <span className="font-semibold">Total:</span> ₹{purchaseTotalCost.toFixed(2)} · <span className="font-semibold">Paid:</span> ₹{purchaseEffectivePaidAmount.toFixed(2)} · <span className="font-semibold">Due:</span> ₹{purchaseRemainingDue.toFixed(2)}
@@ -2332,6 +2491,9 @@ export default function Admin() {
             onExport={handleExport}
             title={exportType === 'inventory' ? "Export Inventory" : "Export Low Stock Report"}
         />
+      <ConfirmDialog open={!!pendingPurchaseReverse} title="Reverse this purchase?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingPurchaseReverse(null)} onConfirm={() => void confirmDeletePurchaseHistoryEntry()} confirmLabel="Reverse" />
+      <ConfirmDialog open={!!pendingDeleteProductId} title="Delete this product?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingDeleteProductId(null)} onConfirm={() => void confirmDeleteProduct()} confirmLabel="Delete" />
+      <ConfirmDialog open={isBatchDeleteConfirmOpen} title="Delete selected products?" message={`Delete ${selectedProducts.length} selected product${selectedProducts.length > 1 ? 's' : ''}? This action may affect stock/history. Continue?`} onCancel={() => setIsBatchDeleteConfirmOpen(false)} onConfirm={() => void confirmBatchDeleteProducts()} confirmLabel="Delete" />
 
       {/* Image Preview Modal */}
       {previewImage && (

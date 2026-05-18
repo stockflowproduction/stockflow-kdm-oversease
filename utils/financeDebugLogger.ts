@@ -3,6 +3,14 @@ import { AppState, Transaction } from '../types';
 export type FinanceActivity = { type: string; source: string; amount?: number; entity?: string; note?: string; at?: string; method?: string };
 const isToday = (iso: string) => { const d = new Date(iso); const t = new Date(); return d.getFullYear()===t.getFullYear() && d.getMonth()===t.getMonth() && d.getDate()===t.getDate(); };
 
+export const logFinanceSnapshot = (_reason: string, _snapshot: Record<string, number>) => {
+  // intentionally no-op: console output disabled
+};
+
+export const logFinanceActivity = (_activity: FinanceActivity) => {
+  // intentionally no-op: console output disabled
+};
+
 export const computeFinanceSnapshot = (state: AppState) => {
   const txs = state.transactions || [];
   const todayTx = txs.filter(tx => isToday(tx.date));
@@ -33,6 +41,4 @@ export const computeFinanceSnapshot = (state: AppState) => {
   const netProfitToday = netSales - cogsToday - expensesToday;
   return { 'Opening balance': openingBalance, 'Net sales today': netSales, 'Credit due created': creditDueCreated, 'Net profit today': netProfitToday, 'Cash at Sale today': cashAtSale, 'Cash Collections (payments) today': cashCollections, 'Online Collections (payments) today': onlineCollections, 'Cash Refunds today': cashRefunds, 'Expense (cash outflow) today': expenseCashOutflow, 'Net Cash Movement (after expenses) today': netCashMovement, 'Total revenue today': totalRevenue, 'Returns today': returnAmount, 'Net Sales today': netSales, 'Total receivable today': totalReceivable, 'Total Payable today': totalPayable, 'Inventory value cost today': inventoryValueCost, 'Total investment till date today': totalInvestmentTillDate };
 };
-export const logFinanceSnapshot = (reason: string, snapshot: Record<string, number>) => { console.groupCollapsed(`[FINANCE SNAPSHOT] ${reason}`); console.table(snapshot); console.groupEnd(); };
-export const logFinanceActivity = (activity: FinanceActivity) => { console.log('[FINANCE ACTIVITY]', { ...activity, at: activity.at || new Date().toISOString() }); };
 export const emitFinanceSnapshot = (reason: string, state: AppState, activity?: FinanceActivity) => { if (activity) logFinanceActivity(activity); logFinanceSnapshot(reason, computeFinanceSnapshot(state)); };

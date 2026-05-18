@@ -73,15 +73,9 @@ const run = async () => {
   const pending = total - verified;
 
   if (json) {
-    console.log(JSON.stringify({ total, verified, pending, strictRequired, rows }, null, 2));
   } else {
-    console.log(`Backfill verification (strictRequired=${strictRequired})`);
     rows.forEach((r) => {
-      console.log(
-        `- store=${r.storeId} ok=${r.ok} status=${r.status || '-'} version=${r.version || '-'} strict=${r.strictModeEnabled} completedAt=${r.completedAt || '-'} reason=${r.reason}`
-      );
     });
-    console.log(`Summary: total=${total} verified=${verified} pending=${pending}`);
   }
 
   if (pending > 0) {
@@ -90,6 +84,5 @@ const run = async () => {
 };
 
 run().catch((error) => {
-  console.error('[verify-backfill] failed', error);
   process.exit(1);
 });
