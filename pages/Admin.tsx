@@ -6,7 +6,7 @@ import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
 import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
-import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp, ChevronRight } from 'lucide-react';
+import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp, ChevronRight, MoreVertical } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportProductsToExcel } from '../services/excel';
 import { generateProductCatalogPDF } from '../services/pdf';
@@ -113,6 +113,11 @@ export default function Admin() {
   const [isBatchDeleteConfirmOpen, setIsBatchDeleteConfirmOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'error' | 'success' | 'info'; message: string } | null>(null);
   const [purchaseError, setPurchaseError] = useState<string | null>(null);
+  const [inventoryViewTab, setInventoryViewTab] = useState<'inventory' | 'lost-damage'>('inventory');
+  const [openActionMenuProductId, setOpenActionMenuProductId] = useState<string | null>(null);
+  const [lostDamageTarget, setLostDamageTarget] = useState<Product | null>(null);
+  const [lostDamageQtyInput, setLostDamageQtyInput] = useState('');
+  const [lostDamageError, setLostDamageError] = useState<string | null>(null);
 
   const refreshData = () => {
     const data = loadData();
@@ -963,6 +968,39 @@ export default function Admin() {
   const handleDelete = async (id: string) => {
     setPendingDeleteProductId(id);
   };
+  const openLostDamageModal = (product: Product) => {
+    setLostDamageTarget(product);
+    setLostDamageQtyInput(String(Math.max(0, Number(product.lostDamageQty || 0))));
+    setLostDamageError(null);
+    setOpenActionMenuProductId(null);
+  };
+  const saveLostDamage = async () => {
+    if (!lostDamageTarget) return;
+    const existingLost = Math.max(0, Math.floor(Number(lostDamageTarget.lostDamageQty || 0)));
+    const currentStock = Math.max(0, Math.floor(Number(lostDamageTarget.stock || 0)));
+    const sanitizedInput = lostDamageQtyInput.trim() === '' ? 0 : Math.floor(Number(lostDamageQtyInput));
+    const newLost = Number.isFinite(sanitizedInput) ? Math.max(0, sanitizedInput) : 0;
+    const delta = newLost - existingLost;
+    if (delta > currentStock) {
+      setLostDamageError('Lost & damage quantity cannot exceed available stock.');
+      return;
+    }
+    const nextStock = currentStock - delta;
+    const unitCost = Math.max(0, Number(lostDamageTarget.buyPrice || 0));
+    const payload: Product = {
+      ...lostDamageTarget,
+      stock: nextStock,
+      lostDamageQty: newLost > 0 ? newLost : undefined,
+      lostDamageUnitCost: newLost > 0 ? unitCost : undefined,
+      lostDamageUpdatedAt: newLost > 0 ? new Date().toISOString() : undefined,
+    };
+    const updated = await updateProduct(payload);
+    setProducts(updated);
+    setLostDamageTarget(null);
+    setLostDamageQtyInput('');
+    setLostDamageError(null);
+    setNotice({ type: 'success', message: newLost > 0 ? 'Lost & Damage updated.' : 'Lost & Damage cleared.' });
+  };
   const confirmDeleteProduct = async () => {
     if (!pendingDeleteProductId) return;
     try {
@@ -1339,6 +1377,13 @@ export default function Admin() {
     [filteredProducts, inventoryPage]
   );
   const allFilteredProductsSelected = filteredProducts.length > 0 && filteredProducts.every(product => selectedProductIds.includes(product.id));
+  const lostDamageProducts = useMemo(() => products.filter(p => Math.max(0, Number(p.lostDamageQty || 0)) > 0), [products]);
+  const lostDamageStats = useMemo(() => {
+    const totalProducts = lostDamageProducts.length;
+    const totalQty = lostDamageProducts.reduce((acc, p) => acc + Math.max(0, Number(p.lostDamageQty || 0)), 0);
+    const totalAmount = lostDamageProducts.reduce((acc, p) => acc + (Math.max(0, Number(p.lostDamageQty || 0)) * Math.max(0, Number(p.lostDamageUnitCost || p.buyPrice || 0))), 0);
+    return { totalProducts, totalQty, totalAmount };
+  }, [lostDamageProducts]);
 
   useEffect(() => {
     setInventoryPage(1);
@@ -1538,8 +1583,10 @@ export default function Admin() {
               <p className="text-muted-foreground">Manage your stock, products, and pricing.</p>
           </div>
           
-          {/* Executive Stats Cards */}
-	          <Card className="bg-blue-50/50 border-blue-100 shadow-sm relative overflow-hidden group">
+	          {/* Executive Stats Cards */}
+            {inventoryViewTab === 'inventory' ? (
+		          <>
+              <Card className="bg-blue-50/50 border-blue-100 shadow-sm relative overflow-hidden group">
                <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
                    <div>
                        <p className="text-xs font-bold text-blue-600 uppercase tracking-widest">Inventory Value (Cost)</p>
@@ -1549,9 +1596,9 @@ export default function Admin() {
                        <Coins className="w-5 h-5" />
                    </div>
                </CardContent>
-	          </Card>
+		          </Card>
 
-            <Card className="bg-emerald-50/50 border-emerald-100 shadow-sm relative overflow-hidden group">
+	            <Card className="bg-emerald-50/50 border-emerald-100 shadow-sm relative overflow-hidden group">
                <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
                    <div>
                        <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Total Investment till date</p>
@@ -1561,9 +1608,9 @@ export default function Admin() {
                        <TrendingUp className="w-5 h-5" />
                    </div>
                </CardContent>
-	          </Card>
+		          </Card>
 
-	          <Card 
+		          <Card 
             className="bg-amber-50/50 border-amber-100 shadow-sm relative overflow-hidden group cursor-pointer hover:bg-amber-100/50 transition-colors"
             onClick={() => setIsLowStockModalOpen(true)}
           >
@@ -1582,9 +1629,31 @@ export default function Admin() {
                    <div className="absolute right-2 top-2 p-2 bg-amber-100 rounded-lg text-amber-600 opacity-50 group-hover:opacity-100 transition-opacity">
                        <AlertTriangle className="w-5 h-5" />
                    </div>
-               </CardContent>
-          </Card>
-      </div>
+	               </CardContent>
+		          </Card>
+              </>
+            ) : (
+              <>
+              <Card className="bg-rose-50/50 border-rose-100 shadow-sm relative overflow-hidden group">
+	               <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
+	                   <div>
+	                       <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">Lost & Damage Products</p>
+	                       <p className="text-2xl font-bold text-rose-900 mt-1">{lostDamageStats.totalProducts}</p>
+	                   </div>
+	                   <div className="text-xs text-rose-700 mt-1">Qty: {lostDamageStats.totalQty}</div>
+	               </CardContent>
+		          </Card>
+		          <Card className="bg-red-50/50 border-red-100 shadow-sm relative overflow-hidden group">
+	               <CardContent className="p-4 flex flex-col justify-between h-full relative z-10">
+	                   <div>
+	                       <p className="text-xs font-bold text-red-600 uppercase tracking-widest">Total Loss Amount</p>
+	                       <p className="text-2xl font-bold text-red-900 mt-1">₹{lostDamageStats.totalAmount.toFixed(2)}</p>
+	                   </div>
+	               </CardContent>
+		          </Card>
+              </>
+            )}
+	      </div>
 
       {/* 2. Control Tower Toolbar (Responsive Refactor) */}
       <div className="bg-card border rounded-xl p-3 shadow-sm sticky top-0 z-20 bg-opacity-95 backdrop-blur-md">
@@ -1642,6 +1711,12 @@ export default function Admin() {
       </div>
 
       {notice && <div className={`rounded-lg border px-3 py-2 text-sm ${notice.type === 'error' ? 'border-red-200 bg-red-50 text-red-700' : notice.type === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>{notice.message}</div>}
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant={inventoryViewTab === 'inventory' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('inventory')}>Inventory</Button>
+        <Button size="sm" variant={inventoryViewTab === 'lost-damage' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('lost-damage')}>Lost & Damage</Button>
+      </div>
+      {inventoryViewTab === 'inventory' ? (
+      <>
       <div className="border rounded-xl bg-card overflow-visible">
         <div className="overflow-x-auto overflow-y-visible">
           <table className="w-full text-sm">
@@ -1713,9 +1788,23 @@ export default function Admin() {
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" variant="outline" onClick={() => { setPurchaseTarget(product); setPurchaseQty(''); setPurchasePrice(''); setPurchaseNextBuyPrice(''); setPurchaseReference(''); setPurchaseNotes(''); setPurchasePartyName(''); setSelectedPurchasePartyId(''); setPurchaseCashPaid(''); setPurchaseBankPaid(''); setPurchasePaymentNote(''); setPurchaseModalTab('add'); setPurchaseHistoryVariantFilter('all'); setPurchaseError(null); }}>Add Purchase</Button>
-                    <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}><Eye className="w-4 h-4 mr-1"/>View Details</Button>
                     <Button size="sm" variant="outline" onClick={() => openModal(product)}>Edit</Button>
-                    <Button size="sm" variant="destructive" onClick={() => handleDelete(product.id)}>Delete</Button>
+                    <div className="relative">
+                      <Button size="sm" variant="outline" onClick={() => setOpenActionMenuProductId(prev => prev === product.id ? null : product.id)}><MoreVertical className="w-4 h-4" /></Button>
+                      {openActionMenuProductId === product.id && (
+                        <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border bg-white shadow-lg p-1">
+                          <button type="button" className="w-full text-left px-2 py-1.5 text-sm hover:bg-muted rounded" onClick={() => { setViewingProduct(product); setOpenActionMenuProductId(null); }}>
+                            View Details
+                          </button>
+                          <button type="button" className="w-full text-left px-2 py-1.5 text-sm hover:bg-muted rounded" onClick={() => openLostDamageModal(product)}>
+                            Lost & Damage
+                          </button>
+                          <button type="button" className="w-full text-left px-2 py-1.5 text-sm text-red-600 hover:bg-red-50 rounded" onClick={() => { handleDelete(product.id); setOpenActionMenuProductId(null); }}>
+                            Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </td>
               </tr>
@@ -1744,6 +1833,31 @@ export default function Admin() {
           <Button variant="outline" size="sm" onClick={() => setInventoryPage((prev) => Math.max(1, prev - 1))} disabled={inventoryPage === 1}>Prev</Button>
           <span className="text-xs text-muted-foreground">Page {inventoryPage} of {inventoryTotalPages}</span>
           <Button variant="outline" size="sm" onClick={() => setInventoryPage((prev) => Math.min(inventoryTotalPages, prev + 1))} disabled={inventoryPage === inventoryTotalPages}>Next</Button>
+        </div>
+      )}
+      </>
+	      ) : (
+	        <div className="space-y-3">
+	          <div className="border rounded-xl bg-card overflow-hidden">
+	            <table className="w-full text-sm">
+              <thead className="bg-muted/40">
+                <tr><th className="text-left p-3">Product</th><th className="text-left p-3">SKU</th><th className="text-left p-3">Current Stock</th><th className="text-left p-3">Lost & Damage Qty</th><th className="text-left p-3">Purchase Price</th><th className="text-left p-3">Total Loss Amount</th><th className="text-left p-3">Last Updated</th><th className="text-left p-3">Action</th></tr>
+              </thead>
+              <tbody>
+                {lostDamageProducts.map((p) => {
+                  const qty = Math.max(0, Number(p.lostDamageQty || 0));
+                  const unit = Math.max(0, Number(p.lostDamageUnitCost || p.buyPrice || 0));
+                  return (
+                    <tr key={p.id} className="border-t">
+                      <td className="p-3"><div className="flex items-center gap-2"><div className="h-10 w-10 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{p.image ? <img src={p.image} alt={p.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div><div><div className="font-medium">{p.name}</div><div className="text-xs text-muted-foreground">{p.barcode}</div></div></div></td><td className="p-3">{p.barcode}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">₹{unit.toFixed(2)}</td><td className="p-3">₹{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
+                      <td className="p-3"><Button size="sm" variant="outline" onClick={() => openLostDamageModal(p)}>Edit</Button></td>
+                    </tr>
+                  );
+                })}
+                {lostDamageProducts.length === 0 && <tr><td className="p-6 text-center text-muted-foreground" colSpan={8}>No lost & damaged products.</td></tr>}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -2217,6 +2331,7 @@ export default function Admin() {
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Total purchase (variants)</div><div className="font-semibold">{viewingVariantDetails.totalPurchase}</div></div>
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Total sold (variants)</div><div className="font-semibold">{viewingVariantDetails.totalSold}</div></div>
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Avg Buy / Sell</div><div className="font-semibold">₹{viewingVariantDetails.avgBuyPrice.toFixed(2)} / ₹{viewingVariantDetails.avgSellPrice.toFixed(2)}</div></div>
+                    <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Lost & Damage</div><div className="font-semibold">{Math.max(0, Number(viewingProduct.lostDamageQty || 0))} pcs</div></div>
                   </div>
                   <div>
                     <h4 className="font-semibold mb-1.5">Variant Details</h4>
@@ -2247,7 +2362,7 @@ export default function Admin() {
                   </div>
                 </>
               ) : (
-                <div className="text-sm">Current stock: {viewingProduct.stock}, Total purchase: {toNonNegativeNumber(viewingProduct.totalPurchase)}, Total sold: {toNonNegativeNumber(viewingProduct.totalSold)}</div>
+                <div className="text-sm">Current stock: {viewingProduct.stock}, Total purchase: {toNonNegativeNumber(viewingProduct.totalPurchase)}, Total sold: {toNonNegativeNumber(viewingProduct.totalSold)}, Lost & Damage: {Math.max(0, Number(viewingProduct.lostDamageQty || 0))} pcs</div>
               )}
               <h4 className="font-semibold">Purchase History</h4>
               {!viewingPurchaseHistoryRows.length ? (
@@ -2494,6 +2609,31 @@ export default function Admin() {
       <ConfirmDialog open={!!pendingPurchaseReverse} title="Reverse this purchase?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingPurchaseReverse(null)} onConfirm={() => void confirmDeletePurchaseHistoryEntry()} confirmLabel="Reverse" />
       <ConfirmDialog open={!!pendingDeleteProductId} title="Delete this product?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingDeleteProductId(null)} onConfirm={() => void confirmDeleteProduct()} confirmLabel="Delete" />
       <ConfirmDialog open={isBatchDeleteConfirmOpen} title="Delete selected products?" message={`Delete ${selectedProducts.length} selected product${selectedProducts.length > 1 ? 's' : ''}? This action may affect stock/history. Continue?`} onCancel={() => setIsBatchDeleteConfirmOpen(false)} onConfirm={() => void confirmBatchDeleteProducts()} confirmLabel="Delete" />
+      {lostDamageTarget && (
+        <div className="fixed inset-0 z-[130] bg-black/50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader><CardTitle>Lost & Damage</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <div className="text-sm"><span className="font-medium">{lostDamageTarget.name}</span></div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="rounded border p-2">Current Stock: <span className="font-semibold">{Math.max(0, Number(lostDamageTarget.stock || 0))}</span></div>
+                <div className="rounded border p-2">Purchase Price: <span className="font-semibold">₹{Math.max(0, Number(lostDamageTarget.buyPrice || 0)).toFixed(2)}</span></div>
+              </div>
+              <div className="text-xs text-muted-foreground">Existing Lost & Damage Qty: {Math.max(0, Number(lostDamageTarget.lostDamageQty || 0))}</div>
+              <div>
+                <Label>Final Lost & Damage Quantity</Label>
+                <Input type="number" min={0} step={1} value={lostDamageQtyInput} inputMode="numeric" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={(e) => setLostDamageQtyInput(e.target.value.replace(/[^\d]/g, ''))} />
+              </div>
+              <div className="text-sm">Total Loss Amount: <span className="font-semibold">₹{(Math.max(0, Number(lostDamageQtyInput || 0)) * Math.max(0, Number(lostDamageTarget.buyPrice || 0))).toFixed(2)}</span></div>
+              {lostDamageError && <div className="text-sm text-red-600">{lostDamageError}</div>}
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={() => { setLostDamageTarget(null); setLostDamageError(null); }}>Cancel</Button>
+                <Button onClick={() => void saveLostDamage()}>Save</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {/* Image Preview Modal */}
       {previewImage && (

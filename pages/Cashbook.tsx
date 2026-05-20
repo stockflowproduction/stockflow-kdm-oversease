@@ -151,11 +151,13 @@ const getDeletedTransactionLedgerRow = (deleted: any, customerMap: Map<string, s
   return null;
 };
 
-const detectCashbookTransactionType = (txAny: any): 'sale' | 'payment' | 'return' | 'unknown' => {
+const detectCashbookTransactionType = (txAny: any): 'sale' | 'payment' | 'return' | 'customer_credit' | 'customer_cash_out' | 'unknown' => {
   const t = String(txAny?.type || txAny?.transactionType || '').toLowerCase();
   if (t === 'sale' || t === 'historical_reference') return 'sale';
   if (t === 'payment') return 'payment';
   if (t === 'return') return 'return';
+  if (t === 'customer_credit') return 'customer_credit';
+  if (t === 'customer_cash_out') return 'customer_cash_out';
   const hasRefundHint = toNum(txAny?.refundAmount || txAny?.returnTotal) > 0 || Array.isArray(txAny?.returnItems);
   if (hasRefundHint || String(txAny?.returnHandlingMode || '').toLowerCase().includes('refund')) return 'return';
   const method = getCashbookPaymentMethod(txAny);
@@ -191,15 +193,29 @@ const normalizeTransactionForCashbook = (tx: Transaction, customerMap: Map<strin
   if (normalizedType === 'payment') {
     const amount = getCashbookMoney(txAny, ['paidAmount', 'paymentAmount', 'amount', 'total']);
     const payment = getCashbookPaymentMethod(txAny);
+    const explicitReceivableDecrease = toNum(txAny?.paymentAppliedToReceivable);
+    const receivableDecrease = Math.max(0, explicitReceivableDecrease > 0 ? explicitReceivableDecrease : amount);
     return { id: `tx-${tx.id}`, date, type: 'payment', description: `Payment Receipt #${reference} — ${party}`, reference, party, payment,
       cashIn: payment === 'cash' ? amount : 0, cashOut: 0, bankIn: payment === 'online' ? amount : 0, bankOut: 0,
-      receivableIncrease: 0, receivableDecrease: amount, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: Math.max(0, toNum(txAny?.storeCreditCreated)), storeCreditDecrease: 0 };
+      receivableIncrease: 0, receivableDecrease, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: Math.max(0, toNum(txAny?.storeCreditCreated)), storeCreditDecrease: 0 };
   }
   if (normalizedType === 'return') {
     const r = getCashbookReturnBreakdown(txAny);
     return { id: `tx-${tx.id}`, date, type: 'return', description: `Return/Refund #${reference} — ${getTransactionProductSummary(txAny)} — ${party}`, reference, party, payment: r.payment,
     cashIn: 0, cashOut: r.cashOut, bankIn: 0, bankOut: r.bankOut,
     receivableIncrease: 0, receivableDecrease: r.receivableDecrease, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: r.storeCreditIncrease, storeCreditDecrease: 0 };
+  }
+  if (normalizedType === 'customer_credit') {
+    const amount = getCashbookMoney(txAny, ['amount', 'total']);
+    return { id: `tx-${tx.id}`, date, type: 'credit', description: `Credit Created #${reference} — ${party}`, reference, party, payment: 'credit', cashIn: 0, cashOut: 0, bankIn: 0, bankOut: 0, receivableIncrease: amount, receivableDecrease: 0, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 };
+  }
+  if (normalizedType === 'customer_cash_out') {
+    const amount = getCashbookMoney(txAny, ['amount', 'total']);
+    const payment = getCashbookPaymentMethod(txAny);
+    const storeCreditUsed = Math.max(0, toNum(txAny?.storeCreditUsed));
+    const explicitReceivableIncrease = toNum(txAny?.receivableIncrease);
+    const receivableIncrease = Math.max(0, explicitReceivableIncrease > 0 ? explicitReceivableIncrease : (amount - storeCreditUsed));
+    return { id: `tx-${tx.id}`, date, type: 'adjustment', description: `Customer Advance/Cash Out #${reference} — ${party}`, reference, party, payment, cashIn: 0, cashOut: payment === 'cash' ? amount : 0, bankIn: 0, bankOut: payment === 'online' ? amount : 0, receivableIncrease, receivableDecrease: 0, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: storeCreditUsed };
   }
   return { id: `tx-${tx.id}`, date, type: 'adjustment', description: `Transaction #${reference} — ${party}`, reference, party, payment: 'na', cashIn: 0, cashOut: 0, bankIn: 0, bankOut: 0, receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 };
 };

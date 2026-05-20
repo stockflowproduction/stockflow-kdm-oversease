@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import { Button } from './ui';
 import { X } from 'lucide-react';
 
 const DISMISS_KEY = 'stockflow_new_ui_preview_banner_dismissed_v1';
@@ -20,9 +19,14 @@ export const NewUiPreviewBanner: React.FC = () => {
         New UI preview is available — check the preview
       </p>
       <div className="flex items-center gap-2 shrink-0">
-        <Button asChild size="sm" className="h-8 bg-blue-600 hover:bg-blue-700 text-white">
-          <a href={PREVIEW_URL} target="_blank" rel="noopener noreferrer">Show Preview</a>
-        </Button>
+        <a
+          href={PREVIEW_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-8 items-center justify-center rounded-md bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-700"
+        >
+          Show Preview
+        </a>
         <button
           type="button"
           className="text-blue-700 hover:text-blue-900"

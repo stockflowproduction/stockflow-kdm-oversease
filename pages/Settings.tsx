@@ -263,6 +263,14 @@ export default function Settings() {
                       <p>Standard format generates a professional A4 PDF document for downloading or sharing.</p>
                   )}
               </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={Boolean(profile.autoSendInvoiceAfterCreation)}
+                  onChange={(e) => setProfile({ ...profile, autoSendInvoiceAfterCreation: e.target.checked })}
+                />
+                Auto send invoice to customer after invoice creation
+              </label>
            </CardContent>
         </Card>
 

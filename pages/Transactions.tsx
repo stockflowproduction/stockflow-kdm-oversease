@@ -133,7 +133,7 @@ export default function Transactions() {
   );
   const backendRenderableTransactions = useMemo<Transaction[]>(() => backendShadowTransactions.map((tx) => {
     const normalizedType = String(tx.type || '').toLowerCase();
-    const txType = (normalizedType === 'sale' || normalizedType === 'return' || normalizedType === 'payment' || normalizedType === 'historical_reference')
+    const txType = (normalizedType === 'sale' || normalizedType === 'return' || normalizedType === 'payment' || normalizedType === 'historical_reference' || normalizedType === 'customer_credit' || normalizedType === 'customer_cash_out')
       ? normalizedType
       : 'payment';
     const items: CartItem[] = (tx.lineItems || []).map((line, index) => {
@@ -834,11 +834,47 @@ export default function Transactions() {
     const start = (transactionPage - 1) * TRANSACTIONS_ROWS_PER_PAGE;
     return filteredTransactions.slice(start, start + TRANSACTIONS_ROWS_PER_PAGE);
   }, [filteredTransactions, transactionPage]);
-  const paginatedTransactionRows = useMemo(() => paginatedTransactions.map((tx) => {
+  const getTransactionTypeUi = (tx: Transaction) => {
     const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
     const isSale = txType === 'sale' || txType === 'historical_reference';
     const isReturn = tx.type === 'return';
     const isPayment = tx.type === 'payment';
+    if (tx.id.startsWith('upfront-')) {
+      return {
+        typeLabel: String(tx.notes || '').toLowerCase().includes('order payment')
+          ? 'ORDER PAYMENT'
+          : String(tx.notes || '').toLowerCase().includes('legacy paid order')
+            ? 'LEGACY PAID ORDER'
+            : 'ADVANCE ORDER',
+        typeTone: 'payment against due',
+        isSale,
+        isReturn,
+        isPayment,
+      } as const;
+    }
+    if (tx.id.startsWith('supplier-payment-')) {
+      return { typeLabel: 'SUPPLIER PAYMENT', typeTone: 'cash', isSale, isReturn, isPayment } as const;
+    }
+    if (tx.type === 'customer_credit') {
+      return { typeLabel: 'CREDIT CREATED', typeTone: 'credit due', isSale, isReturn, isPayment } as const;
+    }
+    if (tx.type === 'customer_cash_out') {
+      return { typeLabel: 'CASH GIVEN', typeTone: 'return', isSale, isReturn, isPayment } as const;
+    }
+    return {
+      typeLabel: isSale ? (txType === 'historical_reference' ? 'HIST' : 'SALE') : isReturn ? 'RETURN' : 'PAYMENT',
+      typeTone: isReturn ? 'return' : isPayment ? 'payment against due' : (getDisplayPaymentMethod(tx) === 'Credit' ? 'credit due' : getDisplayPaymentMethod(tx)),
+      isSale,
+      isReturn,
+      isPayment,
+    } as const;
+  };
+  const paginatedTransactionRows = useMemo(() => paginatedTransactions.map((tx) => {
+    const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+    const txTypeUi = getTransactionTypeUi(tx);
+    const isSale = txTypeUi.isSale;
+    const isReturn = txTypeUi.isReturn;
+    const isPayment = txTypeUi.isPayment;
     const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
     return {
       tx,
@@ -846,11 +882,8 @@ export default function Transactions() {
       isReturn,
       isPayment,
       itemCount,
-      typeLabel: tx.id.startsWith('upfront-')
-        ? (String(tx.notes || '').toLowerCase().includes('order payment') ? 'ORDER PAYMENT' : String(tx.notes || '').toLowerCase().includes('legacy paid order') ? 'LEGACY PAID ORDER' : 'ADVANCE ORDER')
-        : tx.id.startsWith('supplier-payment-')
-          ? 'SUPPLIER PAYMENT'
-        : (isSale ? (txType === 'historical_reference' ? 'HIST' : 'SALE') : isReturn ? 'RETURN' : 'PAYMENT'),
+      typeLabel: txTypeUi.typeLabel,
+      typeTone: txTypeUi.typeTone,
       typeVariant: 'outline',
       amountClass: isSale ? 'text-green-700' : isReturn ? 'text-red-700' : 'text-blue-700',
     };
@@ -1821,7 +1854,7 @@ export default function Transactions() {
                             </tr>
                         </thead>
                         <tbody className="divide-y">
-                            {paginatedTransactionRows.map(({ tx, isSale, isReturn, isPayment, itemCount, typeLabel, typeVariant, amountClass }) => {
+                            {paginatedTransactionRows.map(({ tx, isSale, isReturn, isPayment, itemCount, typeLabel, typeTone, typeVariant, amountClass }) => {
                                 return (
                                     <tr key={tx.id} className="hover:bg-muted/30 transition-colors group">
                                         <td className="px-4 py-3">
@@ -1846,7 +1879,7 @@ export default function Transactions() {
                                             </div>
                                         </td>
                                         <td className="px-4 py-3">
-                                            <Badge variant={typeVariant} className={`text-[9px] font-bold px-1.5 h-4 ${getPaymentStatusColorClass(isReturn ? 'return' : isPayment ? 'payment against due' : (getDisplayPaymentMethod(tx) === 'Credit' ? 'credit due' : getDisplayPaymentMethod(tx)))}`}>
+                                            <Badge variant={typeVariant} className={`text-[9px] font-bold px-1.5 h-4 ${getPaymentStatusColorClass(typeTone)}`}>
                                                 {typeLabel}
                                             </Badge>
                                         </td>

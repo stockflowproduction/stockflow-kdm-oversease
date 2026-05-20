@@ -18,9 +18,9 @@ import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from
 
 const normalizePhone = (v?: string) => String(v || '').replace(/\D/g, '');
 const normalizeName = (v?: string) => String(v || '').trim().toLowerCase();
-const detectHistoricalTransactionType = (tx: Transaction): 'sale' | 'return' | 'payment' | 'unknown' => {
+const detectHistoricalTransactionType = (tx: Transaction): 'sale' | 'return' | 'payment' | 'customer_credit' | 'customer_cash_out' | 'unknown' => {
   const t = String((tx as any)?.type || '').toLowerCase();
-  if (t === 'sale' || t === 'return' || t === 'payment') return t as any;
+  if (t === 'sale' || t === 'return' || t === 'payment' || t === 'customer_credit' || t === 'customer_cash_out') return t as any;
   const ref = `${(tx as any)?.creditNoteNo || ''} ${(tx as any)?.returnHandlingMode || ''} ${(tx as any)?.notes || ''}`.toLowerCase();
   if (ref.includes('credit note') || ref.includes('return')) return 'return';
   const payHint = `${(tx as any)?.receiptNo || ''} ${(tx as any)?.paymentMethod || ''} ${(tx as any)?.paidAmount || ''}`.toLowerCase();
@@ -118,6 +118,13 @@ export default function Customers() {
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editingCustomerTx, setEditingCustomerTx] = useState<Transaction | null>(null);
+  const [customerActionModalOpen, setCustomerActionModalOpen] = useState(false);
+  const [customerActionType, setCustomerActionType] = useState<'payment' | 'customer_cash_out' | 'customer_credit'>('payment');
+  const [customerActionDateTime, setCustomerActionDateTime] = useState('');
+  const [customerActionAmount, setCustomerActionAmount] = useState('');
+  const [customerActionMethod, setCustomerActionMethod] = useState<'Cash' | 'Online'>('Cash');
+  const [customerActionNote, setCustomerActionNote] = useState('');
+  const [customerActionError, setCustomerActionError] = useState<string | null>(null);
   const [editTxAmount, setEditTxAmount] = useState('');
   const [editTxDate, setEditTxDate] = useState('');
   const [editTxMethod, setEditTxMethod] = useState<'Cash' | 'Online'>('Cash');
@@ -241,6 +248,9 @@ export default function Customers() {
     if (alreadyAdjusted) return alreadyAdjusted;
     return viewingCustomer;
   }, [viewingCustomer, canonicalCustomers]);
+  const viewingCustomerTotalDue = Math.max(0, Number(viewingCustomerCanonical?.totalDue || 0));
+  const viewingCustomerStoreCredit = Math.max(0, Number(viewingCustomerCanonical?.storeCredit || 0));
+  const viewingCustomerNetReceivable = Math.max(0, viewingCustomerTotalDue - viewingCustomerStoreCredit);
   const selectedCustomers = useMemo(
     () => customers.filter(customer => selectedCustomerIds.includes(customer.id)),
     [customers, selectedCustomerIds]
@@ -397,42 +407,49 @@ export default function Customers() {
       ? new Date(b.date || b.createdAt || 0).getTime() - new Date(a.date || a.createdAt || 0).getTime()
       : new Date(a.date || a.createdAt || 0).getTime() - new Date(b.date || b.createdAt || 0).getTime()), [popupCustomerOrders, allOrdersSearch, allOrdersStatus, allOrdersSort]);
 
-  const handleRecordPayment = () => {
-      setPaymentError(null);
-      if (!viewingCustomer) {
-          setPaymentError("Please select a customer.");
-          return;
-      }
-      if (!paymentMethod) {
-          setPaymentError("Please select a payment method.");
-          return;
-      }
-      const amount = Number(paymentAmount);
-      
-      if (!Number.isFinite(amount) || amount <= 0) {
-          setPaymentError("Please enter a valid amount.");
-          return;
-      }
-      // Overpayment is allowed here by design. The storage balance normalizer
-      // settles due first and writes any excess into storeCredit.
-
-      const tx: Transaction = {
-          id: Date.now().toString(),
-          items: [],
-          total: amount,
-          date: new Date().toISOString(),
-          type: 'payment',
-          customerId: viewingCustomer.id,
-          customerName: viewingCustomer.name,
-          paymentMethod: paymentMethod,
-          notes: paymentNote
-      };
-      processTransaction(tx);
-      refreshData();
-      setIsPaymentModalOpen(false);
-      setPaymentAmount('');
-      setPaymentNote('');
-      setPaymentError(null);
+  const toDateTimeLocalNow = () => {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  const openCustomerActionModal = (type: 'payment' | 'customer_cash_out' | 'customer_credit' = 'payment') => {
+    setCustomerActionType(type);
+    setCustomerActionDateTime(toDateTimeLocalNow());
+    setCustomerActionAmount('');
+    setCustomerActionMethod('Cash');
+    setCustomerActionNote('');
+    setCustomerActionError(null);
+    setCustomerActionModalOpen(true);
+  };
+  const handleRecordPayment = () => openCustomerActionModal('payment');
+  const resolveCustomerActionDate = () => {
+    const parsed = customerActionDateTime ? new Date(customerActionDateTime) : null;
+    if (!parsed || Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString();
+  };
+  const handleSubmitCustomerAction = () => {
+    setCustomerActionError(null);
+    if (!viewingCustomer) return setCustomerActionError('Please select a customer.');
+    const actionDate = resolveCustomerActionDate();
+    if (!actionDate) return setCustomerActionError('Please select a valid date and time.');
+    const amount = Number(customerActionAmount);
+    if (!Number.isFinite(amount) || amount <= 0) return setCustomerActionError('Amount must be greater than zero.');
+    if ((customerActionType === 'payment' || customerActionType === 'customer_cash_out') && !customerActionMethod) return setCustomerActionError('Please select a payment method.');
+    const tx: Transaction = {
+      id: Date.now().toString(),
+      items: [],
+      total: Math.abs(amount),
+      date: actionDate,
+      type: customerActionType,
+      customerId: viewingCustomer.id,
+      customerName: viewingCustomer.name,
+      customerPhone: viewingCustomer.phone,
+      paymentMethod: customerActionType === 'customer_credit' ? undefined : customerActionMethod,
+      notes: customerActionNote.trim(),
+    };
+    processTransaction(tx);
+    refreshData();
+    setCustomerActionModalOpen(false);
   };
   const toDateTimeLocalValue = (iso: string) => {
     const date = new Date(iso);
@@ -1000,20 +1017,33 @@ export default function Customers() {
                           </div>
                       </div>
                       <div className="flex gap-3 mt-6">
-                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
-                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-orange-700' : 'text-green-700'}`}>Current Dues</div>
-                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.totalDue || 0) > 0 ? 'text-orange-700' : 'text-green-700'}`}>₹{formatMoneyWhole(viewingCustomerCanonical?.totalDue || 0)}</div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${viewingCustomerTotalDue > 0 ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomerTotalDue > 0 ? 'text-orange-700' : 'text-green-700'}`}>Current Dues</div>
+                               <div className={`text-2xl font-black ${viewingCustomerTotalDue > 0 ? 'text-orange-700' : 'text-green-700'}`}>₹{formatMoneyWhole(viewingCustomerTotalDue)}</div>
+                               <div className="mt-1 text-[10px] text-orange-700/80">Sales, credit created, and cash given increase dues.</div>
                            </div>
-                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
-                               <div className={`text-[10px] uppercase font-black tracking-widest ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>Store Credit</div>
-                               <div className={`text-2xl font-black ${(viewingCustomerCanonical?.storeCredit || 0) > 0 ? 'text-emerald-700' : 'text-slate-700'}`}>₹{formatMoneyWhole(viewingCustomerCanonical?.storeCredit || 0)}</div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${viewingCustomerStoreCredit > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomerStoreCredit > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>Store Credit</div>
+                               <div className={`text-2xl font-black ${viewingCustomerStoreCredit > 0 ? 'text-emerald-700' : 'text-slate-700'}`}>₹{formatMoneyWhole(viewingCustomerStoreCredit)}</div>
+                               <div className="mt-1 text-[10px] text-emerald-700/80">Extra received payments are stored here.</div>
+                           </div>
+                           <div className={`flex-1 p-3 rounded-xl border flex flex-col shadow-sm ${viewingCustomerNetReceivable > 0 ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200'}`}>
+                               <div className={`text-[10px] uppercase font-black tracking-widest ${viewingCustomerNetReceivable > 0 ? 'text-blue-700' : 'text-slate-500'}`}>Net Receivable</div>
+                               <div className={`text-2xl font-black ${viewingCustomerNetReceivable > 0 ? 'text-blue-700' : 'text-slate-700'}`}>₹{formatMoneyWhole(viewingCustomerNetReceivable)}</div>
+                               <div className="mt-1 text-[10px] text-blue-700/80">Dues minus available store credit.</div>
+                               {viewingCustomerNetReceivable <= 0 && viewingCustomerStoreCredit > viewingCustomerTotalDue && (
+                                 <div className="mt-1 text-[10px] text-blue-700/80">Customer has excess store credit.</div>
+                               )}
                            </div>
                            <div className="flex flex-col gap-2">
-                               <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" disabled={(viewingCustomerCanonical?.totalDue || 0) <= 0} onClick={() => { setIsPaymentModalOpen(true); setPaymentError(null); }}>
-                                   <Coins className="w-4 h-4 mr-1.5" /> Record Payment
+                               <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" onClick={() => handleRecordPayment()}>
+                                   <Coins className="w-4 h-4 mr-1.5" /> Receive Payment
                                </Button>
                                <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
                                    <FileText className="w-4 h-4 mr-1.5" /> Get Statement
+                               </Button>
+                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => openCustomerActionModal('payment')}>
+                                   <Plus className="w-4 h-4 mr-1.5" /> + Transaction
                                </Button>
                                
                            </div>
@@ -1049,8 +1079,8 @@ export default function Customers() {
                                             <div>
                                                 <div className="flex items-center gap-2">
                                                     <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">#{tx.id.slice(-6)}</span>
-                                                    <Badge variant="outline" className={`h-4 px-1.5 text-[9px] font-extrabold uppercase ${getPaymentStatusColorClass(tx.type === 'payment' ? 'payment against due' : tx.type === 'return' ? 'return' : tx.paymentMethod === 'Credit' ? 'credit due' : tx.paymentMethod || 'cash')}`}>
-                                                        {tx.type}
+                                                    <Badge variant="outline" className={`h-4 px-1.5 text-[9px] font-extrabold uppercase ${getPaymentStatusColorClass(tx.type === 'payment' ? 'payment against due' : tx.type === 'return' ? 'return' : tx.type === 'customer_cash_out' ? 'cash' : tx.type === 'customer_credit' ? 'credit due' : tx.paymentMethod === 'Credit' ? 'credit due' : tx.paymentMethod || 'cash')}`}>
+                                                        {tx.type === 'customer_cash_out' ? 'CASH GIVEN' : tx.type === 'customer_credit' ? 'CREDIT CREATED' : tx.type === 'historical_reference' ? 'HISTORICAL' : tx.type.toUpperCase()}
                                                     </Badge>
                                                 </div>
                                                 <div className="text-xs font-bold mt-1 text-slate-800">
@@ -1084,6 +1114,16 @@ export default function Customers() {
                                                     >
                                                         <Edit className="w-3.5 h-3.5" />
                                                     </Button>
+                                                ) : tx.type === 'customer_credit' || tx.type === 'customer_cash_out' ? (
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        disabled
+                                                        className="h-7 w-7 text-slate-300"
+                                                        title="Adjustment locked. Edit from Transactions."
+                                                    >
+                                                        <Edit className="w-3.5 h-3.5" />
+                                                    </Button>
                                                 ) : (
                                                     <Button
                                                         variant="ghost"
@@ -1094,6 +1134,9 @@ export default function Customers() {
                                                     >
                                                         <Edit className="w-3.5 h-3.5" />
                                                     </Button>
+                                                )}
+                                                {(tx.type === 'customer_credit' || tx.type === 'customer_cash_out') && (
+                                                  <span className="text-[10px] text-slate-400 hidden sm:inline">Adjustment locked</span>
                                                 )}
                                                 {tx.type !== 'payment' && (
                                                     <Button 
@@ -1187,61 +1230,30 @@ export default function Customers() {
         </div>
       )}
 
-      {isPaymentModalOpen && viewingCustomer && (
-          <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
-              <Card className="w-full max-w-xs shadow-2xl animate-in zoom-in border-t-4 border-t-emerald-600 overflow-hidden">
-                  <CardHeader className="text-center bg-emerald-50/30 pb-4">
-                      <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-emerald-200">
-                          <Coins className="w-6 h-6" />
-                      </div>
-                      <CardTitle className="text-lg">Record Receipt</CardTitle>
-                      <p className="text-xs text-muted-foreground">Settling dues for <b>{viewingCustomer.name}</b></p>
-                  </CardHeader>
-                  <CardContent className="space-y-4 pt-6">
-                      {paymentError && (
-                          <div className="bg-destructive/10 text-destructive text-[10px] p-2 rounded flex items-center gap-2 font-bold border border-destructive/20 animate-in slide-in-from-top-1">
-                              <AlertCircle className="w-4 h-4 shrink-0 text-red-600" /> {paymentError}
-                          </div>
-                      )}
-                      <div className="space-y-2">
-                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Amount Received</Label>
-                        <div className="relative group">
-                          <span className="absolute left-3 top-2.5 font-black text-slate-300 group-focus-within:text-emerald-500 transition-colors">₹</span>
-                          <Input 
-                            type="number" 
-                            className={`pl-8 text-xl font-black text-emerald-700 border-2 bg-slate-50 ${paymentError ? 'border-destructive' : 'focus:border-emerald-500'}`} 
-                            value={paymentAmount} 
-                            onChange={e => { setPaymentAmount(e.target.value); setPaymentError(null); }} 
-                            autoFocus 
-                          />
-                        </div>
-                        <p className="text-[10px] text-muted-foreground font-bold">Due outstanding: ₹{formatMoneyWhole(viewingCustomerCanonical?.totalDue || 0)} (overpayment allowed)</p>
-                        <p className="text-[10px] text-muted-foreground">Any excess above due will be saved as store credit.</p>
-                        {paymentAmountValid && (
-                          <div className="rounded-md border border-emerald-100 bg-emerald-50 px-2 py-1.5 text-[10px]">
-                            <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to due</span><span className="font-bold text-emerald-700">₹{formatMoneyWhole(paymentAppliedToDue)}</span></div>
-                            <div className="mt-1 flex items-center justify-between"><span className="text-muted-foreground">Added to store credit</span><span className="font-bold text-emerald-700">₹{formatMoneyWhole(paymentExcessToCredit)}</span></div>
-                          </div>
-                        )}
-                      </div>
-                      <div className="space-y-2">
-                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Method</Label>
-                        <div className="grid grid-cols-2 gap-2">
-                            <Button size="sm" variant={paymentMethod === 'Cash' ? 'default' : 'outline'} className={paymentMethod === 'Cash' ? 'bg-emerald-600 hover:bg-emerald-700' : ''} onClick={() => setPaymentMethod('Cash')}>Cash</Button>
-                            <Button size="sm" variant={paymentMethod === 'Online' ? 'default' : 'outline'} className={paymentMethod === 'Online' ? 'bg-emerald-600 hover:bg-emerald-700' : ''} onClick={() => setPaymentMethod('Online')}>Online</Button>
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <Label className="text-xs font-bold uppercase text-slate-500 tracking-widest">Note</Label>
-                        <Input placeholder="Ref / Memo" value={paymentNote} onChange={e => setPaymentNote(e.target.value)} />
-                      </div>
-                      <div className="flex gap-2 pt-4 border-t">
-                          <Button variant="ghost" className="flex-1 font-bold text-xs" onClick={() => { setIsPaymentModalOpen(false); setPaymentError(null); }}>Cancel</Button>
-                          <Button className="flex-1 bg-emerald-700 font-bold text-xs shadow-md" onClick={handleRecordPayment}>Finalize</Button>
-                      </div>
-                  </CardContent>
-              </Card>
-          </div>
+      {customerActionModalOpen && viewingCustomer && (
+        <div className="fixed inset-0 bg-black/80 z-[70] flex items-center justify-center p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-md">
+            <CardHeader><CardTitle>+ Transaction — {viewingCustomer.name}</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <Button size="sm" variant={customerActionType === 'payment' ? 'default' : 'outline'} onClick={() => setCustomerActionType('payment')}>Receive Payment</Button>
+                <Button size="sm" variant={customerActionType === 'customer_cash_out' ? 'default' : 'outline'} onClick={() => setCustomerActionType('customer_cash_out')}>Give Cash</Button>
+                <Button size="sm" variant={customerActionType === 'customer_credit' ? 'default' : 'outline'} onClick={() => setCustomerActionType('customer_credit')}>Create Credit</Button>
+              </div>
+              <div><Label>Date & Time</Label><Input type="datetime-local" value={customerActionDateTime} onChange={(e) => setCustomerActionDateTime(e.target.value)} /></div>
+              <div><Label>Amount</Label><Input type="number" min="0" step="0.01" onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()} value={customerActionAmount} onChange={(e) => setCustomerActionAmount(e.target.value)} /></div>
+              {(customerActionType === 'payment' || customerActionType === 'customer_cash_out') && (
+                <div><Label>Method</Label><Select value={customerActionMethod} onChange={(e) => setCustomerActionMethod(e.target.value as 'Cash' | 'Online')}><option value="Cash">Cash</option><option value="Online">Online</option></Select></div>
+              )}
+              <div><Label>Note / Ref</Label><Input value={customerActionNote} onChange={(e) => setCustomerActionNote(e.target.value)} placeholder="Optional" /></div>
+              {customerActionError && <p className="text-xs text-red-600">{customerActionError}</p>}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setCustomerActionModalOpen(false)}>Cancel</Button>
+                <Button onClick={handleSubmitCustomerAction}>Save</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {isDeleteModalOpen && viewingCustomer && (
@@ -1620,6 +1632,7 @@ const buildCustomerLedgerRows = (transactions: Transaction[], upfrontEffects: Ar
     } else if (txKind === 'payment') {
       const explicitApplied = Math.max(0, Number((tx as any).paymentAppliedToReceivable || 0));
       const explicitStoreCredit = Math.max(0, Number((tx as any).storeCreditCreated || 0));
+      const explicitCustomOrderApplied = Math.max(0, Number((tx as any).appliedToCustomOrderReceivable || (tx as any).paymentAppliedToCustomOrderReceivable || 0));
       const alloc = explicitApplied > 0 || explicitStoreCredit > 0
         ? { paymentAppliedToReceivable: Math.min(amount, explicitApplied, runningDue), storeCreditCreated: Math.max(0, explicitStoreCredit > 0 ? explicitStoreCredit : (amount - Math.min(amount, explicitApplied, runningDue))) }
         : allocateCustomerPaymentAgainstCompositeReceivable({ paymentAmount: amount, canonicalDue: runningDue, customOrderDue: 0 });
@@ -1628,14 +1641,27 @@ const buildCustomerLedgerRows = (transactions: Transaction[], upfrontEffects: Ar
       runningDue = Math.max(0, runningDue - dueReduced);
       runningStoreCredit = Math.max(0, runningStoreCredit + storeCreditAdded);
       paymentAmount = amount;
+      const dueLabel = explicitCustomOrderApplied > 0 ? 'Due/custom order' : 'Due';
       statementDescription = `Payment Receipt #${tx.receiptNo || tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}, Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? `, SC +${formatINRPrecise(storeCreditAdded)}` : ''})`;
-      listDescription = `${tx.paymentMethod || 'Cash'} payment ${formatINRPrecise(amount)} • Due -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? ` • Store credit +${formatINRPrecise(storeCreditAdded)}` : ''}`;
+      listDescription = `${tx.paymentMethod || 'Cash'} payment ${formatINRPrecise(amount)} • ${dueLabel} -${formatINRPrecise(dueReduced)}${storeCreditAdded > 0 ? ` • Store credit +${formatINRPrecise(storeCreditAdded)}` : ''}`;
     } else if (txKind === 'return') {
       const allocation = getCanonicalReturnAllocation(tx, processed, runningDue);
       runningDue = Math.max(0, runningDue - allocation.dueReduction);
       runningStoreCredit = Math.max(0, runningStoreCredit + allocation.storeCreditIncrease);
       statementDescription = `Credit Note #${tx.creditNoteNo || tx.id.slice(-6)} — ${getTransactionProductSummary(tx)} (${allocation.mode.replace('_', ' ')}: Cash ${formatINRPrecise(allocation.cashRefund)}, Online ${formatINRPrecise(allocation.onlineRefund)}, Due -${formatINRPrecise(allocation.dueReduction)}, SC +${formatINRPrecise(allocation.storeCreditIncrease)})`;
       listDescription = `Return ${allocation.mode.replace('_', ' ')} • Cash ${formatINRPrecise(allocation.cashRefund)} • Online ${formatINRPrecise(allocation.onlineRefund)} • Due -${formatINRPrecise(allocation.dueReduction)}${allocation.storeCreditIncrease > 0 ? ` • SC +${formatINRPrecise(allocation.storeCreditIncrease)}` : ''}`;
+    } else if (txKind === 'customer_credit') {
+      runningDue = Math.max(0, runningDue + amount);
+      statementDescription = `Credit Created #${tx.receiptNo || tx.id.slice(-6)} (${formatINRPrecise(amount)})`;
+      listDescription = `Credit Created • Due +${formatINRPrecise(amount)}`;
+    } else if (txKind === 'customer_cash_out') {
+      const explicitStoreCreditUsed = Math.max(0, Number((tx as any).storeCreditUsed || 0));
+      const storeCreditUsed = Math.min(explicitStoreCreditUsed, amount, runningStoreCredit);
+      const receivableIncrease = Math.max(0, amount - storeCreditUsed);
+      runningStoreCredit = Math.max(0, runningStoreCredit - storeCreditUsed);
+      runningDue = Math.max(0, runningDue + receivableIncrease);
+      statementDescription = `Customer Advance #${tx.receiptNo || tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)})`;
+      listDescription = `Cash Given • ${tx.paymentMethod || 'Cash'} ${formatINRPrecise(amount)}${storeCreditUsed > 0 ? ` • Store credit used ${formatINRPrecise(storeCreditUsed)}` : ''} • Due +${formatINRPrecise(receivableIncrease)}`;
     } else {
       statementDescription = `Historical Reference #${tx.id.slice(-6)} (unclassified)`;
       listDescription = `Historical reference row (unclassified)`;

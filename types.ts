@@ -23,6 +23,9 @@ export interface Product {
     totalPurchase?: number;
     totalSold?: number;
   }>;
+  lostDamageQty?: number;
+  lostDamageUnitCost?: number;
+  lostDamageUpdatedAt?: string;
   createdAt?: string;
   purchaseHistory?: Array<{
     id: string;
@@ -86,7 +89,7 @@ export interface Transaction {
     creditDue: number;
   };
   date: string;
-  type: 'sale' | 'return' | 'payment' | 'historical_reference';
+  type: 'sale' | 'return' | 'payment' | 'historical_reference' | 'customer_credit' | 'customer_cash_out';
   customerId?: string;
   customerName?: string;
   customerPhone?: string;
@@ -139,6 +142,7 @@ export interface StoreProfile {
   customerCatalogFirstPageName?: string;
   customerCatalogFirstPageMimeType?: string;
   invoiceFormat?: 'standard' | 'thermal';
+  autoSendInvoiceAfterCreation?: boolean;
   adminPin?: string;
 }
 

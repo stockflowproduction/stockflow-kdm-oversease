@@ -418,7 +418,12 @@ export const generateProductCatalogPDF = async (
     doc.save(options?.fileName ?? 'product-catalog.pdf');
 };
 
-export const generateReceiptPDF = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
+export const generateReceiptPDF = (
+  transaction: Transaction,
+  customers: Customer[],
+  paymentDetails?: ReceiptPaymentDetails,
+  options?: { returnDataUrl?: boolean }
+) => {
     const { profile } = loadData();
     const sanitizeHeaderText = (value?: string) => {
       const raw = String(value || '');
@@ -431,6 +436,7 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     };
     
     if (profile.invoiceFormat === 'thermal') {
+        if (options?.returnDataUrl) throw new Error('Thermal invoice data URL preview is not supported yet.');
         printThermalInvoice(transaction, customers, paymentDetails);
         return;
     }
@@ -687,7 +693,19 @@ export const generateReceiptPDF = (transaction: Transaction, customers: Customer
     doc.setFont("helvetica", "bold");
     doc.text("Authorized Signatory", pageWidth - 14, bankY + 25, { align: "right" });
 
+    if (options?.returnDataUrl) {
+      return doc.output('datauristring');
+    }
     doc.save(`${transaction.type === 'return' ? 'credit_note' : 'invoice'}_${documentNo}.pdf`);
+};
+export const generateReceiptPDFDataUrl = (
+  transaction: Transaction,
+  customers: Customer[],
+  paymentDetails?: ReceiptPaymentDetails
+): string => {
+  const out = generateReceiptPDF(transaction, customers, paymentDetails, { returnDataUrl: true });
+  if (typeof out !== 'string') throw new Error('Unable to generate canonical invoice preview.');
+  return out;
 };
 
 export const printThermalInvoice = (transaction: Transaction, customers: Customer[], paymentDetails?: ReceiptPaymentDetails) => {
