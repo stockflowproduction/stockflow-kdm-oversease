@@ -117,7 +117,6 @@ export default function FreightBooking() {
   const [sortBy, setSortBy] = useState<'latest' | 'amount' | 'product'>('latest');
   const [filterBy, setFilterBy] = useState('all');
 
-  const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingInquiry, setEditingInquiry] = useState<FreightInquiry | null>(null);
   const [wizardStep, setWizardStep] = useState<WizardStep>('newInquiry');
   const [sourceMode, setSourceMode] = useState<SourceMode>('new');
@@ -492,11 +491,6 @@ export default function FreightBooking() {
     setShowConfirmSave(false);
   };
 
-  const openNewInquiry = () => {
-    resetWizard();
-    setIsModalOpen(true);
-  };
-
   const openEditInquiry = (inquiry: FreightInquiry) => {
     resetWizard();
     setEditingInquiry(inquiry);
@@ -544,7 +538,7 @@ export default function FreightBooking() {
     setUseCartonPlanning(true);
 
     setWizardStep('review');
-    setIsModalOpen(true);
+    setActiveTab('inquiries');
   };
 
   useEffect(() => {
@@ -845,7 +839,6 @@ export default function FreightBooking() {
 
     refresh();
     setShowConfirmSave(false);
-    setIsModalOpen(false);
     resetWizard();
     } finally {
       setIsSavingInquiry(false);
@@ -987,413 +980,38 @@ export default function FreightBooking() {
       {activeTab === 'inquiries' && (
         <div className="space-y-4">
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div className="relative w-full md:max-w-xl">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <input value={homeSearch} onChange={e => setHomeSearch(e.target.value)} placeholder="Search recent inquiries..." className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-10 pr-4 outline-none focus:border-slate-400" />
+            {wizardStep === 'newInquiry' && (
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+                  <h3 className="text-base font-semibold text-slate-900">Create New Product</h3>
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-[330px_1fr_1fr_1.7fr] rounded-xl border border-slate-200 bg-white overflow-hidden">
+                  <div className="border-b border-slate-200 p-4 lg:border-b-0 lg:border-r"><Label>Product Photo</Label></div>
+                  <div className="border-b border-slate-200 p-4 lg:border-b-0 lg:border-r"><Label>Product Name</Label><Input value={sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductName} onChange={e => setNewProductName(e.target.value)} disabled={sourceMode === 'inventory'} className="mt-2" /></div>
+                  <div className="border-b border-slate-200 p-4 lg:border-b-0 lg:border-r"><Label>Category</Label><Input value={sourceMode === 'inventory' ? (selectedProduct?.category || '') : newProductCategory} onChange={e => setNewProductCategory(e.target.value)} className="mt-2" /></div>
+                  <div className="p-4"><Label>Select Existing Product</Label><button type="button" onClick={() => setIsExistingProductPickerOpen(true)} className="mt-2 flex h-10 w-full items-center justify-between rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700"><span>{selectedProduct ? selectedProduct.name : 'Select product'}</span><ChevronRight className="h-4 w-4 text-slate-500" /></button></div>
+                </div>
+                <div><Label>Party</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select Party</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
+                <div className="rounded-xl border border-slate-200 bg-white overflow-x-auto p-4">
+                  <div className="grid min-w-[1700px] grid-cols-[110px_110px_110px_120px_110px_100px_110px_110px_110px_110px_130px_100px_110px_110px_110px_110px_100px_70px] gap-3">
+                    <div><Label>Pcs/CTN</Label><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.piecesPerCarton ?? '')} onChange={e => updatePricingEntry('new-product-default', 'piecesPerCarton', e.target.value)} className="mt-2" /></div>
+                    <div><Label>Total PCS</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.totalPcs, 0)}</div></div>
+                    <div><Label>RMB/pcs</Label><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.rmbPerPcs ?? '')} onChange={e => updatePricingEntry('new-product-default', 'rmbPerPcs', e.target.value)} className="mt-2" /></div>
+                  </div>
+                </div>
               </div>
-              <div className="flex gap-2">
-                <div className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-600"><Filter className="h-4 w-4" /><select value={filterBy} onChange={e => setFilterBy(e.target.value)} className="bg-transparent outline-none">{availableCategories.map(c => <option key={c} value={c}>{c === 'all' ? 'All Categories' : c}</option>)}</select></div>
-                <div className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-600"><ArrowUpDown className="h-4 w-4" /><select value={sortBy} onChange={e => setSortBy(e.target.value as any)} className="bg-transparent outline-none"><option value="latest">Latest</option><option value="amount">Amount</option><option value="product">Product</option></select></div>
-                <Button onClick={openNewInquiry}><Plus className="w-4 h-4 mr-1" />Create New Inquiry</Button>
-              </div>
-            </div>
+            )}
+            {wizardStep === 'review' && <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">Review step is shown inline. Use save buttons below.</div>}
           </div>
 
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
-            <div className="mb-4 flex items-center justify-between"><h2 className="text-lg font-semibold text-slate-900">Recent Inquiries</h2><div className="text-sm text-slate-500">{inquiryList.length} results</div></div>
+            <div className="mb-4 flex items-center justify-between"><h2 className="text-lg font-semibold text-slate-900">Order History</h2><div className="text-sm text-slate-500">{inquiryList.length} results</div></div>
             {!inquiryList.length ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-slate-500">No recent inquiries yet.</div>
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-slate-500">No data available.</div>
             ) : (
-              <div className="space-y-3">
-                {visibleInquiries.map(({ inquiry, totalPcs, totalInr, totalLines, date, cartonLabels }) => (
-                  <div key={inquiry.id} className="rounded-2xl border border-slate-200 p-4 hover:bg-slate-50">
-                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                      <div className="flex items-center gap-4">
-                        {inquiry.productPhoto ? (
-                          <img src={inquiry.productPhoto} alt={inquiry.productName} className="h-14 w-14 rounded-2xl object-cover border" />
-                        ) : (
-                          <div className="flex h-14 w-14 items-center justify-center rounded-2xl border bg-slate-100 text-[10px] text-slate-500">No image</div>
-                        )}
-                        <div>
-                          <div className="text-base font-semibold text-slate-900">{inquiry.productName}</div>
-                          <div className="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
-                            <span className="inline-flex items-center gap-1"><Building2 className="h-3.5 w-3.5" /> {inquiry.brokerName || 'Owner'}</span>
-                            <span className="inline-flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5" /> {date}</span>
-                            <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" /> {cartonLabels.join(', ') || 'Carton 1'}</span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:min-w-[430px]">
-                        <SummaryCard label="Category" value={inquiry.category || '—'} />
-                        <SummaryCard label="Pcs" value={formatNumber(totalPcs, 0)} />
-                        <SummaryCard label="Lines" value={formatNumber(totalLines, 0)} />
-                        <SummaryCard label="Cost/Pcs" value={`₹${formatNumber(inquiry.productCostPerPiece || 0)}`} />
-                        <SummaryCard label="Sell/Pcs" value={`₹${formatNumber(inquiry.sellingPrice || 0)}`} />
-                        <SummaryCard label="Profit %" value={`${formatNumber(inquiry.profitPercent || 0)}%`} />
-                        <SummaryCard label="Total INR" value={`₹${formatNumber(totalInr)}`} />
-                      </div>
-                      <button onClick={() => openEditInquiry(inquiry)} className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-white">View Details</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <div className="overflow-x-auto"><table className="min-w-[2200px] w-full text-sm"><tbody>{visibleInquiries.map(({ inquiry, totalPcs, totalInr, date }, idx) => <tr key={inquiry.id} className="border-b"><td className="px-2 py-2">{idx + 1}</td><td className="px-2 py-2">{inquiry.productName}</td><td className="px-2 py-2">{inquiry.category || '—'}</td><td className="px-2 py-2">{inquiry.lines?.[0]?.piecesPerCartoon ?? '—'}</td><td className="px-2 py-2">{formatNumber(totalPcs, 0)}</td><td className="px-2 py-2">{inquiry.rmbPricePerPiece ?? '—'}</td><td className="px-2 py-2">{inquiry.totalRmb ?? '—'}</td><td className="px-2 py-2">{inquiry.exchangeRate ?? '—'}</td><td className="px-2 py-2">{inquiry.inrPricePerPiece ?? '—'}</td><td className="px-2 py-2">{inquiry.inrPricePerPiece ?? '—'}</td><td className="px-2 py-2">{inquiry.cbmPerCartoon ?? '—'}</td><td className="px-2 py-2">{inquiry.totalCbm ?? '—'}</td><td className="px-2 py-2">{inquiry.cbmRate ?? '—'}</td><td className="px-2 py-2">{inquiry.cbmCost ?? '—'}</td><td className="px-2 py-2">{inquiry.cbmPerPiece ?? '—'}</td><td className="px-2 py-2">{inquiry.productCostPerPiece ?? '—'}</td><td className="px-2 py-2">—</td><td className="px-2 py-2">{formatNumber(totalInr)}</td><td className="px-2 py-2">{inquiry.sellingPrice ?? '—'}</td><td className="px-2 py-2">{inquiry.profitPercent ?? '—'}</td><td className="px-2 py-2">{date}</td><td className="px-2 py-2"><Button size="sm" variant="outline" onClick={() => openEditInquiry(inquiry)}>View Details</Button></td></tr>)}</tbody></table></div>
             )}
-            {inquiryList.length > visibleInquiryCount && (
-              <div className="mt-4">
-                <Button size="sm" variant="outline" onClick={() => setVisibleInquiryCount((prev) => prev + 25)}>Load More Inquiries</Button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      <Modal
-        open={isModalOpen}
-        onClose={() => { setIsModalOpen(false); resetWizard(); }}
-        title={wizardStep === 'source' ? 'Create Inquiry' : wizardStep === 'product' ? 'Step 1 · Select Product' : wizardStep === 'variants' ? 'Step 2 · Select Variants' : wizardStep === 'pricing' ? 'Step 3 · Enter Pricing' : wizardStep === 'cartons' ? 'Step 4 · Carton Planning' : wizardStep === 'review' ? 'Step 5 · Review & Save' : wizardStep === 'cbm' ? 'Step 6 · CBM Setup' : 'Create New Product'}
-      >
-        
-
-        {wizardStep === 'product' && (
-          <div>
-            <button onClick={() => setWizardStep('source')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="mb-4 relative w-full md:max-w-md"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products..." className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-10 pr-4 outline-none focus:border-slate-400" /></div>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {filteredProducts.map(product => (
-                <button key={product.id} onClick={() => selectProduct(product)} className="overflow-hidden rounded-3xl border border-slate-200 text-left transition hover:-translate-y-0.5 hover:shadow-md">
-                  <img src={product.image || ''} alt={product.name} className="h-44 w-full object-cover" />
-                  <div className="p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="text-base font-semibold text-slate-900">{product.name}</h3><p className="text-sm text-slate-500">{product.category}</p></div><ChevronRight className="mt-1 h-4 w-4 text-slate-400" /></div><div className="mt-4 grid grid-cols-3 gap-2 text-xs"><div className="rounded-2xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Stock</div><div className="font-semibold text-slate-900">{product.stock}</div></div><div className="rounded-2xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Buy</div><div className="font-semibold text-slate-900">₹{product.buyPrice}</div></div><div className="rounded-2xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Sell</div><div className="font-semibold text-slate-900">₹{product.sellPrice}</div></div></div></div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {wizardStep === 'newInquiry' && (
-          <div>
-            <div className="space-y-4">
-              <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-                <h3 className="text-base font-semibold text-slate-900">Create New Product</h3>
-                <p className="mt-1 text-xs text-slate-600">Freight costing for new or existing inventory product</p>
-              </div>
-              <div><Label>Date</Label><Input type="date" value={costingDate} onChange={e => setCostingDate(e.target.value)} /></div>
-              <div className="space-y-4">
-                <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                  <div className="grid grid-cols-1 lg:grid-cols-[330px_1fr_1fr_1.7fr]">
-                    <div className="border-b border-slate-200 p-4 lg:border-b-0 lg:border-r">
-                      <Label>Product Photo</Label>
-                      <div className="mt-3 flex items-center gap-4">
-                        <label className="inline-flex cursor-pointer flex-col items-center justify-center rounded-xl border border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-600 hover:bg-slate-100">
-                          <Input type="file" accept="image/*" onChange={e => { setSourceMode('new'); setSelectedProduct(null); setSelectedVariantKeys([]); handleNewProductImageUpload(e); }} className="hidden" />
-                          <span>Upload Photo</span>
-                        </label>
-                        {(sourceMode === 'inventory' ? selectedProduct?.image : newProductImage) ? (
-                          <img src={(sourceMode === 'inventory' ? selectedProduct?.image : newProductImage) || ''} alt="Selected" className="h-14 w-14 rounded object-cover" />
-                        ) : (
-                          <div className="text-sm text-slate-500">No image</div>
-                        )}
-                      </div>
-                    </div>
-                    <div className="border-b border-slate-200 p-4 lg:border-b-0 lg:border-r">
-                      <Label>Product Name</Label>
-                      <Input value={sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductName} onChange={e => { setSourceMode('new'); setSelectedProduct(null); setSelectedVariantKeys([]); setNewProductName(e.target.value); }} placeholder="Enter product name" className="mt-3" disabled={sourceMode === 'inventory'} />
-                    </div>
-                    <div className="border-b border-slate-200 p-4 lg:border-b-0 lg:border-r">
-                      <Label>Category</Label>
-                      {sourceMode === 'inventory' ? (
-                        <Input value={selectedProduct?.category || ''} readOnly className="mt-3 bg-slate-50" placeholder="Select category" />
-                      ) : (
-                        <select value={newProductCategory} onChange={e => { setSourceMode('new'); setSelectedProduct(null); setSelectedVariantKeys([]); setNewProductCategory(e.target.value); setNewCategoryError(''); }} className="mt-3 h-10 w-full rounded-md border px-3 text-sm"><option value="">{categories.length ? 'Select category' : 'No categories found'}</option>{categories.map(c => <option key={c} value={c}>{c}</option>)}</select>
-                      )}
-                    </div>
-                    <div className="p-4">
-                      <Label>Select Existing Product</Label>
-                      <button type="button" onClick={() => { setSourceMode('inventory'); setNewProductName(''); setNewProductCategory(''); setNewProductImage(''); setNewProductImageFile(null); setExistingPickerMode('products'); setPickerProductForVariant(null); setIsExistingProductPickerOpen(true); }} className="mt-3 flex h-10 w-full items-center justify-between rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700">
-                        <span>{selectedProduct ? formatFreightProductDisplayName(selectedProduct.name, selectedVariants[0]?.variant, selectedVariants[0]?.color) : 'Select product'}</span>
-                        <ChevronRight className="h-4 w-4 text-slate-500" />
-                      </button>
-                      <div className="mt-2 text-xs text-slate-500">{selectedProduct ? `${selectedProduct.category || 'Uncategorized'} · Stock ${selectedProduct.stock}` : 'No product selected'}</div>
-                    </div>
-                  </div>
-                </div>
-                  <div><Label>Party</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={brokerId} onChange={e => setBrokerId(e.target.value)}><option value="">Select Party</option>{brokers.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
-                  <div className="rounded-xl border border-slate-200 bg-white overflow-x-auto p-4">
-                    <div className="grid min-w-[1700px] grid-cols-[110px_110px_110px_120px_110px_100px_110px_110px_110px_110px_130px_100px_110px_110px_110px_110px_100px_70px] gap-3">
-                      <div><Label>Pcs/CTN</Label><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.piecesPerCarton ?? '')} onChange={e => updatePricingEntry('new-product-default', 'piecesPerCarton', e.target.value)} className="mt-2" /></div>
-                      <div><Label>Total PCS</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.totalPcs, 0)}</div></div>
-                      <div><Label>RMB/pcs</Label><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.rmbPerPcs ?? '')} onChange={e => updatePricingEntry('new-product-default', 'rmbPerPcs', e.target.value)} className="mt-2" /></div>
-                      <div><Label>Total RMB</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.totalRmb)}</div></div>
-                      <div><Label>INR Rate</Label><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.conversionRate ?? exchangeRate)} onChange={e => updatePricingEntry('new-product-default', 'conversionRate', e.target.value)} className="mt-2" /></div>
-                      <div><Label>INR</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.inr)}</div></div>
-                      <div><Label>Rate/Pcs</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.ratePerPcs)}</div></div>
-                      <div><Label>CBM/CTN</Label><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.cbmPerCarton ?? '')} onChange={e => updatePricingEntry('new-product-default', 'cbmPerCarton', e.target.value)} className="mt-2" /></div>
-                      <div><Label>Total CBM</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.totalCbm, 3)}</div></div>
-                      <div><Label>CBM Rate</Label><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.cbmRate ?? '')} onChange={e => updatePricingEntry('new-product-default', 'cbmRate', e.target.value)} className="mt-2" /></div>
-                      <div><Label>Total CBM Cost</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.totalCbmCost)}</div></div>
-                      <div><Label>CBM/Pcs</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.cbmPerPcs)}</div></div>
-                      <div><Label>Prod.Cost</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.productCost)}</div></div>
-                      <div><Label>Party Rate</Label><Input type="number" disabled placeholder="Enter rate" className="mt-2 bg-slate-100" /></div>
-                      <div><Label>Total INR</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.totalInr)}</div></div>
-                      <div><Label>Selling Price</Label><Input type="number" value={toNumberInputValue(pricingEntries['new-product-default']?.sellingPrice ?? '')} onChange={e => { updatePricingEntry('new-product-default', 'sellingPrice', e.target.value); setSellingPrice(e.target.value === '' ? '' : Number(e.target.value)); }} className="mt-2" /></div>
-                      <div><Label>Profit %</Label><div className="mt-2 flex h-10 items-center rounded-md border bg-slate-100 px-3 text-sm">{formatNumber(costingMetrics.profitPercent)}%</div></div>
-                      <div><Label>Action</Label><button type="button" onClick={() => { updatePricingEntry('new-product-default', 'piecesPerCarton', ''); updatePricingEntry('new-product-default', 'totalCartons', ''); updatePricingEntry('new-product-default', 'rmbPerPcs', ''); updatePricingEntry('new-product-default', 'conversionRate', ''); updatePricingEntry('new-product-default', 'cbmPerCarton', ''); updatePricingEntry('new-product-default', 'cbmRate', ''); updatePricingEntry('new-product-default', 'sellingPrice', ''); setSellingPrice(''); }} className="mt-2 inline-flex h-10 w-full items-center justify-center rounded-md border border-rose-200 text-rose-600 hover:bg-rose-50"><Trash2 className="h-4 w-4" /></button></div>
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                    <div className="border-b border-slate-200 px-4 py-3 text-xl font-semibold text-slate-900">Order History</div>
-                    <div className="overflow-x-auto">
-                      <table className="min-w-[2200px] w-full text-sm">
-                        <thead className="bg-slate-50 text-slate-700">
-                          <tr>{['#', 'Product Name', 'Category', 'Pcs/CTN', 'Total PCS', 'RMB/pcs', 'Total RMB', 'INR Rate', 'INR', 'Rate/Pcs', 'CBM/CTN', 'Total CBM', 'CBM Rate', 'Total CBM Cost', 'CBM/Pcs', 'Prod.Cost', 'Party Rate', 'Total INR', 'Selling Price', 'Profit %', 'Date', 'Action'].map((h) => <th key={h} className="border-b border-r border-slate-200 px-3 py-3 text-left font-semibold whitespace-nowrap">{h}</th>)}</tr>
-                        </thead>
-                        <tbody>
-                          <tr>
-                            <td colSpan={22} className="py-16 text-center">
-                              <div className="mx-auto flex w-full max-w-sm flex-col items-center gap-2 text-slate-500">
-                                <Package className="h-8 w-8 text-slate-400" />
-                                <div className="text-2xl font-medium text-slate-700">No data available</div>
-                              </div>
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-              </div>
-              {costingErrors.length>0 && <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{costingErrors.map(err => <div key={err}>• {err}</div>)}</div>}
-              <div className="flex justify-end gap-2 border-t border-slate-200 pt-3"><Button variant="outline" onClick={resetWizard}>Reset</Button><button onClick={() => { const errs:string[]=[]; if (!costingDate) errs.push('Date is required.'); if (sourceMode === 'inventory') { if (!selectedProduct?.id) errs.push('Please select an existing product.'); } else if (!newProductName.trim()) errs.push('Item is required.'); if (!brokerId) errs.push('Party is required.'); if (costingMetrics.pcsPerCtn <= 0) errs.push('Pcs/CTN must be greater than 0.'); if (costingMetrics.cartons <= 0) errs.push('Carton must be greater than 0.'); if (costingMetrics.totalPcs <= 0) errs.push('Total Pcs must be greater than 0.'); if (costingMetrics.rmbPerPcs < 0) errs.push('RMB/Pcs must be >= 0.'); if (costingMetrics.inrRate < 0) errs.push('INR Rate must be >= 0.'); if (costingMetrics.cbmPerCtn < 0) errs.push('CBM/CTN must be >= 0.'); if (costingMetrics.cbmRate < 0) errs.push('CBM Rate must be >= 0.'); if (costingMetrics.sellingPrice < 0) errs.push('Selling Price must be >= 0.'); setCostingErrors(errs); if (errs.length) return; setWizardStep('review'); }} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800">Continue to Review <ArrowRight className="h-4 w-4" /></button></div>
-            </div>
-          </div>
-        )}
-
-        {/* Existing-product picker was removed from freight inquiry UI; new inquiry uses new-product costing sheet only. */}
-        {wizardStep === 'variants' && selectedProduct && (
-          <div>
-            <button onClick={() => setWizardStep('product')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="grid gap-5 lg:grid-cols-[280px_1fr]"><div className="rounded-3xl border border-slate-200 p-4"><img src={selectedProduct.image || ''} alt={selectedProduct.name} className="h-48 w-full rounded-2xl object-cover" /><div className="mt-4"><h3 className="text-lg font-semibold text-slate-900">{selectedProduct.name}</h3><p className="text-sm text-slate-500">{selectedProduct.category}</p></div></div><div><div className="mb-4 flex items-center justify-between gap-3"><div><h4 className="text-base font-semibold text-slate-900">Select Variants</h4></div><div className="rounded-2xl bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700">{selectedVariantKeys.length} selected</div></div><div className="grid gap-3 sm:grid-cols-2">{getProductStockRows(selectedProduct).map((variant, idx) => { const key = `${selectedProduct.id}-${idx}-${variant.variant}-${variant.color}`; const selected = selectedVariantKeys.includes(key); return <button key={key} onClick={() => setSelectedVariantKeys(prev => prev.includes(key) ? prev.filter(v => v !== key) : [...prev, key])} className={`rounded-2xl border p-4 text-left transition ${selected ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white hover:bg-slate-50'}`}><div className="flex items-start justify-between gap-3"><div><div className="text-sm font-semibold">{variant.variant} / {variant.color}</div><div className={`mt-1 text-xs ${selected ? 'text-slate-300' : 'text-slate-500'}`}>Stock: {variant.stock}</div></div><div className={`flex h-6 w-6 items-center justify-center rounded-full border ${selected ? 'border-white bg-white text-slate-900' : 'border-slate-300 text-transparent'}`}><Check className="h-4 w-4" /></div></div></button>; })}</div><div className="mt-5 flex justify-end"><button onClick={goToPricing} disabled={!canGoVariantsNext} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next <ArrowRight className="h-4 w-4" /></button></div></div></div>
-          </div>
-        )}
-
-        {wizardStep === 'pricing' && (
-          <div>
-            <button onClick={() => setWizardStep(sourceMode === 'new' ? 'newInquiry' : 'variants')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-
-            {sourceMode === 'new' && (
-              <div className="mb-4 rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                <div className="grid gap-4 md:grid-cols-[110px_1fr]">
-                  <div className="h-24 w-24 overflow-hidden rounded-2xl border border-slate-200 bg-white">
-                    {newProductImage ? <img src={newProductImage} alt={newProductName || 'New product'} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-xs text-slate-400">No Image</div>}
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <SummaryCard label="Product" value={newProductName || '—'} />
-                    <SummaryCard label="Category" value={newProductCategory || '—'} />
-                    <SummaryCard label="Order Type" value={orderType === 'in_house' ? 'In-House' : 'Customer Trade'} />
-                    <SummaryCard label="Broker" value={brokers.find(b => b.id === brokerId)?.name || (orderType === 'in_house' ? 'Owner / Self' : '—')} />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-4">
-              {sourceMode === 'new' && (
-                <div className="flex justify-end">
-                  <Button type="button" variant="outline" onClick={addNewVariantPricingLine}><Plus className="h-4 w-4 mr-1" /> Add Variant</Button>
-                </div>
-              )}
-
-              {activeLines.map((line, idx) => {
-                const metrics = computeCostingMetrics(line, sourceMode === 'new' ? (line.conversionRate ?? exchangeRate) : exchangeRate);
-                const pcs = metrics.totalPcs > 0 ? metrics.totalPcs : toNum(line.pcs);
-                const piecesPerCarton = metrics.pcsPerCtn;
-                const totalCartons = metrics.cartons;
-                const rmbPerPcs = metrics.rmbPerPcs;
-                const totalRmb = metrics.totalRmb;
-                const conversionRate = metrics.inrRate;
-                const totalInr = metrics.inr;
-                const ratePerPcs = metrics.ratePerPcs;
-                const cbmPerCarton = metrics.cbmPerCtn;
-                const totalCbm = metrics.totalCbm;
-                const cbmRate = metrics.cbmRate;
-                const totalCbmCost = metrics.totalCbmCost;
-                const cbmPerPiece = metrics.cbmPerPcs;
-                const productCost = metrics.productCost;
-                const lineSellingPrice = metrics.sellingPrice;
-                const profitPercent = metrics.profitPercent;
-
-                return (
-                  <div key={line.key} className="rounded-3xl border border-slate-200 bg-white p-4">
-                    <div className="mb-3 text-sm font-semibold text-slate-900">Variant {idx + 1}</div>
-                    <div className="grid gap-4 lg:grid-cols-2">
-                      <div>
-                        <Label>Product Name / Variant Name</Label>
-                        <Input value={line.label} onChange={e => updatePricingEntry(line.key, 'label', e.target.value)} placeholder={`${newProductName || 'Product'} / Variant`} />
-                        {sourceMode === 'new' && <div className="mt-1 text-xs text-slate-500">{newProductName || 'New Product'} · {line.label || `Variant ${idx + 1}`}</div>}
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-3">
-                        <div><Label>Pcs/CTN</Label><Input type="number" value={toNumberInputValue(line.piecesPerCarton ?? '')} onChange={e => updatePricingEntry(line.key, 'piecesPerCarton', e.target.value)} /></div>
-                        <div><Label>Total Cartons</Label><Input type="number" value={toNumberInputValue(line.totalCartons ?? '')} onChange={e => updatePricingEntry(line.key, 'totalCartons', e.target.value)} /></div>
-                        <div><Label>Total Pcs</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(pcs, 0)}</div></div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 grid gap-3 md:grid-cols-4">
-                      <div><Label>RMB/pc</Label><Input type="number" value={toNumberInputValue(line.rmbPerPcs)} onChange={e => updatePricingEntry(line.key, 'rmbPerPcs', e.target.value)} /></div>
-                      <div><Label>Total RMB</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(totalRmb)}</div></div>
-                      <div><Label>Conversion Rate</Label><Input type="number" value={toNumberInputValue(sourceMode === 'new' ? (line.conversionRate ?? '') : exchangeRate)} onChange={e => sourceMode === 'new' ? updatePricingEntry(line.key, 'conversionRate', e.target.value) : setExchangeRate(e.target.value === '' ? '' : Number(e.target.value))} /></div>
-                      <div><Label>INR</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(totalInr)}</div></div>
-                      <div><Label>INR Rate/Pcs</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(ratePerPcs)}</div></div>
-                      <div><Label>CBM/CTN</Label><Input type="number" value={toNumberInputValue(line.cbmPerCarton ?? '')} onChange={e => updatePricingEntry(line.key, 'cbmPerCarton', e.target.value)} /></div>
-                      <div><Label>Total CBM</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(totalCbm, 3)}</div></div>
-                      <div><Label>CBM Rate</Label><Input type="number" value={toNumberInputValue(line.cbmRate ?? '')} onChange={e => updatePricingEntry(line.key, 'cbmRate', e.target.value)} /></div>
-                      <div><Label>Total CBM Cost</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(totalCbmCost)}</div></div>
-                      <div><Label>CBM/Piece</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(cbmPerPiece)}</div></div>
-                      <div><Label>Product Cost</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(productCost)}</div></div>
-                      <div><Label>Selling Price</Label><Input type="number" value={toNumberInputValue(sourceMode === 'new' ? (line.sellingPrice ?? '') : sellingPrice)} onChange={e => sourceMode === 'new' ? updatePricingEntry(line.key, 'sellingPrice', e.target.value) : setSellingPrice(e.target.value === '' ? '' : Number(e.target.value))} /></div>
-                      <div><Label>Profit %</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(profitPercent)}%</div></div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50 p-4">
-              <h3 className="text-sm font-semibold text-slate-900">Grand Totals</h3>
-              <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-                <SummaryCard label="Total Variants" value={formatNumber(activeLines.length, 0)} />
-                <SummaryCard label="Grand Total Pcs" value={formatNumber(draftTotals.totalPcs, 0)} />
-                <SummaryCard label="Grand Total RMB" value={formatNumber(draftTotals.totalRmb)} />
-                <SummaryCard label="Grand Total INR" value={`₹${formatNumber(draftTotals.totalInr)}`} />
-                <SummaryCard label="Grand Total CBM" value={formatNumber(activeLines.reduce((s, l) => s + (toNum(l.cbmPerCarton ?? '') * toNum(l.totalCartons ?? '')), 0), 3)} />
-                <SummaryCard label="Grand CBM Cost" value={`₹${formatNumber(activeLines.reduce((s, l) => s + ((toNum(l.cbmPerCarton ?? '') * toNum(l.totalCartons ?? '')) * toNum(l.cbmRate ?? '')), 0))}`} />
-              </div>
-            </div>
-
-            <div className="mt-6 flex justify-end">
-              <button
-                onClick={() => setWizardStep(sourceMode === 'new' ? (useCartonPlanning ? 'cartons' : 'review') : 'cartons')}
-                disabled={!canGoCartonsNext}
-                className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-              >
-                Next: {sourceMode === 'new' && !useCartonPlanning ? 'Review' : 'Carton Planning'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {wizardStep === 'cartons' && (
-          <div>
-            <button onClick={() => setWizardStep('pricing')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            {sourceMode === 'new' && (
-              <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <label className="inline-flex items-center gap-3 text-sm font-medium text-slate-800">
-                  <input type="checkbox" checked={useCartonPlanning} onChange={e => setUseCartonPlanning(e.target.checked)} className="h-4 w-4 rounded border-slate-300" />
-                  Use carton planning
-                </label>
-                <p className="mt-2 text-xs text-slate-500">Turn this on only when you want to split variant quantity across multiple cartons.</p>
-              </div>
-            )}
-
-            {sourceMode === 'new' && !useCartonPlanning ? (
-              <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                Carton planning is turned off. All variant quantities will be saved under Carton 1 automatically.
-              </div>
-            ) : (
-              <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]"><div className="rounded-3xl border border-slate-200 p-4"><h3 className="text-base font-semibold text-slate-900">Select Cartons</h3><div className="mt-4 grid gap-3 md:grid-cols-2">{draftCartons.map(carton => { const selected = selectedCartonIds.includes(carton.id); return <div key={carton.id} className={`rounded-2xl border p-4 ${selected ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><button type="button" onClick={() => toggleCartonSelection(carton.id)} className="text-left"><div className="text-sm font-semibold">{carton.label}</div><div className={`mt-1 text-xs ${selected ? 'text-slate-300' : 'text-slate-500'}`}>{selected ? 'Selected' : 'Not selected'}</div></button>{carton.id !== 'carton-1' && <button type="button" onClick={() => removeCarton(carton.id)} className={`rounded-full border p-1 ${selected ? 'border-slate-600 text-white' : 'border-slate-300 text-slate-500'}`}><Trash2 className="h-3.5 w-3.5" /></button>}</div></div>; })}</div><button onClick={createNewCarton} className="mt-3 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><Plus className="h-4 w-4" /> Add Carton</button></div><div className="rounded-3xl border border-slate-200 p-4"><h3 className="text-base font-semibold text-slate-900">Assign Quantity to Cartons</h3><div className="mt-4 space-y-3">{activeLines.map(line => <div key={line.key} className="rounded-2xl border border-slate-200 p-3"><div className="text-sm font-semibold text-slate-900">{line.label}</div><div className="mt-2 grid gap-3 md:grid-cols-2"><div><Label>Pcs/CTN</Label><select value={lineAssignments[line.key]?.cartonId || selectedCartonIds[0]} onChange={e => updateAssignment(line.key, 'cartonId', e.target.value)} className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm"><option value="">Select carton</option>{selectedCartonIds.map(id => <option key={id} value={id}>{draftCartons.find(c => c.id === id)?.label || id}</option>)}</select></div><div><Label>Qty</Label><Input type="number" value={toNumberInputValue(lineAssignments[line.key]?.qty ?? '')} onChange={e => updateAssignment(line.key, 'qty', e.target.value)} /></div></div><div className="mt-2 text-xs text-slate-500">Expected qty: {formatNumber(toNum(line.pcs), 0)}</div></div>)}</div>{!validateDistribution && <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4" />Assign each variant fully to a selected carton before continuing.</div>}{hasUnusedExtraCartons && <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4" />Remove or use every selected carton before continuing.</div>}</div></div>
-            )}
-            <div className="mt-6 flex justify-end"><button onClick={() => setWizardStep('review')} disabled={!canGoReviewNext} className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Next: Review</button></div>
-          </div>
-        )}
-
-        {wizardStep === 'review' && (
-          <div>
-            <button onClick={() => setWizardStep(sourceMode === 'new' ? (useCartonPlanning ? 'cartons' : 'pricing') : 'cartons')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="space-y-4">
-              <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                <div className="grid gap-4 md:grid-cols-[84px_1fr]">
-                  <div className="h-20 w-20 overflow-hidden rounded-2xl border border-slate-200 bg-white">{(sourceMode === 'inventory' ? selectedProduct?.image : newProductImage) ? <img src={(sourceMode === 'inventory' ? selectedProduct?.image : newProductImage) || ''} alt="Product" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-[10px] text-slate-400">No image</div>}</div>
-                  <div className="grid gap-2 sm:grid-cols-3">
-                    <SummaryCard label="Product" value={sourceMode === 'inventory' ? selectedProduct?.name : newProductName} />
-                    <SummaryCard label="Category" value={sourceMode === 'inventory' ? selectedProduct?.category : newProductCategory || '—'} />
-                    <SummaryCard label="Source" value={sourceMode === 'new' ? 'New Product' : 'Existing Product'} />
-                    <SummaryCard label="Party" value={brokers.find(b => b.id === brokerId)?.name || '—'} />
-                    <SummaryCard label="Date" value={costingDate || '—'} />
-                  </div>
-                </div>
-              </div>
-              <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
-                <div className="rounded-3xl border border-slate-200 p-4">
-                  <h3 className="text-base font-semibold text-slate-900">Breakdown</h3>
-                  <div className="mt-4 space-y-4">
-                  {(sourceMode === 'new' && !useCartonPlanning ? ['carton-1'] : selectedCartonIds).map(cartonId => {
-                    const cartonLabel = draftCartons.find(c => c.id === cartonId)?.label || cartonId;
-                    const lines = effectiveDistributedLines.filter(l => l.cartonId === cartonId);
-                    if (!lines.length) return null;
-                    return <div key={cartonId} className="rounded-2xl border border-slate-200 p-4"><div className="mb-3 text-sm font-semibold text-slate-900">{sourceMode === 'new' && !useCartonPlanning ? 'All Variants' : cartonLabel}</div><div className="space-y-2">{lines.map((line, i) => <div key={`${line.key}-${i}`} className="grid gap-2 rounded-xl border border-slate-100 bg-slate-50 p-3 sm:grid-cols-4"><div><div className="text-[10px] uppercase text-slate-400">Variant</div><div className="text-sm font-medium">{line.label}</div></div><div><div className="text-[10px] uppercase text-slate-400">Qty</div><div className="text-sm">{formatNumber(line.qty, 0)}</div></div><div><div className="text-[10px] uppercase text-slate-400">RMB/Pcs</div><div className="text-sm">{formatNumber(toNum(line.rmbPerPcs))}</div></div><div><div className="text-[10px] uppercase text-slate-400">Total INR</div><div className="text-sm font-semibold">₹{formatNumber(line.totalInr)}</div></div></div>)}</div></div>;
-                  })}
-                  </div>
-                </div>
-
-                <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                <div className="text-sm font-semibold text-slate-900">Review Summary</div>
-                <div className="mt-4 space-y-3">
-                  <div className="rounded-2xl bg-white p-3"><div className="text-xs text-slate-400">Carton Planning</div><div className="font-medium text-slate-900">{sourceMode === 'new' ? (useCartonPlanning ? 'Enabled' : 'Disabled') : 'Enabled'}</div></div>
-                </div>
-                <div className="mt-4 grid grid-cols-2 gap-3"><SummaryCard label="Total Pcs" value={formatNumber(draftTotals.totalPcs, 0)} /><SummaryCard label="Total RMB" value={formatNumber(draftTotals.totalRmb)} /><SummaryCard label="Total INR" value={`₹${formatNumber(draftTotals.totalInr)}`} /><SummaryCard label="Product Cost" value={`₹${formatNumber(draftTotals.totalPcs > 0 ? (draftTotals.totalInr / draftTotals.totalPcs) : 0)}`} /><SummaryCard label="Selling Price" value={`₹${formatNumber(sourceMode === 'new' ? toNum(activeLines[0]?.sellingPrice ?? '') : toNum(sellingPrice))}`} /><SummaryCard label="Lines" value={formatNumber(effectiveDistributedLines.length, 0)} /></div>
-                <button onClick={() => sourceMode === 'new' ? setShowConfirmSave(true) : setWizardStep('cbm')} disabled={!canGoReviewNext} className="mt-4 w-full rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">{sourceMode === 'new' ? 'Review Save Confirmation' : 'Next: CBM Setup'}</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {sourceMode !== 'new' && wizardStep === 'cbm' && (
-          <div>
-            <button onClick={() => setWizardStep('review')} className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"><ArrowLeft className="h-4 w-4" /> Back</button>
-            <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4"><div className="mb-2 text-sm font-semibold text-slate-900">CBM Details</div><div className="space-y-4">{cbmTargets.map(target => { const label = target === 'whole-order' ? 'Common CBM' : (draftCartons.find(c => c.id === target)?.label || target); const count = cbmMode === 'wholeOrder' ? Math.max(selectedCartonIds.length, 1) : 1; const draft = cartonCbmDrafts[target] || { cartons: count, cbmPerCarton: '', cbmRate: '', totalCbm: 0, totalCbmCost: 0 }; return <div key={target} className="rounded-2xl border border-slate-200 bg-white p-4"><div className="mb-3 text-sm font-semibold text-slate-900">{label}</div><div className="grid gap-4 md:grid-cols-2"><div><Label>Total Carton</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{count}</div></div><div><Label>CBM/CTN</Label><Input type="number" value={draft.cbmPerCarton} onChange={e => updateCartonCbm(target, 'cbmPerCarton', e.target.value)} /></div><div><Label>CBM Rate</Label><Input type="number" value={draft.cbmRate} onChange={e => updateCartonCbm(target, 'cbmRate', e.target.value)} /></div><div><Label>Total CBM</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">{formatNumber(draft.totalCbm, 3)}</div></div><div className="md:col-span-2"><Label>Total CBM Cost</Label><div className="flex h-10 items-center rounded-md border bg-slate-50 px-3 text-sm">₹{formatNumber(draft.totalCbmCost)}</div></div></div></div>; })}</div>{!hasValidCbmData && <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4" />Fill CBM/CTN and CBM Rate for all required CBM sections before moving forward.</div>}</div>
-            <div className="mt-6 flex justify-end"><button onClick={() => setShowConfirmSave(true)} disabled={!canSave} className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300">Review Save Confirmation</button></div>
-          </div>
-        )}
-      </Modal>
-      {isExistingProductPickerOpen && (
-        <div className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center p-4">
-          <div className="w-full max-w-5xl max-h-[85vh] overflow-y-auto rounded-2xl bg-white shadow-2xl p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-sm font-semibold text-slate-900">{existingPickerMode === 'products' ? 'Select Existing Product' : `Select Variant · ${pickerProductForVariant?.name || ''}`}</div>
-              <div className="flex gap-2">
-                {existingPickerMode === 'variants' && <Button type="button" variant="outline" size="sm" onClick={() => setExistingPickerMode('products')}>Back</Button>}
-                <Button type="button" variant="outline" size="sm" onClick={() => { setIsExistingProductPickerOpen(false); setExistingPickerMode('products'); setPickerProductForVariant(null); }}>Close</Button>
-              </div>
-            </div>
-            {existingPickerMode === 'products' ? (
-              <div>
-                <div className="mb-3 relative w-full md:max-w-md"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products..." className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-10 pr-4 outline-none focus:border-slate-400" /></div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  {filteredProducts.map(product => (
-                    <div key={product.id} className="rounded-2xl border border-slate-200 p-3">
-                      <div className="flex items-center gap-3">
-                        <img src={product.image || ''} alt={product.name} className="h-12 w-12 rounded object-cover" />
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-semibold">{product.name}</div>
-                          <div className="text-xs text-slate-500">{product.category || 'Uncategorized'} • Stock {product.stock}</div>
-                        </div>
-                        <Button type="button" size="sm" onClick={() => { if (hasMeaningfulVariants(product)) { setPickerProductForVariant(product); setExistingPickerMode('variants'); } else { applyExistingProductSelection(product); } }}>+ Add</Button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {filteredProducts.length === 0 && <div className="rounded-xl border border-dashed p-4 text-sm text-slate-500">No products found.</div>}
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {(pickerProductForVariant ? getProductStockRows(pickerProductForVariant).filter((r) => isMeaningfulValue(r.variant) || isMeaningfulValue(r.color)) : []).map((variant, idx) => (
-                  <div key={`${variant.variant}-${variant.color}-${idx}`} className="flex items-center justify-between rounded-xl border border-slate-200 p-3">
-                    <div className="text-sm">{formatFreightProductDisplayName(pickerProductForVariant?.name, variant.variant, variant.color)} <span className="text-xs text-slate-500">• Stock {variant.stock}</span></div>
-                    <Button type="button" size="sm" onClick={() => pickerProductForVariant && applyExistingProductSelection(pickerProductForVariant, { variant: variant.variant, color: variant.color })}>+ Add</Button>
-                  </div>
-                ))}
-              </div>
-            )}
+            <div className="mt-4 flex justify-end gap-2"><Button variant="outline" onClick={resetWizard}>Reset</Button><Button onClick={() => setWizardStep('review')}>Continue to Review</Button></div>
           </div>
         </div>
       )}

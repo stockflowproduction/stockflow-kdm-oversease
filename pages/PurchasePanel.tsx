@@ -139,7 +139,7 @@ function Modal({ open, title, onClose, children }: { open: boolean; title: strin
 
 export default function PurchasePanel() {
   const ORDERS_PAGE_SIZE = 15;
-  const [activeTab, setActiveTab] = useState<PurchaseTab>('orders');
+  const [activeTab] = useState<PurchaseTab>('parties');
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [parties, setParties] = useState<PurchaseParty[]>([]);
@@ -746,6 +746,19 @@ export default function PurchasePanel() {
     refresh();
   };
 
+
+  const partyCreditsByPartyId = useMemo(() => {
+    const ledger = (loadData().partyCreditLedger || []) as Array<{ partyId?: string; partyName?: string; remainingAmount?: number }>;
+    const map = new Map<string, number>();
+    parties.forEach((party) => {
+      const total = ledger
+        .filter((entry) => partyMatchesCredit({ id: party.id, name: party.name }, entry))
+        .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      map.set(party.id, Number(total.toFixed(2)));
+    });
+    return map;
+  }, [parties, orders]);
+
   const receivePricePreviewRows = useMemo(() => {
     if (!receiveTargetOrder) return [] as Array<{
       key: string;
@@ -795,16 +808,15 @@ export default function PurchasePanel() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Purchase Panel</h1>
-        <p className="text-sm text-muted-foreground">Create and manage purchase orders and reusable parties.</p>
+        <h1 className="text-2xl font-semibold tracking-tight">Purchase Parties</h1>
+        <p className="text-sm text-muted-foreground">Manage purchase parties, payable, credit, and party payment ledger. Purchases are now created from Inventory → Add Purchase.</p>
       </div>
 
       <div className="flex gap-2 border-b pb-2">
-        <Button size="sm" variant={activeTab === 'orders' ? 'default' : 'outline'} onClick={() => setActiveTab('orders')}>Purchase Orders</Button>
-        <Button size="sm" variant={activeTab === 'parties' ? 'default' : 'outline'} onClick={() => setActiveTab('parties')}>Parties</Button>
+        <Button size="sm" variant="default" disabled>Purchase Parties</Button>
       </div>
 
-      {activeTab === 'parties' ? (
+      {true ? (
         <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader><CardTitle>Create Party</CardTitle></CardHeader>
@@ -839,9 +851,13 @@ export default function PurchasePanel() {
                   <div className="text-xs text-muted-foreground">{p.phone || '—'} · GST: {p.gst || '—'} · {p.location || '—'}</div>
                   <div className="text-xs text-muted-foreground">Contact: {p.contactPerson || '—'}</div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-                    <SummaryCard label="Purchase" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPurchase || 0)}`} />
-                    <SummaryCard label="Paid" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPaid || 0)}`} />
-                    <SummaryCard label="Remaining" value={`₹${formatNumber(partyFinancials.get(p.id)?.remaining || 0)}`} />
+                    <SummaryCard label="Payable" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPurchase || 0)}`} />
+                    <SummaryCard label="Payments" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPaid || 0)}`} />
+                    <SummaryCard label="Net Payable" value={`₹${formatNumber(partyFinancials.get(p.id)?.remaining || 0)}`} />
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                    <SummaryCard label="Our Credit" value={`₹${formatNumber((partyCreditsByPartyId.get(p.id) || 0))}`} />
+                    <SummaryCard label="Net Payable" value={`₹${formatNumber(Math.max(0, (partyFinancials.get(p.id)?.remaining || 0) - (partyCreditsByPartyId.get(p.id) || 0)))}`} />
                   </div>
                 </div>
               ))}
@@ -913,7 +929,7 @@ export default function PurchasePanel() {
                         <SummaryCard label="Qty" value={formatNumber(totalQty, 0)} />
                         <SummaryCard label="Lines" value={formatNumber(totalLines, 0)} />
                         <SummaryCard label="Total" value={`₹${formatNumber(totalAmount)}`} />
-                        <SummaryCard label="Paid" value={`₹${formatNumber(order.totalPaid || 0)}`} />
+                        <SummaryCard label="Payments" value={`₹${formatNumber(order.totalPaid || 0)}`} />
                         <SummaryCard label="Due" value={`₹${formatNumber(order.remainingAmount ?? (order.totalAmount - (order.totalPaid || 0)))}`} />
                       </div>
                       <div className="flex gap-2">

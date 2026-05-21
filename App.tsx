@@ -235,7 +235,7 @@ export default function App() {
             <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" />
             <NavItem to="/finance" icon={Landmark} label="Finance" />
             <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />
-            <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Panel" />
+            <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Parties" />
 
             <div className="pt-6">
                 <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Quick Actions</p>
@@ -325,7 +325,7 @@ export default function App() {
                               <div className="p-3 bg-cyan-100 text-cyan-600 rounded-full mb-2">
                                   <ClipboardList className="w-6 h-6" />
                               </div>
-                              <span className="font-medium text-sm">Purchase Panel</span>
+                              <span className="font-medium text-sm">Purchase Parties</span>
                          </Link>
                          <Link to="/settings" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-gray-100 text-gray-600 rounded-full mb-2">
