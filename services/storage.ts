@@ -22,6 +22,7 @@ import {
   UpdatedTransactionRecord,
   CashAdjustment,
   UpfrontOrderLedgerEffect,
+  ManualCashbookEntry,
 } from '../types';
 import { db, auth } from './firebase';
 import { doc, setDoc, onSnapshot, collection, addDoc, serverTimestamp, getDocs, deleteDoc, runTransaction as runFirestoreTransaction, query, where } from 'firebase/firestore';
@@ -364,6 +365,202 @@ export const allocateCustomerPaymentAgainstCompositeReceivable = ({
     paymentAppliedToReceivable,
     storeCreditCreated,
   };
+};
+
+export const auditCustomerPaymentAllocations = (customerId: string) => {
+  const data = loadData();
+  const customers = Array.isArray(data.customers) ? data.customers : [];
+  const transactions = Array.isArray(data.transactions) ? data.transactions : [];
+  const upfrontOrders = Array.isArray(data.upfrontOrders) ? data.upfrontOrders : [];
+  const customer = customers.find((c) => c.id === customerId);
+  const rows: Array<{
+    transactionId: string;
+    date: string;
+    amount: number;
+    saved: {
+      paymentAppliedToReceivable: number;
+      paymentAppliedToCanonicalReceivable: number;
+      paymentAppliedToCustomOrderReceivable: number;
+      storeCreditCreated: number;
+    };
+    natural: {
+      appliedToCanonicalReceivable: number;
+      appliedToCustomOrderReceivable: number;
+      paymentAppliedToReceivable: number;
+      storeCreditCreated: number;
+    };
+    delta: {
+      paymentAppliedToReceivable: number;
+      storeCreditCreated: number;
+    };
+    needsRepair: boolean;
+    reason: string;
+  }> = [];
+
+  let runningCanonicalDue = 0;
+  let runningStoreCredit = 0;
+  let runningCustomOrderDue = 0;
+
+  const customerTxAsc = transactions
+    .filter((tx) => tx.customerId === customerId)
+    .sort((a, b) => {
+      const at = Number.isFinite(new Date(a.date).getTime()) ? new Date(a.date).getTime() : getTimestampHintFromTransactionId(a.id);
+      const bt = Number.isFinite(new Date(b.date).getTime()) ? new Date(b.date).getTime() : getTimestampHintFromTransactionId(b.id);
+      return at - bt;
+    });
+
+  const customEffects = buildUpfrontOrderLedgerEffects(upfrontOrders.filter((o) => o.customerId === customerId), customer ? [customer] : [])
+    .filter((effect) => effect.type !== 'legacy_custom_order_info')
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  let customCursor = 0;
+
+  customerTxAsc.forEach((tx, index) => {
+    const txTime = new Date(tx.date).getTime();
+    while (customCursor < customEffects.length && new Date(customEffects[customCursor].date).getTime() <= txTime) {
+      const effect = customEffects[customCursor];
+      runningCustomOrderDue = roundCurrency(Math.max(0, runningCustomOrderDue + Math.max(0, Number(effect.receivableIncrease || 0)) - Math.max(0, Number(effect.receivableDecrease || 0))));
+      customCursor += 1;
+    }
+
+    const amount = Math.max(0, Math.abs(Number(tx.total || 0)));
+    const priorTransactions = customerTxAsc.slice(0, index);
+    if (tx.type === 'sale' || tx.type === 'historical_reference') {
+      const settlement = tx.type === 'historical_reference' ? getHistoricalAwareSaleSettlement(tx) : getSaleSettlementBreakdown(tx);
+      const historicalIsNonFinancial = tx.type === 'historical_reference' && Boolean((tx as any).displayOnly || (tx as any).nonFinancial);
+      if (!historicalIsNonFinancial) {
+        runningCanonicalDue = roundCurrency(Math.max(0, runningCanonicalDue + settlement.creditDue));
+        const consumedStoreCredit = Math.min(getRequestedStoreCreditUsed(tx), amount, runningStoreCredit);
+        runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit));
+      }
+      return;
+    }
+    if (tx.type === 'return') {
+      const reconciliation = getReturnReconciliationAmounts(tx, priorTransactions, runningCanonicalDue);
+      runningCanonicalDue = roundCurrency(Math.max(0, runningCanonicalDue - reconciliation.dueReduction));
+      runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit + reconciliation.storeCreditIncrease));
+      return;
+    }
+    if (tx.type === 'customer_credit') {
+      runningCanonicalDue = roundCurrency(Math.max(0, runningCanonicalDue + amount));
+      return;
+    }
+    if (tx.type === 'customer_cash_out') {
+      const explicitStoreCreditUsed = Math.max(0, toFiniteNumber((tx as any).storeCreditUsed, Number.NaN));
+      const storeCreditUsed = Number.isFinite(explicitStoreCreditUsed) ? Math.min(explicitStoreCreditUsed, amount, runningStoreCredit) : Math.min(runningStoreCredit, amount);
+      const receivableIncrease = roundCurrency(Math.max(0, amount - storeCreditUsed));
+      runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - storeCreditUsed));
+      runningCanonicalDue = roundCurrency(Math.max(0, runningCanonicalDue + receivableIncrease));
+      return;
+    }
+    if (tx.type !== 'payment') return;
+
+    const savedApplied = Math.max(0, Number((tx as any).paymentAppliedToReceivable || 0));
+    const savedCanonicalApplied = Math.max(0, Number((tx as any).paymentAppliedToCanonicalReceivable || (tx as any).appliedToCanonicalReceivable || 0));
+    const savedCustomApplied = Math.max(0, Number((tx as any).paymentAppliedToCustomOrderReceivable || (tx as any).appliedToCustomOrderReceivable || 0));
+    const savedCredit = Math.max(0, Number((tx as any).storeCreditCreated || 0));
+
+    const natural = allocateCustomerPaymentAgainstCompositeReceivable({
+      paymentAmount: amount,
+      canonicalDue: runningCanonicalDue,
+      customOrderDue: runningCustomOrderDue,
+    });
+    const appliedCanonical = Math.min(runningCanonicalDue, natural.appliedToCanonicalReceivable);
+    const appliedCustom = Math.min(runningCustomOrderDue, natural.appliedToCustomOrderReceivable);
+    runningCanonicalDue = roundCurrency(Math.max(0, runningCanonicalDue - appliedCanonical));
+    runningCustomOrderDue = roundCurrency(Math.max(0, runningCustomOrderDue - appliedCustom));
+    runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit + natural.storeCreditCreated));
+
+    const appliedDelta = roundCurrency((savedApplied || (savedCanonicalApplied + savedCustomApplied)) - natural.paymentAppliedToReceivable);
+    const creditDelta = roundCurrency(savedCredit - natural.storeCreditCreated);
+    const needsRepair = Math.abs(appliedDelta) > 0.01 || Math.abs(creditDelta) > 0.01;
+    rows.push({
+      transactionId: tx.id,
+      date: tx.date,
+      amount,
+      saved: {
+        paymentAppliedToReceivable: savedApplied,
+        paymentAppliedToCanonicalReceivable: savedCanonicalApplied,
+        paymentAppliedToCustomOrderReceivable: savedCustomApplied,
+        storeCreditCreated: savedCredit,
+      },
+      natural: {
+        appliedToCanonicalReceivable: natural.appliedToCanonicalReceivable,
+        appliedToCustomOrderReceivable: natural.appliedToCustomOrderReceivable,
+        paymentAppliedToReceivable: natural.paymentAppliedToReceivable,
+        storeCreditCreated: natural.storeCreditCreated,
+      },
+      delta: {
+        paymentAppliedToReceivable: appliedDelta,
+        storeCreditCreated: creditDelta,
+      },
+      needsRepair,
+      reason: needsRepair ? 'Saved allocation differs from natural chronological allocation.' : 'Matches natural allocation.',
+    });
+  });
+
+  const summary = {
+    mismatchCount: rows.filter((r) => r.needsRepair).length,
+    totalSavedStoreCreditCreated: roundCurrency(rows.reduce((s, r) => s + r.saved.storeCreditCreated, 0)),
+    totalNaturalStoreCreditCreated: roundCurrency(rows.reduce((s, r) => s + r.natural.storeCreditCreated, 0)),
+    storeCreditDelta: roundCurrency(rows.reduce((s, r) => s + r.delta.storeCreditCreated, 0)),
+    savedAppliedToReceivable: roundCurrency(rows.reduce((s, r) => s + (r.saved.paymentAppliedToReceivable || (r.saved.paymentAppliedToCanonicalReceivable + r.saved.paymentAppliedToCustomOrderReceivable)), 0)),
+    naturalAppliedToReceivable: roundCurrency(rows.reduce((s, r) => s + r.natural.paymentAppliedToReceivable, 0)),
+  };
+
+  return { customerId, rows, summary };
+};
+
+export const previewCustomerRepairedAllocationView = (customerId: string) => {
+  const data = loadData();
+  const customers = Array.isArray(data.customers) ? data.customers : [];
+  const transactions = Array.isArray(data.transactions) ? data.transactions : [];
+  const upfrontOrders = Array.isArray(data.upfrontOrders) ? data.upfrontOrders : [];
+  const audit = auditCustomerPaymentAllocations(customerId);
+
+  const currentSnapshot = getCustomerCompositeReceivableBreakdown(customerId, customers, transactions, upfrontOrders);
+  const current = {
+    totalDue: roundCurrency(Math.max(0, currentSnapshot.totalDue)),
+    storeCredit: roundCurrency(Math.max(0, currentSnapshot.storeCredit)),
+    netReceivable: roundCurrency(Math.max(0, currentSnapshot.totalDue - currentSnapshot.storeCredit)),
+  };
+
+  if (!audit.rows.some((row) => row.needsRepair)) {
+    return {
+      customerId,
+      current,
+      repairedPreview: current,
+      delta: { totalDue: 0, storeCredit: 0, netReceivable: 0 },
+      audit,
+    };
+  }
+
+  const byTxId = new Map(audit.rows.map((row) => [row.transactionId, row]));
+  const repairedTransactions = transactions.map((tx) => {
+    if (tx.customerId !== customerId || tx.type !== 'payment') return tx;
+    const row = byTxId.get(tx.id);
+    if (!row || !row.needsRepair) return tx;
+    return {
+      ...tx,
+      paymentAppliedToReceivable: row.natural.paymentAppliedToReceivable,
+      paymentAppliedToCanonicalReceivable: row.natural.appliedToCanonicalReceivable,
+      paymentAppliedToCustomOrderReceivable: row.natural.appliedToCustomOrderReceivable,
+      storeCreditCreated: row.natural.storeCreditCreated,
+    } as Transaction;
+  });
+
+  const repairedSnapshot = getCustomerCompositeReceivableBreakdown(customerId, customers, repairedTransactions, upfrontOrders);
+  const repairedPreview = {
+    totalDue: roundCurrency(Math.max(0, repairedSnapshot.totalDue)),
+    storeCredit: roundCurrency(Math.max(0, repairedSnapshot.storeCredit)),
+    netReceivable: roundCurrency(Math.max(0, repairedSnapshot.totalDue - repairedSnapshot.storeCredit)),
+  };
+  const delta = {
+    totalDue: roundCurrency(repairedPreview.totalDue - current.totalDue),
+    storeCredit: roundCurrency(repairedPreview.storeCredit - current.storeCredit),
+    netReceivable: roundCurrency(repairedPreview.netReceivable - current.netReceivable),
+  };
+
+  return { customerId, current, repairedPreview, delta, audit };
 };
 const toWholeMoney = (value: number) => roundMoneyWhole(toFiniteNumber(value, 0));
 const getWholePayableAfterStoreCredit = (transaction: Transaction) =>
@@ -709,21 +906,48 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
       const safeBTime = Number.isFinite(bTime) ? bTime : 0;
       return safeATime - safeBTime;
     });
+  const customerLedgerDebugEnabled = (() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const queryEnabled = new URLSearchParams(window.location.search).get('customerLedgerDebug') === '1';
+      const storageEnabled = window.localStorage.getItem('CUSTOMER_LEDGER_DEBUG') === '1';
+      return queryEnabled || storageEnabled;
+    } catch {
+      return false;
+    }
+  })();
+  const customerLedgerDebugRows: Array<Record<string, unknown>> = [];
 
   customerTransactionsAsc
     .forEach((tx, index) => {
       const amount = Math.abs(toFiniteNumber(tx.total, 0));
       const priorTransactions = customerTransactionsAsc.slice(0, index);
-      if (tx.type === 'sale') {
-        const settlement = getSaleSettlementBreakdown(tx);
+      if (tx.type === 'sale' || tx.type === 'historical_reference') {
+        const settlement = tx.type === 'historical_reference'
+          ? getHistoricalAwareSaleSettlement(tx)
+          : getSaleSettlementBreakdown(tx);
+        const historicalIsNonFinancial = tx.type === 'historical_reference' && Boolean((tx as any).displayOnly || (tx as any).nonFinancial);
         const consumedStoreCredit = Math.min(
           getRequestedStoreCreditUsed(tx),
           Math.abs(toFiniteNumber(tx.total, 0)),
           toFiniteNonNegative(runningStoreCredit)
         );
-        activeSalesTotal += amount;
-        runningDue = roundCurrency(runningDue + settlement.creditDue);
-        runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit));
+        if (!historicalIsNonFinancial) {
+          activeSalesTotal += amount;
+          runningDue = roundCurrency(runningDue + settlement.creditDue);
+          runningStoreCredit = roundCurrency(Math.max(0, runningStoreCredit - consumedStoreCredit));
+        }
+        if (customerLedgerDebugEnabled) {
+          customerLedgerDebugRows.push({
+            txId: tx.id,
+            type: tx.type,
+            reason: historicalIsNonFinancial ? 'historical_non_financial_skipped' : 'sale_like_due_applied',
+            dueDelta: historicalIsNonFinancial ? 0 : settlement.creditDue,
+            storeCreditDelta: historicalIsNonFinancial ? 0 : -consumedStoreCredit,
+            runningDue,
+            runningStoreCredit,
+          });
+        }
       } else if (tx.type === 'payment') {
         activePaymentsTotal += amount;
         const explicitApplied = Math.max(0, toFiniteNumber((tx as any).paymentAppliedToReceivable, 0));
@@ -732,6 +956,19 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         runningDue = roundCurrency(Math.max(0, runningDue - paymentToDue));
         const paymentRemainder = roundCurrency(explicitApplied > 0 || explicitStoreCredit > 0 ? Math.max(0, explicitStoreCredit || (amount - paymentToDue)) : Math.max(0, amount - paymentToDue));
         if (paymentRemainder > 0) runningStoreCredit = roundCurrency(runningStoreCredit + paymentRemainder);
+        if (customerLedgerDebugEnabled) {
+          customerLedgerDebugRows.push({
+            txId: tx.id,
+            type: tx.type,
+            reason: 'payment_applied',
+            explicitApplied,
+            explicitStoreCredit,
+            paymentToDue,
+            paymentRemainder,
+            runningDue,
+            runningStoreCredit,
+          });
+        }
       } else if (tx.type === 'return') {
         activeReturnsTotal += amount;
         const reconciliation = getReturnReconciliationAmounts(tx, priorTransactions, runningDue);
@@ -748,6 +985,9 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
         runningDue = roundCurrency(runningDue + receivableIncrease);
       }
     });
+  if (customerLedgerDebugEnabled && customerLedgerDebugRows.length) {
+    console.log('[CUSTOMER_LEDGER_DEBUG]', { customerId, rows: customerLedgerDebugRows });
+  }
 
   const totalDue = roundCurrency(Math.max(0, runningDue));
   const storeCredit = roundCurrency(Math.max(0, runningStoreCredit));
@@ -1812,7 +2052,9 @@ const computeCashEstimateFromTransactions = (transactions: Transaction[], delete
   }
   return sum;
   }, 0);
-  const deleteCompensationOutflow = (deleteCompensations || []).reduce((sum, record) => sum + Math.max(0, Number(record.amount) || 0), 0);
+  const deleteCompensationOutflow = (deleteCompensations || [])
+    .filter((record) => record?.isExplicitRefund === true || record?.refundConfirmed === true || record?.source === 'explicit_refund')
+    .reduce((sum, record) => sum + Math.max(0, Number(record.amount) || 0), 0);
   return txCash - deleteCompensationOutflow;
 };
 
@@ -4214,6 +4456,38 @@ export const getPurchaseParties = (): PurchaseParty[] => {
   return data.purchaseParties || [];
 };
 
+export const getManualCashbookEntries = (): ManualCashbookEntry[] => {
+  const data = loadData();
+  return [...(data.manualCashbookEntries || [])]
+    .filter((entry) => !entry?.isDeleted)
+    .sort((a, b) => new Date(b.date || b.createdAt || 0).getTime() - new Date(a.date || a.createdAt || 0).getTime());
+};
+
+export const createManualCashbookEntry = async (
+  payload: Omit<ManualCashbookEntry, 'id' | 'createdAt' | 'updatedAt' | 'paymentMethod'>
+): Promise<ManualCashbookEntry> => {
+  const amount = Math.max(0, Number(payload.amount || 0));
+  if (!(amount > 0)) throw new Error('Amount must be greater than zero.');
+  if (payload.type !== 'cash_in' && payload.type !== 'cash_out') throw new Error('Invalid manual cash entry type.');
+  if (!String(payload.date || '').trim()) throw new Error('Date is required.');
+  const now = new Date().toISOString();
+  const entry: ManualCashbookEntry = {
+    id: `mce-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    date: payload.date,
+    type: payload.type,
+    amount,
+    details: String(payload.details || '').trim(),
+    paymentMethod: 'Cash',
+    createdAt: now,
+    updatedAt: now,
+    isDeleted: Boolean(payload.isDeleted),
+  };
+  const data = loadData();
+  const next = [entry, ...(data.manualCashbookEntries || [])];
+  await saveData({ ...data, manualCashbookEntries: next }, { throwOnError: true, reason: 'createManualCashbookEntry', auditOperation: 'CREATE' });
+  return entry;
+};
+
 export const createPurchaseParty = async (payload: Omit<PurchaseParty, 'id' | 'createdAt' | 'updatedAt'>): Promise<PurchaseParty> => {
   const data = loadData();
   const now = new Date().toISOString();
@@ -4238,6 +4512,12 @@ export const updatePurchaseParty = async (party: PurchaseParty): Promise<Purchas
   const next = (data.purchaseParties || []).map(item => item.id === party.id ? { ...party, updatedAt: new Date().toISOString() } : item);
   await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'updatePurchaseParty', auditOperation: 'UPDATE' });
   return party;
+};
+
+export const deletePurchaseParty = async (partyId: string): Promise<void> => {
+  const data = loadData();
+  const next = (data.purchaseParties || []).filter((item) => item.id !== partyId);
+  await saveData({ ...data, purchaseParties: next }, { throwOnError: true, reason: 'deletePurchaseParty', auditOperation: 'DELETE' });
 };
 
 export const getPurchaseOrders = (): PurchaseOrder[] => {
@@ -4568,6 +4848,140 @@ export const deleteLegacySupplierPaymentGroup = async (allocations: Array<{ orde
     };
   });
   await saveData({ ...data, purchaseOrders: nextOrders }, { throwOnError: true, reason: 'deleteLegacySupplierPaymentGroup', auditOperation: 'DELETE' });
+};
+
+
+export const editInventoryPurchaseHistoryEntry = async (
+  productId: string,
+  purchaseHistoryId: string,
+  patch: { quantity: number; unitPrice: number }
+): Promise<Product[]> => {
+  const data = loadData();
+  const products = [...(data.products || [])];
+  const productIndex = products.findIndex((p) => p.id === productId);
+  if (productIndex < 0) failValidation('PRODUCT_NOT_FOUND', 'Product not found.', { productId });
+
+  const product = products[productIndex];
+  const historyIndex = (product.purchaseHistory || []).findIndex((h) => h.id === purchaseHistoryId);
+  if (historyIndex < 0) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Purchase history entry not found.', { productId, purchaseHistoryId });
+  const history = (product.purchaseHistory || [])[historyIndex];
+  if (!history.purchaseOrderId) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Legacy purchase entry cannot be safely edited without linked purchase order.', { productId, purchaseHistoryId });
+
+  const orders = [...(data.purchaseOrders || [])];
+  const orderIndex = orders.findIndex((o) => o.id === history.purchaseOrderId);
+  if (orderIndex < 0) failValidation('PURCHASE_ORDER_NOT_FOUND', 'Linked purchase order not found.', { purchaseOrderId: history.purchaseOrderId });
+  const order = orders[orderIndex];
+
+  const newQty = Math.max(0, Number(patch.quantity || 0));
+  const newUnitPrice = Math.max(0, Number(patch.unitPrice || 0));
+  if (newQty <= 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Purchase quantity must be greater than zero.', { quantity: patch.quantity });
+  if (!Number.isFinite(newUnitPrice) || newUnitPrice < 0) failValidation('PURCHASE_ORDER_INVALID_STATE', 'Purchase unit price must be zero or greater.', { unitPrice: patch.unitPrice });
+
+  const oldQty = Math.max(0, Number(history.quantity || 0));
+  const qtyDelta = newQty - oldQty;
+  if (qtyDelta < 0 && Math.max(0, Number(product.stock || 0)) < Math.abs(qtyDelta)) {
+    failValidation('PURCHASE_ORDER_INVALID_STATE', 'Cannot reduce purchase quantity because current stock is lower than the reduction.', { stock: product.stock, reduction: Math.abs(qtyDelta) });
+  }
+
+  const lines = Array.isArray(order.lines) ? [...order.lines] : [];
+  let targetLineIndex = -1;
+  if (lines.length === 1) {
+    targetLineIndex = 0;
+  } else {
+    const variant = String(history.variant || '').trim().toLowerCase();
+    const color = String(history.color || '').trim().toLowerCase();
+    const candidates = lines
+      .map((line, idx) => ({ line, idx }))
+      .filter(({ line }) => String(line.productId || '').trim() === productId)
+      .filter(({ line }) => String(line.variant || '').trim().toLowerCase() === variant && String(line.color || '').trim().toLowerCase() === color)
+      .filter(({ line }) => Math.abs(Math.max(0, Number(line.quantity || 0)) - oldQty) < 0.0001);
+    if (candidates.length === 1) targetLineIndex = candidates[0].idx;
+  }
+  if (targetLineIndex < 0) {
+    failValidation('PURCHASE_ORDER_INVALID_STATE', 'Cannot edit this purchase because the linked purchase order line could not be identified.', { purchaseOrderId: order.id, purchaseHistoryId });
+  }
+
+  const line = lines[targetLineIndex];
+  lines[targetLineIndex] = { ...line, quantity: newQty, unitCost: newUnitPrice, totalCost: Number((newQty * newUnitPrice).toFixed(2)) };
+
+  const totalQuantity = lines.reduce((sum, l) => sum + Math.max(0, Number(l.quantity || 0)), 0);
+  const totalAmount = Number(lines.reduce((sum, l) => sum + Math.max(0, Number(l.totalCost || 0)), 0).toFixed(2));
+  const paymentHistory = Array.isArray(order.paymentHistory) ? [...order.paymentHistory] : [];
+  const coveredAmount = Number(paymentHistory.reduce((sum, payment: any) => sum + Math.max(0, Number(payment.amount || 0)), 0).toFixed(2));
+  const remainingAmount = Math.max(0, Number((totalAmount - coveredAmount).toFixed(2)));
+  const overpaidAmount = Math.max(0, Number((coveredAmount - totalAmount).toFixed(2)));
+
+  const now = new Date().toISOString();
+  const nextBuyPrice = Number(newUnitPrice.toFixed(2));
+  const nextHistory = [...(product.purchaseHistory || [])];
+  nextHistory[historyIndex] = {
+    ...history,
+    quantity: newQty,
+    unitPrice: newUnitPrice,
+    nextBuyPrice,
+    date: history.date || now,
+    notes: `${history.notes || ''}${history.notes ? ' | ' : ''}Edited purchase entry`,
+  } as any;
+
+  let nextStockRows = Array.isArray(product.stockByVariantColor) ? [...product.stockByVariantColor] : [];
+  const hasVariant = Boolean(history.variant || history.color);
+  if (hasVariant) {
+    const normalizedVariant = (history.variant || 'No Variant').trim() || 'No Variant';
+    const normalizedColor = (history.color || 'No Color').trim() || 'No Color';
+    const idx = nextStockRows.findIndex((row) => (row.variant || 'No Variant') === normalizedVariant && (row.color || 'No Color') === normalizedColor);
+    if (idx >= 0) {
+      const row = nextStockRows[idx];
+      const nextRowStock = Math.max(0, Number(row.stock || 0) + qtyDelta);
+      const nextRowTotalPurchase = Math.max(0, Number(row.totalPurchase || 0) + qtyDelta);
+      nextStockRows[idx] = { ...row, stock: nextRowStock, totalPurchase: nextRowTotalPurchase, buyPrice: nextBuyPrice };
+    }
+  }
+
+  const nextProduct: Product = {
+    ...product,
+    stock: Math.max(0, Number(product.stock || 0) + qtyDelta),
+    totalPurchase: Math.max(0, Number(product.totalPurchase || 0) + qtyDelta),
+    buyPrice: nextBuyPrice,
+    stockByVariantColor: nextStockRows,
+    purchaseHistory: nextHistory,
+  };
+
+  const nextOrder: PurchaseOrder = {
+    ...order,
+    lines,
+    totalQuantity: Number(totalQuantity.toFixed(2)),
+    totalAmount,
+    totalPaid: coveredAmount,
+    remainingAmount,
+    paymentHistory,
+    updatedAt: now,
+    notes: `${order.notes || ''}${overpaidAmount > 0 ? `${order.notes ? ' | ' : ''}Overpayment after edit: ₹${overpaidAmount.toFixed(2)}` : ''}`.trim(),
+  };
+
+  const editCreditId = `pce-edit-${order.id}`;
+  const existingCredits = Array.isArray((data as any).partyCreditLedger) ? ([...(data as any).partyCreditLedger] as PartyCreditLedgerEntry[]) : [];
+  const nextPartyCreditLedger = existingCredits.filter((entry) => entry.id !== editCreditId);
+  if (overpaidAmount > 0) {
+    nextPartyCreditLedger.unshift({
+      id: editCreditId,
+      partyId: order.partyId,
+      partyName: order.partyName,
+      type: 'supplier_overpayment',
+      sourcePaymentId: editCreditId,
+      sourceVoucherNo: order.billNumber || order.id,
+      amountCreated: Number(overpaidAmount.toFixed(2)),
+      remainingAmount: Number(overpaidAmount.toFixed(2)),
+      usageHistory: [],
+      createdAt: now,
+      updatedAt: now,
+      note: `Overpayment after purchase edit for ${order.billNumber || order.id}`,
+    } as PartyCreditLedgerEntry);
+  }
+
+  products[productIndex] = nextProduct;
+  orders[orderIndex] = nextOrder;
+  await saveData({ ...data, products, purchaseOrders: orders, partyCreditLedger: nextPartyCreditLedger }, { throwOnError: true, reason: 'editInventoryPurchaseHistoryEntry', auditOperation: 'UPDATE' });
+  return products;
 };
 
 export const reverseInventoryPurchaseHistoryEntry = async (productId: string, purchaseHistoryId: string): Promise<Product> => {
@@ -5251,6 +5665,7 @@ export const deleteTransaction = (
     reasonNote?: string;
     compensationMode?: 'cash_refund' | 'store_credit';
     compensationAmount?: number;
+    createCashCompensation?: boolean;
   }
 ): Transaction[] => {
   const data = loadData();
@@ -5264,8 +5679,9 @@ export const deleteTransaction = (
     : 0;
   const compensationAmount = roundCurrency(Math.max(0, Number(options?.compensationAmount ?? generatedCompensation) || 0));
   const compensationMode: 'cash_refund' | 'store_credit' = options?.compensationMode || 'cash_refund';
+  const createCashCompensation = options?.createCashCompensation === true;
 
-  if (target.customerId && compensationAmount > 0 && compensationMode === 'cash_refund') {
+  if (target.customerId && compensationAmount > 0 && compensationMode === 'cash_refund' && createCashCompensation) {
     reconciledState = {
       ...reconciledState,
       customers: reconciledState.customers.map((customer) => {
@@ -5283,6 +5699,9 @@ export const deleteTransaction = (
           customerName: target.customerName,
           amount: compensationAmount,
           mode: 'cash_refund',
+          source: 'explicit_refund',
+          isExplicitRefund: true,
+          refundConfirmed: true,
           reason: options?.reason || 'Delete compensation',
           createdAt: new Date().toISOString(),
         },

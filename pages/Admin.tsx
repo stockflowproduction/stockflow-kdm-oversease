@@ -4,7 +4,7 @@ import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
 import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder } from '../services/storage';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, editInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder, uploadImageFileToCloudinary } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp, ChevronRight, MoreVertical } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -113,8 +113,85 @@ export default function Admin() {
   const [isBatchDeleteConfirmOpen, setIsBatchDeleteConfirmOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'error' | 'success' | 'info'; message: string } | null>(null);
   const [purchaseError, setPurchaseError] = useState<string | null>(null);
+
+  const [purchaseEditTarget, setPurchaseEditTarget] = useState<{ productId: string; historyId: string } | null>(null);
+  const [purchaseEditQuantity, setPurchaseEditQuantity] = useState('');
+  const [purchaseEditUnitPrice, setPurchaseEditUnitPrice] = useState('');
+  const [purchaseEditError, setPurchaseEditError] = useState<string | null>(null);
+  const [selectedPhotoProduct, setSelectedPhotoProduct] = useState<Product | null>(null);
+  const [isPhotoModalOpen, setIsPhotoModalOpen] = useState(false);
+  const [photoUploadError, setPhotoUploadError] = useState<string | null>(null);
+  const [isPhotoUploading, setIsPhotoUploading] = useState(false);
+  const photoFileInputRef = useRef<HTMLInputElement>(null);
+
   const [inventoryViewTab, setInventoryViewTab] = useState<'inventory' | 'lost-damage'>('inventory');
   const [openActionMenuProductId, setOpenActionMenuProductId] = useState<string | null>(null);
+
+  const getProductImageUrl = (product?: any): string => {
+    if (!product) return '';
+    const imageObj = Array.isArray(product.images) ? product.images[0] : null;
+    return String(
+      product.thumbnailImage
+      || product.image
+      || product.imageSrc
+      || (Array.isArray(product.galleryImages) ? product.galleryImages[0] : '')
+      || imageObj?.src
+      || imageObj?.url
+      || ''
+    ).trim();
+  };
+
+  const openProductPhotoModal = (product: Product) => {
+    setPhotoUploadError(null);
+    setSelectedPhotoProduct(product);
+    setIsPhotoModalOpen(true);
+  };
+
+  const handleUploadProductPhoto = async (file: File) => {
+    if (!selectedPhotoProduct) return;
+    setIsPhotoUploading(true);
+    setPhotoUploadError(null);
+    try {
+      const uploadedUrl = await uploadImageFileToCloudinary(file);
+      const updatedProduct = {
+        ...selectedPhotoProduct,
+        image: uploadedUrl,
+        thumbnailImage: uploadedUrl,
+        imageSrc: uploadedUrl,
+        galleryImages: Array.isArray((selectedPhotoProduct as any).galleryImages) && (selectedPhotoProduct as any).galleryImages.length
+          ? (selectedPhotoProduct as any).galleryImages
+          : [uploadedUrl],
+      } as Product;
+      const updated = await updateProduct(updatedProduct);
+      const refreshed = updated.find((p) => p.id === selectedPhotoProduct.id) || updatedProduct;
+      setProducts(updated);
+      setSelectedPhotoProduct(refreshed);
+      setNotice({ type: 'success', message: 'Product photo updated successfully.' });
+    } catch (error: any) {
+      setPhotoUploadError(error?.message || 'Failed to upload photo.');
+    } finally {
+      setIsPhotoUploading(false);
+    }
+  };
+
+  const handleDeleteProductPhoto = async () => {
+    if (!selectedPhotoProduct) return;
+    if (!window.confirm('Remove this product photo?')) return;
+    setPhotoUploadError(null);
+    const updatedProduct = {
+      ...selectedPhotoProduct,
+      image: '',
+      thumbnailImage: '',
+      imageSrc: '',
+      galleryImages: [],
+      images: [],
+    } as Product;
+    const updated = await updateProduct(updatedProduct);
+    const refreshed = updated.find((p) => p.id === selectedPhotoProduct.id) || updatedProduct;
+    setProducts(updated);
+    setSelectedPhotoProduct(refreshed);
+    setNotice({ type: 'success', message: 'Product photo removed.' });
+  };
   const [lostDamageTarget, setLostDamageTarget] = useState<Product | null>(null);
   const [lostDamageQtyInput, setLostDamageQtyInput] = useState('');
   const [lostDamageError, setLostDamageError] = useState<string | null>(null);
@@ -230,6 +307,36 @@ export default function Admin() {
     }
   };
 
+
+  const openEditPurchaseHistoryEntry = (historyId: string) => {
+    if (!purchaseTarget) return;
+    const entry = (purchaseTarget.purchaseHistory || []).find((h) => h.id === historyId);
+    if (!entry) return;
+    setPurchaseEditTarget({ productId: purchaseTarget.id, historyId });
+    setPurchaseEditQuantity(String(toNonNegativeNumber(entry.quantity)));
+    setPurchaseEditUnitPrice(String(toNonNegativeNumber(entry.unitPrice)));
+    setPurchaseEditError(null);
+  };
+
+  const confirmEditPurchaseHistoryEntry = async () => {
+    if (!purchaseEditTarget) return;
+    try {
+      const quantity = Number(purchaseEditQuantity);
+      const unitPrice = Number(purchaseEditUnitPrice);
+      const updatedProducts = await editInventoryPurchaseHistoryEntry(purchaseEditTarget.productId, purchaseEditTarget.historyId, { quantity, unitPrice });
+      setProducts(updatedProducts);
+      const nextTarget = updatedProducts.find((item) => item.id === purchaseEditTarget.productId) || null;
+      setPurchaseTarget(nextTarget);
+      setPurchaseEditTarget(null);
+      setPurchaseEditQuantity('');
+      setPurchaseEditUnitPrice('');
+      setPurchaseEditError(null);
+      setNotice({ type: 'success', message: 'Purchase entry updated.' });
+    } catch (error) {
+      setPurchaseEditError(error instanceof Error ? error.message : 'Unable to edit purchase entry.');
+    }
+  };
+
   const renderPurchaseHistoryCards = (
     productName: string,
     rows: NonNullable<Product['purchaseHistory']>
@@ -312,15 +419,18 @@ export default function Admin() {
             )}
           </div>
           <div className="pt-1">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!h.purchaseOrderId}
-              onClick={() => void handleDeletePurchaseHistoryEntry(h.id)}
-              title={!h.purchaseOrderId ? 'Cannot delete legacy purchase entry without linked order metadata.' : 'Reverse purchase'}
-            >
-              Delete Purchase Entry
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => openEditPurchaseHistoryEntry(h.id)}>Edit Purchase</Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!h.purchaseOrderId}
+                onClick={() => void handleDeletePurchaseHistoryEntry(h.id)}
+                title={!h.purchaseOrderId ? 'Cannot delete legacy purchase entry without linked order metadata.' : 'Reverse purchase'}
+              >
+                Delete Purchase Entry
+              </Button>
+            </div>
           </div>
         </div>
           );
@@ -1749,9 +1859,14 @@ export default function Admin() {
                   />
                 </td>
                 <td className="p-3">
-                  <div className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">
-                    {product.image ? <img src={product.image} alt={product.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}
-                  </div>
+                  <button
+                    type="button"
+                    aria-label={`View or edit photo for ${product.name}`}
+                    className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center"
+                    onClick={(e) => { e.stopPropagation(); openProductPhotoModal(product); }}
+                  >
+                    {getProductImageUrl(product) ? <img src={getProductImageUrl(product)} alt={product.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}
+                  </button>
                 </td>
                 <td className="p-3 min-w-[260px]">
                   <div className="group relative inline-block">
@@ -2297,6 +2412,54 @@ export default function Admin() {
           </Card>
         </div>
       )}
+
+      {isPhotoModalOpen && selectedPhotoProduct && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4" onClick={() => setIsPhotoModalOpen(false)}>
+          <Card className="w-full max-w-2xl" onClick={(e) => e.stopPropagation()}>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle>Product Photo</CardTitle>
+              <Button variant="ghost" size="sm" onClick={() => setIsPhotoModalOpen(false)}><X className="w-4 h-4" /></Button>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="text-sm font-medium">{selectedPhotoProduct.name}</div>
+              <div className="rounded-lg border bg-slate-900/80 p-3 min-h-[280px] flex items-center justify-center">
+                {getProductImageUrl(selectedPhotoProduct) ? (
+                  <img src={getProductImageUrl(selectedPhotoProduct)} alt={selectedPhotoProduct.name} className="max-h-[420px] w-full object-contain rounded" />
+                ) : (
+                  <div className="text-center text-slate-200">
+                    <Package className="w-10 h-10 mx-auto mb-2 opacity-80" />
+                    <div className="text-sm">No photo available</div>
+                  </div>
+                )}
+              </div>
+              {photoUploadError && <div className="text-xs text-red-600">{photoUploadError}</div>}
+              <input
+                ref={photoFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  await handleUploadProductPhoto(file);
+                  e.currentTarget.value = '';
+                }}
+              />
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button variant="outline" onClick={() => photoFileInputRef.current?.click()} disabled={isPhotoUploading}>
+                  {isPhotoUploading ? 'Uploading...' : (getProductImageUrl(selectedPhotoProduct) ? 'Replace Photo' : 'Add Photo')}
+                </Button>
+                {getProductImageUrl(selectedPhotoProduct) && (
+                  <Button variant="outline" className="border-red-300 text-red-700" onClick={() => void handleDeleteProductPhoto()} disabled={isPhotoUploading}>
+                    Delete Photo
+                  </Button>
+                )}
+                <Button variant="outline" onClick={() => setIsPhotoModalOpen(false)}>Close</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
       <CustomerCatalogOptionsModal
         isOpen={isCatalogOptionsOpen}
         onClose={() => setIsCatalogOptionsOpen(false)}
@@ -2606,6 +2769,56 @@ export default function Admin() {
             onExport={handleExport}
             title={exportType === 'inventory' ? "Export Inventory" : "Export Low Stock Report"}
         />
+      {purchaseEditTarget && (() => {
+        const targetProduct = products.find((p) => p.id === purchaseEditTarget.productId) || purchaseTarget;
+        const targetHistory = (targetProduct?.purchaseHistory || []).find((h) => h.id === purchaseEditTarget.historyId);
+        const linkedOrder = (loadData().purchaseOrders || []).find((o) => o.id === targetHistory?.purchaseOrderId);
+        const oldQty = toNonNegativeNumber(targetHistory?.quantity);
+        const oldUnitPrice = toNonNegativeNumber(targetHistory?.unitPrice);
+        const oldTotal = oldQty * oldUnitPrice;
+        const newQty = toNonNegativeNumber(purchaseEditQuantity);
+        const newUnit = toNonNegativeNumber(purchaseEditUnitPrice);
+        const newTotal = Number((newQty * newUnit).toFixed(2));
+        const stockDelta = Number((newQty - oldQty).toFixed(2));
+        const coveredPaid = toNonNegativeNumber((linkedOrder?.paymentHistory || []).reduce((sum: number, payment: any) => sum + Math.max(0, Number(payment.amount || 0)), 0));
+        const estimatedRemaining = Math.max(0, Number((newTotal - coveredPaid).toFixed(2)));
+        const estimatedOverpaymentCredit = Math.max(0, Number((coveredPaid - newTotal).toFixed(2)));
+        return (
+          <div className="fixed inset-0 z-[130] bg-black/50 flex items-center justify-center p-4">
+            <Card className="w-full max-w-lg">
+              <CardHeader><CardTitle>Edit Purchase Entry</CardTitle></CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <div>Product: <span className="font-medium">{targetProduct?.name || '—'}</span></div>
+                <div>Party: <span className="font-medium">{linkedOrder?.partyName || targetHistory?.partyName || '—'}</span></div>
+                <div>Purchase order: <span className="font-medium">{linkedOrder?.billNumber || linkedOrder?.id || targetHistory?.purchaseOrderId || '—'}</span></div>
+                <div className="grid grid-cols-2 gap-2 text-xs rounded border p-2">
+                  <div>Old quantity: {oldQty}</div>
+                  <div>Old unit price: ₹{oldUnitPrice.toFixed(2)}</div>
+                  <div>Old total: ₹{oldTotal.toFixed(2)}</div>
+                  <div>Covered amount: ₹{coveredPaid.toFixed(2)}</div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div><Label>Quantity</Label><Input type="number" min="0" value={purchaseEditQuantity} onChange={(e) => setPurchaseEditQuantity(e.target.value)} /></div>
+                  <div><Label>Unit Price</Label><Input type="number" min="0" value={purchaseEditUnitPrice} onChange={(e) => setPurchaseEditUnitPrice(e.target.value)} /></div>
+                </div>
+                <div className="rounded border p-2 text-xs">
+                  <div className="font-medium">payable impact</div>
+                  <div>New total: ₹{newTotal.toFixed(2)}</div>
+                  <div>Difference: ₹{(newTotal - oldTotal).toFixed(2)}</div>
+                  <div>stock delta: {stockDelta >= 0 ? '+' : ''}{stockDelta}</div>
+                  <div>Estimated remaining payable after edit: ₹{estimatedRemaining.toFixed(2)}</div>
+                  {estimatedOverpaymentCredit > 0 && <div>Overpayment will become Our Credit: ₹{estimatedOverpaymentCredit.toFixed(2)}</div>}
+                </div>
+                {purchaseEditError && <div className="text-xs text-red-600">{purchaseEditError}</div>}
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => { setPurchaseEditTarget(null); setPurchaseEditError(null); }}>Cancel</Button>
+                  <Button onClick={() => void confirmEditPurchaseHistoryEntry()}>Save</Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        );
+      })()}
       <ConfirmDialog open={!!pendingPurchaseReverse} title="Reverse this purchase?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingPurchaseReverse(null)} onConfirm={() => void confirmDeletePurchaseHistoryEntry()} confirmLabel="Reverse" />
       <ConfirmDialog open={!!pendingDeleteProductId} title="Delete this product?" message="This action may affect stock/history. Continue?" onCancel={() => setPendingDeleteProductId(null)} onConfirm={() => void confirmDeleteProduct()} confirmLabel="Delete" />
       <ConfirmDialog open={isBatchDeleteConfirmOpen} title="Delete selected products?" message={`Delete ${selectedProducts.length} selected product${selectedProducts.length > 1 ? 's' : ''}? This action may affect stock/history. Continue?`} onCancel={() => setIsBatchDeleteConfirmOpen(false)} onConfirm={() => void confirmBatchDeleteProducts()} confirmLabel="Delete" />

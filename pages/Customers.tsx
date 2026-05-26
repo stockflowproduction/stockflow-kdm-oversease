@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction, auditCustomerPaymentAllocations, previewCustomerRepairedAllocationView } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
@@ -15,6 +15,7 @@ import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileT
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
+import { compareCustomerBalances, compareLegacyVsLedger } from '../services/erpComparison';
 
 const normalizePhone = (v?: string) => String(v || '').replace(/\D/g, '');
 const normalizeName = (v?: string) => String(v || '').trim().toLowerCase();
@@ -67,6 +68,7 @@ export default function Customers() {
   const [batchEditCustomerIndex, setBatchEditCustomerIndex] = useState(0);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [showErpCustomerCompare, setShowErpCustomerCompare] = useState(false);
   const [exportType, setExportType] = useState<'statement' | 'dues_report' | 'invoice'>('statement');
   const [txToExport, setTxToExport] = useState<Transaction | null>(null);
 
@@ -119,6 +121,10 @@ export default function Customers() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editingCustomerTx, setEditingCustomerTx] = useState<Transaction | null>(null);
   const [customerActionModalOpen, setCustomerActionModalOpen] = useState(false);
+  const [paymentAuditOpen, setPaymentAuditOpen] = useState(false);
+  const [paymentAuditResult, setPaymentAuditResult] = useState<ReturnType<typeof auditCustomerPaymentAllocations> | null>(null);
+  const [updatedViewOpen, setUpdatedViewOpen] = useState(false);
+  const [updatedViewPreview, setUpdatedViewPreview] = useState<ReturnType<typeof previewCustomerRepairedAllocationView> | null>(null);
   const [customerActionType, setCustomerActionType] = useState<'payment' | 'customer_cash_out' | 'customer_credit'>('payment');
   const [customerActionDateTime, setCustomerActionDateTime] = useState('');
   const [customerActionAmount, setCustomerActionAmount] = useState('');
@@ -217,6 +223,23 @@ export default function Customers() {
     const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
   }, [canonicalCustomers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold]);
+  const erpCompareInput = useMemo(() => ({
+    transactions,
+    upfrontOrders,
+    customers,
+    products,
+  }), [transactions, upfrontOrders, customers, products]);
+  const erpCustomerRows = useMemo(() => compareCustomerBalances(erpCompareInput), [erpCompareInput]);
+  const erpTopLevel = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
+  const erpCustomerWarningFlags = useMemo(() => {
+    const flags: string[] = [];
+    if (transactions.some((tx) => tx.type === 'historical_reference')) flags.push('historical_reference usage');
+    if (transactions.some((tx) => Number((tx as any).paymentAppliedToCustomOrderReceivable || 0) > 0)) flags.push('custom order receivable allocation');
+    if (transactions.some((tx) => tx.type === 'payment' && !Number((tx as any).paymentAppliedToReceivable || 0))) flags.push('paymentAppliedToReceivable ambiguity');
+    if (transactions.some((tx) => Number((tx as any).storeCreditCreated || 0) > 0 || Number((tx as any).storeCreditUsed || 0) > 0)) flags.push('storeCreditCreated/storeCreditUsed ambiguity');
+    if (erpTopLevel.receivable.status !== 'match') flags.push('customer projection mismatch');
+    return flags;
+  }, [transactions, erpTopLevel.receivable.status]);
   const customerTotalPages = Math.max(1, Math.ceil(filteredData.displayCustomers.length / CUSTOMERS_PAGE_SIZE));
   const paginatedCustomers = useMemo(
     () => filteredData.displayCustomers.slice((customerPage - 1) * CUSTOMERS_PAGE_SIZE, customerPage * CUSTOMERS_PAGE_SIZE),
@@ -251,6 +274,16 @@ export default function Customers() {
   const viewingCustomerTotalDue = Math.max(0, Number(viewingCustomerCanonical?.totalDue || 0));
   const viewingCustomerStoreCredit = Math.max(0, Number(viewingCustomerCanonical?.storeCredit || 0));
   const viewingCustomerNetReceivable = Math.max(0, viewingCustomerTotalDue - viewingCustomerStoreCredit);
+  const customerLedgerDebugEnabled = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const queryEnabled = new URLSearchParams(window.location.search).get('customerLedgerDebug') === '1';
+      const storageEnabled = window.localStorage.getItem('CUSTOMER_LEDGER_DEBUG') === '1';
+      return queryEnabled || storageEnabled;
+    } catch {
+      return false;
+    }
+  }, []);
   const selectedCustomers = useMemo(
     () => customers.filter(customer => selectedCustomerIds.includes(customer.id)),
     [customers, selectedCustomerIds]
@@ -835,6 +868,68 @@ export default function Customers() {
           </div>
       </div>
 
+      <div className="rounded border border-violet-200 bg-violet-50/50 p-3 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="font-semibold">New ERP Customer Compare</div>
+          <Button variant="outline" size="sm" className="h-8" onClick={() => setShowErpCustomerCompare((prev) => !prev)}>
+            {showErpCustomerCompare ? 'Hide' : 'Show'}
+          </Button>
+        </div>
+        <div className="text-xs text-violet-800">Read-only comparison — does not affect production customer balances.</div>
+        {showErpCustomerCompare && (
+          <div className="space-y-3">
+            <div className="rounded border bg-white p-2 text-xs text-slate-700">
+              <div>Receivable status: <span className="uppercase font-semibold">{erpTopLevel.receivable.status}</span></div>
+              <div>Receivable delta (ledger - legacy): ₹{formatMoneyPrecise(erpTopLevel.receivable.delta)}</div>
+              <div>Reasons: {erpTopLevel.receivable.reasons.length ? erpTopLevel.receivable.reasons.join(' • ') : 'None'}</div>
+            </div>
+            <div className="rounded border bg-white p-2 text-xs">
+              <div className="font-medium mb-1">Warnings / Ambiguities</div>
+              {erpCustomerWarningFlags.length ? (
+                <ul className="list-disc pl-5 space-y-0.5 text-slate-700">
+                  {erpCustomerWarningFlags.map((flag) => <li key={flag}>{flag}</li>)}
+                </ul>
+              ) : <div className="text-slate-500">No warnings emitted.</div>}
+            </div>
+            <div className="overflow-x-auto rounded border bg-white">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50">
+                  <tr className="text-left border-b">
+                    <th className="p-2">Customer</th>
+                    <th className="p-2 text-right">Legacy Due</th>
+                    <th className="p-2 text-right">Ledger Receivable</th>
+                    <th className="p-2 text-right">Legacy Store Credit</th>
+                    <th className="p-2 text-right">Ledger Credit</th>
+                    <th className="p-2 text-right">Due Δ</th>
+                    <th className="p-2 text-right">Credit Δ</th>
+                    <th className="p-2">Status</th>
+                    <th className="p-2">Reasons / Warnings</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {erpCustomerRows.slice(0, 20).map((row) => {
+                    const status = Math.abs(row.dueDelta) < 0.01 && Math.abs(row.creditDelta) < 0.01 ? 'match' : 'mismatch';
+                    return (
+                      <tr key={row.customerId} className="border-b">
+                        <td className="p-2">{row.customerName} <span className="text-muted-foreground">({row.customerId})</span></td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.legacyDue)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.ledgerReceivable)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.legacyStoreCredit)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.ledgerCreditLike)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.dueDelta)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.creditDelta)}</td>
+                        <td className={`p-2 font-medium uppercase ${status === 'match' ? 'text-emerald-700' : 'text-red-700'}`}>{status}</td>
+                        <td className="p-2">{row.flags.length ? row.flags.join(' • ') : '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="border rounded-xl overflow-x-auto bg-white">
         <table className="w-full text-sm">
           <thead className="bg-muted/40">
@@ -1039,8 +1134,24 @@ export default function Customers() {
                                <Button size="sm" className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white shadow-sm font-bold" onClick={() => handleRecordPayment()}>
                                    <Coins className="w-4 h-4 mr-1.5" /> Receive Payment
                                </Button>
-                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
+                              <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
                                    <FileText className="w-4 h-4 mr-1.5" /> Get Statement
+                               </Button>
+                               {customerLedgerDebugEnabled && (
+                                 <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-amber-200 text-amber-700 shadow-sm" onClick={() => {
+                                   if (!viewingCustomer) return;
+                                   setPaymentAuditResult(auditCustomerPaymentAllocations(viewingCustomer.id));
+                                   setPaymentAuditOpen(true);
+                                 }}>
+                                   Audit Payments
+                                 </Button>
+                               )}
+                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-blue-200 text-blue-700 shadow-sm" onClick={() => {
+                                 if (!viewingCustomer) return;
+                                 setUpdatedViewPreview(previewCustomerRepairedAllocationView(viewingCustomer.id));
+                                 setUpdatedViewOpen(true);
+                               }}>
+                                 Updated View (Preview)
                                </Button>
                                <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => openCustomerActionModal('payment')}>
                                    <Plus className="w-4 h-4 mr-1.5" /> + Transaction
@@ -1250,6 +1361,138 @@ export default function Customers() {
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setCustomerActionModalOpen(false)}>Cancel</Button>
                 <Button onClick={handleSubmitCustomerAction}>Save</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {paymentAuditOpen && viewingCustomer && paymentAuditResult && (
+        <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-4">
+          <Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
+            <CardHeader className="border-b">
+              <CardTitle>Customer Payment Allocation Audit</CardTitle>
+              <p className="text-xs text-muted-foreground">Dry-run preview only. No data is modified.</p>
+            </CardHeader>
+            <CardContent className="p-4 space-y-3 overflow-auto">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                <div className="rounded border p-2"><div className="text-muted-foreground">Mismatch Count</div><div className="font-bold">{paymentAuditResult.summary.mismatchCount}</div></div>
+                <div className="rounded border p-2"><div className="text-muted-foreground">Saved Store Credit</div><div className="font-bold">₹{formatMoneyPrecise(paymentAuditResult.summary.totalSavedStoreCreditCreated)}</div></div>
+                <div className="rounded border p-2"><div className="text-muted-foreground">Natural Store Credit</div><div className="font-bold">₹{formatMoneyPrecise(paymentAuditResult.summary.totalNaturalStoreCreditCreated)}</div></div>
+                <div className="rounded border p-2"><div className="text-muted-foreground">Store Credit Difference</div><div className="font-bold">₹{formatMoneyPrecise(paymentAuditResult.summary.storeCreditDelta)}</div></div>
+              </div>
+              <div className="overflow-auto border rounded-lg">
+                <table className="w-full min-w-[1050px] text-xs">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="p-2 text-left">Date</th>
+                      <th className="p-2 text-left">Tx ID</th>
+                      <th className="p-2 text-right">Payment Amount</th>
+                      <th className="p-2 text-right">Saved Applied</th>
+                      <th className="p-2 text-right">Saved Credit</th>
+                      <th className="p-2 text-right">Natural Applied</th>
+                      <th className="p-2 text-right">Natural Credit</th>
+                      <th className="p-2 text-right">Difference</th>
+                      <th className="p-2 text-left">Needs Repair</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paymentAuditResult.rows.map((row) => (
+                      <tr key={row.transactionId} className="border-t">
+                        <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleString()}</td>
+                        <td className="p-2 font-mono">{row.transactionId.slice(-8)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.amount)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.saved.paymentAppliedToReceivable || (row.saved.paymentAppliedToCanonicalReceivable + row.saved.paymentAppliedToCustomOrderReceivable))}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.saved.storeCreditCreated)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.natural.paymentAppliedToReceivable)}</td>
+                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.natural.storeCreditCreated)}</td>
+                        <td className="p-2 text-right">Applied Δ ₹{formatMoneyPrecise(row.delta.paymentAppliedToReceivable)} • Credit Δ ₹{formatMoneyPrecise(row.delta.storeCreditCreated)}</td>
+                        <td className="p-2">{row.needsRepair ? <span className="text-red-600 font-semibold">Yes</span> : <span className="text-emerald-700 font-semibold">No</span>}</td>
+                      </tr>
+                    ))}
+                    {!paymentAuditResult.rows.length && (
+                      <tr><td className="p-3 text-center text-muted-foreground" colSpan={9}>No payment rows for this customer.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setPaymentAuditOpen(false)}>Close</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {updatedViewOpen && viewingCustomer && updatedViewPreview && (
+        <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-4">
+          <Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
+            <CardHeader className="border-b">
+              <CardTitle>Updated Customer Balance Preview</CardTitle>
+              <p className="text-xs text-muted-foreground">Preview only. No records are updated.</p>
+            </CardHeader>
+            <CardContent className="p-4 space-y-3 overflow-auto">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                <div className="rounded border p-2">
+                  <div className="font-semibold mb-1">Current View</div>
+                  <div>Current Dues: ₹{formatMoneyPrecise(updatedViewPreview.current.totalDue)}</div>
+                  <div>Store Credit: ₹{formatMoneyPrecise(updatedViewPreview.current.storeCredit)}</div>
+                  <div>Net Receivable: ₹{formatMoneyPrecise(updatedViewPreview.current.netReceivable)}</div>
+                </div>
+                <div className="rounded border p-2">
+                  <div className="font-semibold mb-1">Repaired Preview</div>
+                  <div>Current Dues: ₹{formatMoneyPrecise(updatedViewPreview.repairedPreview.totalDue)}</div>
+                  <div>Store Credit: ₹{formatMoneyPrecise(updatedViewPreview.repairedPreview.storeCredit)}</div>
+                  <div>Net Receivable: ₹{formatMoneyPrecise(updatedViewPreview.repairedPreview.netReceivable)}</div>
+                </div>
+                <div className="rounded border p-2">
+                  <div className="font-semibold mb-1">Difference</div>
+                  <div>Dues Δ: ₹{formatMoneyPrecise(updatedViewPreview.delta.totalDue)}</div>
+                  <div>Store Credit Δ: ₹{formatMoneyPrecise(updatedViewPreview.delta.storeCredit)}</div>
+                  <div>Net Receivable Δ: ₹{formatMoneyPrecise(updatedViewPreview.delta.netReceivable)}</div>
+                </div>
+              </div>
+              <div className="rounded border p-2 text-xs">
+                <div className="font-semibold mb-1">Payment Allocation Changes</div>
+                {updatedViewPreview.audit.rows.some((row) => row.needsRepair) ? (
+                  <div className="overflow-auto border rounded-lg">
+                    <table className="w-full min-w-[1050px] text-xs">
+                      <thead className="bg-slate-50">
+                        <tr>
+                          <th className="p-2 text-left">Date</th>
+                          <th className="p-2 text-left">Tx ID</th>
+                          <th className="p-2 text-right">Amount</th>
+                          <th className="p-2 text-right">Saved Applied</th>
+                          <th className="p-2 text-right">Saved Credit</th>
+                          <th className="p-2 text-right">Natural Applied</th>
+                          <th className="p-2 text-right">Natural Credit</th>
+                          <th className="p-2 text-right">Difference</th>
+                          <th className="p-2 text-left">Needs Repair</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {updatedViewPreview.audit.rows.map((row) => (
+                          <tr key={`upd-${row.transactionId}`} className={`border-t ${row.needsRepair ? 'bg-red-50/50' : ''}`}>
+                            <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleString()}</td>
+                            <td className="p-2 font-mono">{row.transactionId.slice(-8)}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.amount)}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.saved.paymentAppliedToReceivable || (row.saved.paymentAppliedToCanonicalReceivable + row.saved.paymentAppliedToCustomOrderReceivable))}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.saved.storeCreditCreated)}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.natural.paymentAppliedToReceivable)}</td>
+                            <td className="p-2 text-right">₹{formatMoneyPrecise(row.natural.storeCreditCreated)}</td>
+                            <td className="p-2 text-right">Applied Δ ₹{formatMoneyPrecise(row.delta.paymentAppliedToReceivable)} • Credit Δ ₹{formatMoneyPrecise(row.delta.storeCreditCreated)}</td>
+                            <td className="p-2">{row.needsRepair ? <span className="text-red-700 font-semibold">Yes</span> : <span className="text-emerald-700 font-semibold">No</span>}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground">No payment allocation differences found.</p>
+                )}
+              </div>
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setUpdatedViewOpen(false)}>Close</Button>
               </div>
             </CardContent>
           </Card>

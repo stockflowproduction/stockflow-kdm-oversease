@@ -4,10 +4,11 @@ import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
-import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, PurchaseOrder, Transaction, UpdatedTransactionRecord, UpfrontOrder } from '../types';
+import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, ManualCashbookEntry, PurchaseOrder, Transaction, UpdatedTransactionRecord, UpfrontOrder } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
 import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
+import { compareCashSession, compareLegacyVsLedger } from '../services/erpComparison';
 
 type Expense = {
   id: string;
@@ -104,6 +105,11 @@ const toFiniteMoney = (value: unknown) => {
   return Number.isFinite(numeric) ? numeric : 0;
 };
 const roundMoney = (value: unknown) => Math.round((toFiniteMoney(value) + Number.EPSILON) * 100) / 100;
+const isExplicitDeleteRefund = (record: DeleteCompensationRecord) => (
+  record?.isExplicitRefund === true
+  || record?.refundConfirmed === true
+  || record?.source === 'explicit_refund'
+);
 const isCorrectionRowType = (type: CashbookRow['type']) => type === 'delete_reversal' || type === 'delete_compensation' || type === 'update_correction';
 const isSyntheticCorrectionRow = (row: CashbookRow) => (
   row.isSynthetic === true
@@ -342,6 +348,7 @@ const buildCanonicalFinanceBreakdown = (
   transactions: Transaction[],
   expenses: Expense[],
   deleteCompensations: DeleteCompensationRecord[],
+  deletedTransactions: DeletedTransactionRecord[],
   windowStart: number,
   windowEnd: number
 ) => {
@@ -377,15 +384,29 @@ const buildCanonicalFinanceBreakdown = (
     const expenseTime = new Date(e.createdAt).getTime();
     return Number.isFinite(expenseTime) && expenseTime >= windowStart && expenseTime <= windowEnd;
   });
+  const deletedByOriginalId = new Map<string, DeletedTransactionRecord>(
+    (deletedTransactions || []).map((record) => [String(record.originalTransactionId || record.originalTransaction?.id || ''), record])
+  );
+  const explicitDeletedSaleCashIncluded = (deleteCompensations || [])
+    .filter((record) => isExplicitDeleteRefund(record))
+    .reduce((sum, record) => {
+      const eventTime = new Date(record.createdAt).getTime();
+      if (!Number.isFinite(eventTime) || eventTime < windowStart || eventTime > windowEnd) return sum;
+      const linkedDeleted = deletedByOriginalId.get(String(record.transactionId || ''));
+      const original = linkedDeleted?.originalTransaction;
+      if (!original || !isSaleLikeTx(original)) return sum;
+      const settlement = getSaleSettlementBreakdown(original);
+      return roundMoney(sum + Math.max(0, Number(settlement.cashPaid || 0)));
+    }, 0);
   const scopedDeleteCompensationOutflow = (deleteCompensations || [])
     .filter(record => {
       const eventTime = new Date(record.createdAt).getTime();
-      return Number.isFinite(eventTime) && eventTime >= windowStart && eventTime <= windowEnd;
+      return Number.isFinite(eventTime) && eventTime >= windowStart && eventTime <= windowEnd && isExplicitDeleteRefund(record);
     })
     .reduce((sum, record) => roundMoney(sum + Math.max(0, Number(record.amount) || 0)), 0);
   const todayExpenses = scopedExpenses.reduce((s, e) => roundMoney(s + e.amount), 0);
   const netProfit = roundMoney(grossProfit - todayExpenses);
-  const cashInflowOperational = roundMoney(saleCashReceipts + cashCollections);
+  const cashInflowOperational = roundMoney(saleCashReceipts + explicitDeletedSaleCashIncluded + cashCollections);
   const cashMovementAfterExpenses = roundMoney(cashInflowOperational - returnEffects.cashRefunds - scopedDeleteCompensationOutflow - todayExpenses);
   return {
     grossSales,
@@ -397,6 +418,7 @@ const buildCanonicalFinanceBreakdown = (
     grossProfit,
     netProfit,
     saleCashReceipts,
+    deletedSaleCashIncluded: explicitDeletedSaleCashIncluded,
     cashCollections,
     onlineCollections,
     cashRefunds: roundMoney(returnEffects.cashRefunds + scopedDeleteCompensationOutflow),
@@ -415,7 +437,9 @@ const getSessionCashTotals = (
   expenses: Expense[],
   cashAdjustments: CashAdjustment[],
   deleteCompensations: DeleteCompensationRecord[],
+  deletedTransactions: DeletedTransactionRecord[],
   purchaseOrders: PurchaseOrder[],
+  manualCashbookEntries: ManualCashbookEntry[],
   sessionStartIso: string,
   sessionEndIso?: string,
   sessionId?: string,
@@ -438,7 +462,21 @@ const getSessionCashTotals = (
   });
 
   const saleSettlementTotals = aggregateSaleSettlementContributions(scopedTransactions.filter(t => isSaleLikeTx(t)));
-  const cashSales = saleSettlementTotals.cashPaid;
+  const deletedByOriginalId = new Map<string, DeletedTransactionRecord>(
+    (deletedTransactions || []).map((record) => [String(record.originalTransactionId || record.originalTransaction?.id || ''), record])
+  );
+  const explicitDeletedSaleCashIncluded = (deleteCompensations || [])
+    .filter((record) => isExplicitDeleteRefund(record))
+    .reduce((sum, record) => {
+      const eventTime = new Date(record.createdAt).getTime();
+      if (!Number.isFinite(eventTime) || eventTime < start || eventTime > end) return sum;
+      const linkedDeleted = deletedByOriginalId.get(String(record.transactionId || ''));
+      const original = linkedDeleted?.originalTransaction;
+      if (!original || !isSaleLikeTx(original)) return sum;
+      const settlement = getSaleSettlementBreakdown(original);
+      return sum + Math.max(0, Number(settlement.cashPaid || 0));
+    }, 0);
+  const cashSales = saleSettlementTotals.cashPaid + explicitDeletedSaleCashIncluded;
   const sortedTransactionsAsc = [...transactions].sort((a, b) => resolveTransactionTimeForSession(a) - resolveTransactionTimeForSession(b));
   const scopedReturnIds = new Set<string>(scopedTransactions.filter(t => t.type === 'return').map(t => t.id));
   const returnEffects = accumulateCanonicalReturnEffects(sortedTransactionsAsc, scopedReturnIds);
@@ -450,7 +488,7 @@ const getSessionCashTotals = (
   const deleteCompensationOutflow = (deleteCompensations || [])
     .filter(record => {
       const eventTime = new Date(record.createdAt).getTime();
-      return eventTime >= start && eventTime <= end;
+      return eventTime >= start && eventTime <= end && isExplicitDeleteRefund(record);
     })
     .reduce((sum, record) => sum + Math.max(0, Number(record.amount) || 0), 0);
   // ACTIVE RECOMPUTE MODEL:
@@ -495,6 +533,17 @@ const getSessionCashTotals = (
   const cashWithdrawn = scopedCashAdjustments
     .filter(entry => entry.type === 'cash_withdrawal')
     .reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
+  const scopedManualEntries = (manualCashbookEntries || []).filter((entry) => {
+    if (entry?.isDeleted) return false;
+    const at = new Date(entry.date || entry.createdAt).getTime();
+    return Number.isFinite(at) && at >= start && at <= end;
+  });
+  const manualCashIn = scopedManualEntries
+    .filter((entry) => entry.type === 'cash_in')
+    .reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
+  const manualCashOut = scopedManualEntries
+    .filter((entry) => entry.type === 'cash_out')
+    .reduce((sum, entry) => sum + Math.max(0, Number(entry.amount) || 0), 0);
   // Include custom-order cash receipts in shift/system cash. Online/unknown and legacy-info rows are excluded.
   const customOrderCashIn = buildUpfrontOrderLedgerEffects(upfrontOrders)
     .filter((effect) => effect.type === 'custom_order_payment' && Math.max(0, Number(effect.cashIn || 0)) > 0)
@@ -507,17 +556,20 @@ const getSessionCashTotals = (
 
   const totals = {
     cashSales,
+    deletedSaleCashIncluded: explicitDeletedSaleCashIncluded,
     cashRefunds,
     deleteCompensationRefunds: deleteCompensationOutflow,
     customerCashCollections: cashCollections,
     customOrderCashCollections: customOrderCashIn,
     cashCollections: cashCollections + customOrderCashIn,
-    cashAdditions: cashAdded,
+    cashAdditions: cashAdded + manualCashIn,
     supplierCashPayments,
     expenses: expenseTotal,
-    cashWithdrawals: cashWithdrawn,
+    cashWithdrawals: cashWithdrawn + manualCashOut,
     expenseTotal,
-    systemCashTotal: cashSales + cashCollections + customOrderCashIn + cashAdded - cashRefunds - deleteCompensationOutflow - supplierCashPayments - expenseTotal - cashWithdrawn
+    manualCashIn,
+    manualCashOut,
+    systemCashTotal: cashSales + cashCollections + customOrderCashIn + cashAdded + manualCashIn - cashRefunds - deleteCompensationOutflow - supplierCashPayments - expenseTotal - cashWithdrawn - manualCashOut
   };
   if (FINANCE_SHIFT_RECON_DEBUG_ENABLED) {
   }
@@ -569,8 +621,8 @@ const buildShiftCashMovementBreakdown = (
   });
   (state.deleteCompensations || []).forEach((d) => {
     const at = new Date(d.createdAt).getTime();
-    if (!Number.isFinite(at) || at < start || at > end) return;
-    pushRow({ id: `del-${d.id}`, date: d.createdAt, type: 'Delete Compensation', direction: 'out', name: d.customerName || 'Customer', ref: d.transactionId.slice(-6), description: 'Cash refund compensation', amount: Math.max(0, Number(d.amount) || 0), source: 'deleteCompensations' });
+    if (!Number.isFinite(at) || at < start || at > end || !isExplicitDeleteRefund(d)) return;
+    pushRow({ id: `del-${d.id}`, date: d.createdAt, type: 'Delete Compensation', direction: 'out', name: d.customerName || 'Customer', ref: d.transactionId.slice(-6), description: 'Explicit cash refund compensation', amount: Math.max(0, Number(d.amount) || 0), source: 'deleteCompensations' });
   });
   const supplierPayments = ((state as any).supplierPayments || []) as any[];
   supplierPayments.forEach((p) => {
@@ -685,6 +737,7 @@ export default function Finance() {
   const [data, setData] = useState<AppState>(loadData());
   const [errors, setErrors] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<FinanceTabKey>('cash');
+  const [showErpFinanceCompare, setShowErpFinanceCompare] = useState(false);
   useEffect(() => {
     if (!['cash', 'expense'].includes(activeTab)) setActiveTab('cash');
   }, [activeTab]);
@@ -820,7 +873,7 @@ export default function Finance() {
     let over = 0;
 
     closed.forEach(session => {
-      const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, session.id, upfrontOrders, data.supplierPayments || []);
+      const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.deletedTransactions || [], data.purchaseOrders || [], data.manualCashbookEntries || [], session.startTime, session.endTime, session.id, upfrontOrders, data.supplierPayments || []);
       const systemCashTotal = session.systemCashTotal ?? computedTotals.systemCashTotal;
       const difference = session.difference ?? ((session.closingBalance ?? 0) - (session.openingBalance + systemCashTotal));
       if (difference === 0) matched += 1;
@@ -999,7 +1052,9 @@ export default function Finance() {
         expenses,
         cashAdjustments,
         data.deleteCompensations || [],
+        data.deletedTransactions || [],
         data.purchaseOrders || [],
+        data.manualCashbookEntries || [],
         openSession.startTime,
         undefined,
         openSession.id,
@@ -1016,7 +1071,9 @@ export default function Finance() {
       expenses,
       cashAdjustments,
       data.deleteCompensations || [],
+      data.deletedTransactions || [],
       data.purchaseOrders || [],
+      data.manualCashbookEntries || [],
       startOfTodayIso,
       endOfTodayIso,
       undefined,
@@ -1054,17 +1111,36 @@ export default function Finance() {
   const expectedClosingForOpenSession = openSession ? (openSession.openingBalance + dailyCashTotals.systemCashTotal) : 0;
   const expectedClosingBreakdown = useMemo(() => {
     if (!openSession) return null;
+    const cashAtSale = dailyCashTotals.cashSales || 0;
+    const activeCashSales = Math.max(0, cashAtSale - (dailyCashTotals.deletedSaleCashIncluded || 0));
+    const deletedSaleCashIncludedForRefundOffset = dailyCashTotals.deletedSaleCashIncluded || 0;
+    const customerCashCollections = dailyCashTotals.customerCashCollections || 0;
+    const customOrderCashCollections = dailyCashTotals.customOrderCashCollections || 0;
+    const cashAdditions = dailyCashTotals.cashAdditions || 0;
+    const cashRefunds = dailyCashTotals.cashRefunds || 0;
+    const deleteCompensationRefunds = dailyCashTotals.deleteCompensationRefunds || 0;
+    const supplierCashPayments = dailyCashTotals.supplierCashPayments || 0;
+    const expenses = dailyCashTotals.expenses ?? dailyCashTotals.expenseTotal ?? 0;
+    const cashWithdrawals = dailyCashTotals.cashWithdrawals || 0;
+    const grossCashEntered = cashAtSale + customerCashCollections + customOrderCashCollections + cashAdditions;
+    const grossCashExited = cashRefunds + deleteCompensationRefunds + supplierCashPayments + expenses + cashWithdrawals;
+    const netCashMovement = grossCashEntered - grossCashExited;
     return {
       openingCash: openSession.openingBalance,
-      cashAtSale: dailyCashTotals.cashSales || 0,
-      customerCashCollections: dailyCashTotals.customerCashCollections || 0,
-      customOrderCashCollections: dailyCashTotals.customOrderCashCollections || 0,
-      cashAdditions: dailyCashTotals.cashAdditions || 0,
-      cashRefunds: dailyCashTotals.cashRefunds || 0,
-      deleteCompensationRefunds: dailyCashTotals.deleteCompensationRefunds || 0,
-      supplierCashPayments: dailyCashTotals.supplierCashPayments || 0,
-      expenses: dailyCashTotals.expenses ?? dailyCashTotals.expenseTotal ?? 0,
-      cashWithdrawals: dailyCashTotals.cashWithdrawals || 0,
+      cashAtSale,
+      activeCashSales,
+      deletedSaleCashIncludedForRefundOffset,
+      customerCashCollections,
+      customOrderCashCollections,
+      cashAdditions,
+      cashRefunds,
+      deleteCompensationRefunds,
+      supplierCashPayments,
+      expenses,
+      cashWithdrawals,
+      grossCashEntered,
+      grossCashExited,
+      netCashMovement,
       expectedClosing: expectedClosingForOpenSession,
     };
   }, [openSession, dailyCashTotals, expectedClosingForOpenSession]);
@@ -1305,6 +1381,11 @@ export default function Finance() {
         const storeCreditCompensationDelta = deleteCompensationMode === 'store_credit' ? deleteCompensationAmount : 0;
         const saleReversal = isSaleLikeTx(original);
         const returnReversal = original.type === 'return';
+        // Deleted transaction records are audit/history rows.
+        // They must not create additional drawer movement because the original
+        // transaction is already removed from active transactions.
+        // Real cash payout on delete is represented separately by explicit
+        // delete compensation records (event.kind === 'delete_compensation').
         rows.push({
           id: `deleted-${deleted.id}`,
           date: deleted.deletedAt,
@@ -1322,15 +1403,11 @@ export default function Finance() {
           onlineSale: saleReversal ? -settlement.onlinePaid : 0,
           currentDueEffect: dueDelta,
           currentStoreCreditEffect: storeCreditDelta - storeCreditCompensationDelta,
-          cashIn: saleReversal ? -settlement.cashPaid : returnReversal ? returnAllocation.cashRefund : 0,
-          cashOut: returnReversal ? -returnAllocation.cashRefund : 0,
-          onlineIn: saleReversal ? -settlement.onlinePaid : returnReversal ? returnAllocation.onlineRefund : 0,
-          onlineOut: returnReversal ? -returnAllocation.onlineRefund : 0,
-          netCashEffect: saleReversal
-            ? -settlement.cashPaid
-            : returnReversal
-              ? returnAllocation.cashRefund
-              : 0,
+          cashIn: 0,
+          cashOut: 0,
+          onlineIn: 0,
+          onlineOut: 0,
+          netCashEffect: 0,
           cogsEffect: saleReversal ? -cogsAmount : returnReversal ? cogsAmount : 0,
           grossProfitEffect: saleReversal ? (-amount + cogsAmount) : returnReversal ? (amount - cogsAmount) : 0,
           expense: 0,
@@ -1903,7 +1980,7 @@ export default function Finance() {
     if (!Number.isFinite(counted) || counted < 0) return setErrors('Please enter a valid closing cash value.');
 
     const closedAt = new Date().toISOString();
-    const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, freshCashAdjustments, fresh.deleteCompensations || [], fresh.purchaseOrders || [], freshOpenSession.startTime, closedAt, freshOpenSession.id, Array.isArray(fresh.upfrontOrders) ? fresh.upfrontOrders : [], fresh.supplierPayments || []);
+    const { systemCashTotal, expenseTotal } = getSessionCashTotals(fresh.transactions, freshExpenses, freshCashAdjustments, fresh.deleteCompensations || [], fresh.deletedTransactions || [], fresh.purchaseOrders || [], fresh.manualCashbookEntries || [], freshOpenSession.startTime, closedAt, freshOpenSession.id, Array.isArray(fresh.upfrontOrders) ? fresh.upfrontOrders : [], fresh.supplierPayments || []);
     const expectedClosing = freshOpenSession.openingBalance + systemCashTotal;
     const difference = counted - expectedClosing;
     financeLog.shift('CLOSE', {
@@ -2237,7 +2314,7 @@ export default function Finance() {
     const corrected = (data.cashSessions || []).map(session => {
       if (session.status !== 'closed' || !session.endTime) return session;
 
-      const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, session.id, upfrontOrders, data.supplierPayments || []);
+      const { systemCashTotal, expenseTotal } = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.deletedTransactions || [], data.purchaseOrders || [], data.manualCashbookEntries || [], session.startTime, session.endTime, session.id, upfrontOrders, data.supplierPayments || []);
       const expectedClosing = session.openingBalance + systemCashTotal;
       const difference = (session.closingBalance ?? 0) - expectedClosing;
 
@@ -2279,6 +2356,26 @@ export default function Finance() {
     { key: 'expense', label: 'Expense Management', icon: <ReceiptIndianRupee className="w-4 h-4" /> },
   ];
 
+  const erpCompareInput = useMemo(() => ({
+    transactions: data.transactions,
+    deletedTransactions: data.deletedTransactions,
+    deleteCompensations: data.deleteCompensations,
+    supplierPayments: data.supplierPayments,
+    purchaseOrders: data.purchaseOrders,
+    manualCashbookEntries: data.manualCashbookEntries,
+    upfrontOrders,
+    customers: data.customers,
+    products: data.products,
+    cashSessions: data.cashSessions,
+    expenses: data.expenses,
+  }), [data, upfrontOrders]);
+
+  const erpLegacyVsLedger = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
+  const erpCashSessionCompare = useMemo(
+    () => compareCashSession({ ...erpCompareInput, session: openSession }),
+    [erpCompareInput, openSession]
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 space-y-5">
@@ -2310,6 +2407,58 @@ export default function Finance() {
             );
           })}
         </div>
+
+        <Card className="border-violet-200 bg-violet-50/40 shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center justify-between gap-2 text-base">
+              <span>New ERP Finance Compare</span>
+              <Button size="sm" variant="outline" onClick={() => setShowErpFinanceCompare(prev => !prev)}>
+                {showErpFinanceCompare ? 'Hide' : 'Show'}
+              </Button>
+            </CardTitle>
+            <p className="text-xs text-violet-800">Read-only comparison — does not affect production cash totals.</p>
+          </CardHeader>
+          {showErpFinanceCompare && (
+            <CardContent className="space-y-3 text-sm">
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+                <div className="rounded border bg-white p-2">
+                  <div className="text-[11px] text-slate-500">Legacy session snapshot</div>
+                  <div className="font-semibold">{formatINR(erpCashSessionCompare.legacySessionSystemCashTotal)}</div>
+                </div>
+                <div className="rounded border bg-white p-2">
+                  <div className="text-[11px] text-slate-500">Legacy recomputed cash</div>
+                  <div className="font-semibold">{formatINR(erpCashSessionCompare.legacyRecomputedCashTotal)}</div>
+                </div>
+                <div className="rounded border bg-white p-2">
+                  <div className="text-[11px] text-slate-500">Ledger cash total</div>
+                  <div className="font-semibold">{formatINR(erpCashSessionCompare.ledgerCashTotal)}</div>
+                </div>
+                <div className="rounded border bg-white p-2">
+                  <div className="text-[11px] text-slate-500">Delta (ledger - legacy snapshot)</div>
+                  <div className={`font-semibold ${Math.abs(erpCashSessionCompare.deltaLegacySnapshotVsLedger) < 0.01 ? 'text-emerald-700' : 'text-red-700'}`}>
+                    {formatINR(erpCashSessionCompare.deltaLegacySnapshotVsLedger)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded border bg-white p-2">
+                <div className="text-xs font-medium mb-1">Status: <span className="uppercase">{erpCashSessionCompare.status}</span></div>
+                <div className="text-xs text-slate-600">Cash dimension legacy vs ledger delta: {formatINR(erpLegacyVsLedger.cash.delta)}</div>
+              </div>
+
+              <div className="rounded border bg-white p-2">
+                <div className="text-xs font-medium mb-1">Warnings / linkage flags</div>
+                {erpCashSessionCompare.flags.length ? (
+                  <ul className="list-disc pl-5 space-y-0.5 text-xs text-slate-700">
+                    {erpCashSessionCompare.flags.map(flag => <li key={flag}>{flag}</li>)}
+                  </ul>
+                ) : (
+                  <div className="text-xs text-slate-500">No comparison flags emitted.</div>
+                )}
+              </div>
+            </CardContent>
+          )}
+        </Card>
 
         {activeTab === '__removed_cashbook__' && (
           <div className="space-y-4">
@@ -2696,7 +2845,7 @@ export default function Finance() {
               </div>
             )}
             {editingClosingSession && editingClosingSession.status === 'closed' && (() => {
-              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], editingClosingSession.startTime, editingClosingSession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.deletedTransactions || [], data.purchaseOrders || [], data.manualCashbookEntries || [], editingClosingSession.startTime, editingClosingSession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
               const expectedClosing = editingClosingSession.openingBalance + (editingClosingSession.systemCashTotal ?? computedTotals.systemCashTotal);
               const previewClosing = Number(editingClosingAmount);
               const previewVariance = Number.isFinite(previewClosing) ? previewClosing - expectedClosing : (editingClosingSession.difference ?? 0);
@@ -2751,7 +2900,7 @@ export default function Finance() {
               </CardHeader>
               <CardContent className="space-y-3 pt-5">
                 {filteredCashHistory.map(session => {
-                  const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], session.startTime, session.endTime, undefined, upfrontOrders, data.supplierPayments || []);
+                  const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.deletedTransactions || [], data.purchaseOrders || [], data.manualCashbookEntries || [], session.startTime, session.endTime, undefined, upfrontOrders, data.supplierPayments || []);
                   const systemCashTotal = session.systemCashTotal ?? computedTotals.systemCashTotal;
                   const sessionExpenseTotal = session.sessionExpenseTotal ?? computedTotals.expenseTotal;
                   const difference = session.difference ?? ((session.closingBalance ?? 0) - (session.openingBalance + systemCashTotal));
@@ -2819,7 +2968,7 @@ export default function Finance() {
             </Card>
 
             {activeHistorySession && (() => {
-              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], activeHistorySession.startTime, activeHistorySession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.deletedTransactions || [], data.purchaseOrders || [], data.manualCashbookEntries || [], activeHistorySession.startTime, activeHistorySession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
               const systemCashTotal = activeHistorySession.systemCashTotal ?? computedTotals.systemCashTotal;
               const sessionExpenseTotal = activeHistorySession.sessionExpenseTotal ?? computedTotals.expenseTotal;
               const difference = activeHistorySession.difference ?? ((activeHistorySession.closingBalance ?? 0) - (activeHistorySession.openingBalance + systemCashTotal));
@@ -2997,7 +3146,7 @@ export default function Finance() {
             {deletingSessionId && (() => {
               const deletingSession = cashSessions.find(session => session.id === deletingSessionId);
               if (!deletingSession || deletingSession.status !== 'closed') return null;
-              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.purchaseOrders || [], deletingSession.startTime, deletingSession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
+              const computedTotals = getSessionCashTotals(data.transactions, expenses, cashAdjustments, data.deleteCompensations || [], data.deletedTransactions || [], data.purchaseOrders || [], data.manualCashbookEntries || [], deletingSession.startTime, deletingSession.endTime, undefined, upfrontOrders, data.supplierPayments || []);
               const systemCashTotal = deletingSession.systemCashTotal ?? computedTotals.systemCashTotal;
               const expectedClosing = deletingSession.openingBalance + systemCashTotal;
               const countedClosing = deletingSession.closingBalance ?? 0;
@@ -3344,18 +3493,30 @@ export default function Finance() {
               <CardHeader><CardTitle>Expected Closing Breakdown</CardTitle></CardHeader>
               <CardContent className="space-y-2 text-sm">
                 <div>Opening Cash: <b>{formatINR(expectedClosingBreakdown.openingCash)}</b></div>
-                <div>Cash at Sale: <b>{formatINR(expectedClosingBreakdown.cashAtSale)}</b></div>
+
+                <div className="pt-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Active Cash Flow</div>
+                <div>Active Cash Sales: <b>{formatINR(expectedClosingBreakdown.activeCashSales)}</b></div>
                 <div>Customer Cash Collections: <b>{formatINR(expectedClosingBreakdown.customerCashCollections)}</b></div>
                 <div>Custom Order Cash Collections: <b>{formatINR(expectedClosingBreakdown.customOrderCashCollections)}</b></div>
                 <div>Cash Additions: <b>{formatINR(expectedClosingBreakdown.cashAdditions)}</b></div>
+
+                <div className="pt-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Deleted / Refund Flow</div>
+                <div>Deleted Sale Cash Included for Refund Offset: <b>{formatINR(expectedClosingBreakdown.deletedSaleCashIncludedForRefundOffset)}</b></div>
+                <div>Explicit Delete Refunds: <b>{formatINR(expectedClosingBreakdown.deleteCompensationRefunds)}</b></div>
+                <div>Total Cash at Sale: <b>{formatINR(expectedClosingBreakdown.cashAtSale)}</b></div>
+                <div className="text-xs text-muted-foreground">Deleted sale cash is included only when that deleted sale has an explicit cash refund, so sale cash-in and refund cash-out offset correctly.</div>
+
+                <div className="pt-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Outflows</div>
                 <div>Cash Refunds: <b>{formatINR(expectedClosingBreakdown.cashRefunds)}</b></div>
-                <div>Delete Compensation Refunds: <b>{formatINR(expectedClosingBreakdown.deleteCompensationRefunds)}</b></div>
                 <div>Supplier Cash Payments: <b>{formatINR(expectedClosingBreakdown.supplierCashPayments)}</b></div>
                 <div>Expenses: <b>{formatINR(expectedClosingBreakdown.expenses)}</b></div>
                 <div>Cash Withdrawals: <b>{formatINR(expectedClosingBreakdown.cashWithdrawals)}</b></div>
-                <div>Cash In = <b>{formatINR(expectedClosingBreakdown.cashAtSale + expectedClosingBreakdown.customerCashCollections + expectedClosingBreakdown.customOrderCashCollections + expectedClosingBreakdown.cashAdditions)}</b></div>
-                <div>Cash Out = <b>{formatINR(expectedClosingBreakdown.cashRefunds + expectedClosingBreakdown.deleteCompensationRefunds + expectedClosingBreakdown.supplierCashPayments + expectedClosingBreakdown.expenses + expectedClosingBreakdown.cashWithdrawals)}</b></div>
-                <div className="pt-2 border-t">Expected Closing = Opening + Cash In - Cash Out = <b>{formatINR(expectedClosingBreakdown.expectedClosing)}</b></div>
+
+                <div className="pt-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Totals</div>
+                <div>Gross Cash Entered: <b>{formatINR(expectedClosingBreakdown.grossCashEntered)}</b></div>
+                <div>Gross Cash Exited: <b>{formatINR(expectedClosingBreakdown.grossCashExited)}</b></div>
+                <div>Net Cash Movement: <b>{formatINR(expectedClosingBreakdown.netCashMovement)}</b></div>
+                <div className="pt-2 border-t">Expected Closing = Opening + Net Cash Movement = <b>{formatINR(expectedClosingBreakdown.expectedClosing)}</b></div>
                 <div className="pt-2 flex justify-end"><Button variant="outline" onClick={() => setIsExpectedClosingBreakdownOpen(false)}>Close</Button></div>
               </CardContent>
             </Card>

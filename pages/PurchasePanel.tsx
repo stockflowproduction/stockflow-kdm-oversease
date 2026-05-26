@@ -1,13 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
-import { applyPartyCreditToPurchaseOrder, createPurchaseOrder, createPurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
+import { applyPartyCreditToPurchaseOrder, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
 import { runProcurementShadowCompare } from '../services/procurementApi';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
-import { ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, ClipboardList, Filter, IndianRupee, Package, Pencil, Plus, Search, Truck, User, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, ClipboardList, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, Truck, User, X } from 'lucide-react';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
+import { buildPurchasePartyLedger } from '../services/purchaseLedger';
+import { compareLegacyVsLedger, compareSupplierBalances } from '../services/erpComparison';
 
 type PurchaseTab = 'orders' | 'parties';
 type WizardStep = 'source' | 'product' | 'variants' | 'pricing' | 'review' | 'newProduct';
@@ -192,14 +194,21 @@ export default function PurchasePanel() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [showReceivePopup, setShowReceivePopup] = useState(false);
   const [showPaymentPopup, setShowPaymentPopup] = useState(false);
+  const [showPartyPaymentPopup, setShowPartyPaymentPopup] = useState(false);
   const [paymentTargetOrder, setPaymentTargetOrder] = useState<PurchaseOrder | null>(null);
+  const [paymentTargetParty, setPaymentTargetParty] = useState<PurchaseParty | null>(null);
   const [partialPaymentAmount, setPartialPaymentAmount] = useState<number | ''>('');
   const [partialPaymentMethod, setPartialPaymentMethod] = useState<'cash' | 'online'>('cash');
   const [partialPaymentNote, setPartialPaymentNote] = useState('');
+  const [partyPaymentDate, setPartyPaymentDate] = useState('');
+  const [partyPaymentError, setPartyPaymentError] = useState<string | null>(null);
+  const [deletePartyError, setDeletePartyError] = useState<string | null>(null);
+  const [expandedPartyId, setExpandedPartyId] = useState<string | null>(null);
   const [receiveTargetOrder, setReceiveTargetOrder] = useState<PurchaseOrder | null>(null);
   const [receivePriceMethod, setReceivePriceMethod] = useState<ReceivePriceMethod>('no_change');
   const [partyCreditToApply, setPartyCreditToApply] = useState<number | ''>('');
   const [partyCreditTouched, setPartyCreditTouched] = useState(false);
+  const [showErpSupplierCompare, setShowErpSupplierCompare] = useState(false);
   const [purchaseCreditApplyError, setPurchaseCreditApplyError] = useState<string | null>(null);
 
   const refresh = () => {
@@ -719,6 +728,153 @@ export default function PurchasePanel() {
     return map;
   }, [orders]);
 
+  const dataSnapshot = useMemo(() => loadData(), [orders, parties]);
+  const supplierPayments = useMemo(() => dataSnapshot.supplierPayments || [], [dataSnapshot]);
+  const partyCreditLedger = useMemo(() => dataSnapshot.partyCreditLedger || [], [dataSnapshot]);
+  const partyLedgers = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof buildPurchasePartyLedger>>();
+    parties.forEach((party) => {
+      map.set(party.id, buildPurchasePartyLedger({ partyId: party.id, purchaseOrders: orders, supplierPayments, partyCreditLedger }));
+    });
+    return map;
+  }, [parties, orders, supplierPayments, partyCreditLedger]);
+
+
+  const partyCreditsByPartyId = useMemo(() => {
+    const ledger = (loadData().partyCreditLedger || []) as Array<{ partyId?: string; partyName?: string; remainingAmount?: number }>;
+    const map = new Map<string, number>();
+    parties.forEach((party) => {
+      const total = ledger
+        .filter((entry) => partyMatchesCredit({ id: party.id, name: party.name }, entry))
+        .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
+      map.set(party.id, Number(total.toFixed(2)));
+    });
+    return map;
+  }, [parties, orders]);
+
+  const openPartyPaymentModal = (party: PurchaseParty) => {
+    setPaymentTargetParty(party);
+    setPartialPaymentAmount('');
+    setPartialPaymentMethod('cash');
+    setPartialPaymentNote('');
+    setPartyPaymentDate(new Date().toISOString().slice(0, 10));
+    setPartyPaymentError(null);
+    setShowPartyPaymentPopup(true);
+  };
+
+  const submitPartyPayment = async () => {
+    if (!paymentTargetParty) return;
+    const amount = Math.max(0, Number(partialPaymentAmount) || 0);
+    if (amount <= 0) {
+      setPartyPaymentError('Amount must be greater than 0.');
+      return;
+    }
+    const payable = Math.max(0, Number(partyFinancials.get(paymentTargetParty.id)?.remaining || 0));
+    const payableApplied = Math.min(payable, amount);
+    const partyCreditCreated = Math.max(0, Number((amount - payableApplied).toFixed(2)));
+    await createSupplierPayment({
+      partyId: paymentTargetParty.id,
+      partyName: paymentTargetParty.name,
+      amount,
+      method: partialPaymentMethod,
+      note: partialPaymentNote.trim() || undefined,
+      paidAt: partyPaymentDate ? new Date(`${partyPaymentDate}T00:00:00.000Z`).toISOString() : new Date().toISOString(),
+      payableApplied,
+      partyCreditCreated,
+    });
+    setShowPartyPaymentPopup(false);
+    setPaymentTargetParty(null);
+    refresh();
+  };
+
+  const deletePartySafely = async (party: PurchaseParty) => {
+    setDeletePartyError(null);
+    const hasOrders = orders.some((o) => o.partyId === party.id || normalizePartyName(o.partyName) === normalizePartyName(party.name));
+    const hasPayments = supplierPayments.some((p: any) => !p.deletedAt && (p.partyId === party.id || normalizePartyName(p.partyName) === normalizePartyName(party.name)));
+    const hasCredits = partyCreditLedger.some((c: any) => (c.partyId === party.id || normalizePartyName(c.partyName) === normalizePartyName(party.name)));
+    if (hasOrders || hasPayments || hasCredits) {
+      setDeletePartyError('This party has transactions and cannot be deleted.');
+      return;
+    }
+    await deletePurchaseParty(party.id);
+    refresh();
+  };
+
+  const partyLedgerRows = useMemo(() => {
+    if (!expandedPartyId) return [];
+    return partyLedgers.get(expandedPartyId)?.rows || [];
+  }, [expandedPartyId, partyLedgers]);
+  const erpCompareInput = useMemo(() => ({
+    transactions: dataSnapshot.transactions || [],
+    deletedTransactions: dataSnapshot.deletedTransactions || [],
+    deleteCompensations: dataSnapshot.deleteCompensations || [],
+    supplierPayments: supplierPayments || [],
+    purchaseOrders: orders || [],
+    manualCashbookEntries: dataSnapshot.manualCashbookEntries || [],
+    upfrontOrders: dataSnapshot.upfrontOrders || [],
+    customers: dataSnapshot.customers || [],
+    products: dataSnapshot.products || [],
+    cashSessions: dataSnapshot.cashSessions || [],
+    expenses: dataSnapshot.expenses || [],
+  }), [dataSnapshot, supplierPayments, orders]);
+  const erpSupplierComparison = useMemo(() => compareSupplierBalances(erpCompareInput), [erpCompareInput]);
+  const erpTopLevel = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
+  const erpSupplierRows = useMemo(() => (
+    parties.map((party) => {
+      const legacyPayable = Math.max(0, Number(partyFinancials.get(party.id)?.remaining || 0));
+      const legacyCredit = Math.max(0, Number(partyCreditsByPartyId.get(party.id) || 0));
+      const ledgerSummary = partyLedgers.get(party.id)?.summary;
+      const ledgerPayable = Math.max(0, Number(ledgerSummary?.netPayable || 0));
+      const ledgerCredit = Math.max(0, Number(ledgerSummary?.ourCredit || 0));
+      const payableDelta = ledgerPayable - legacyPayable;
+      const creditDelta = ledgerCredit - legacyCredit;
+      const status = Math.abs(payableDelta) < 0.01 && Math.abs(creditDelta) < 0.01 ? 'match' : 'mismatch';
+      return { partyId: party.id, partyName: party.name, legacyPayable, ledgerPayable, legacyCredit, ledgerCredit, payableDelta, creditDelta, status };
+    })
+  ), [parties, partyFinancials, partyCreditsByPartyId, partyLedgers]);
+  const erpSupplierWarnings = useMemo(() => {
+    const warnings = [...erpSupplierComparison.flags];
+    if ((orders || []).some((po: any) => Array.isArray(po.paymentHistory) && po.paymentHistory.length > 0)) warnings.push('legacy paymentHistory dependency');
+    if (erpSupplierComparison.delta !== 0) warnings.push('payable projection mismatch');
+    if (erpSupplierRows.some((row) => Math.abs(row.creditDelta) > 0.01)) warnings.push('supplier credit mismatch');
+    return Array.from(new Set(warnings));
+  }, [erpSupplierComparison, orders, erpSupplierRows]);
+  const isPurchaseLedgerDebugEnabled = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    const queryEnabled = new URLSearchParams(window.location.search).get('purchaseLedgerDebug') === '1';
+    const storageEnabled = window.localStorage.getItem('PURCHASE_LEDGER_DEBUG') === '1';
+    return queryEnabled || storageEnabled;
+  }, []);
+  const purchaseLedgerDebugPayload = useMemo(() => {
+    if (!isPurchaseLedgerDebugEnabled || !expandedPartyId) return null;
+    const party = parties.find((p) => p.id === expandedPartyId);
+    if (!party) return null;
+    const partyOrders = (orders || []).filter((o) => o.partyId === party.id).map((o) => ({
+      id: o.id, billNumber: o.billNumber, date: o.orderDate || o.createdAt, totalAmount: o.totalAmount, remainingAmount: o.remainingAmount, paymentHistory: o.paymentHistory || [],
+    }));
+    const partyPayments = (supplierPayments || []).filter((p: any) => p.partyId === party.id && !p.deletedAt).map((p: any) => ({
+      id: p.id, voucherNo: p.voucherNo, date: p.paidAt || p.createdAt, amount: p.amount, paymentAppliedToPayable: p.paymentAppliedToPayable, payableApplied: p.payableApplied, partyCreditCreated: p.partyCreditCreated,
+    }));
+    const partyCredits = (partyCreditLedger || []).filter((c: any) => c.partyId === party.id).map((c: any) => ({
+      id: c.id, partyId: c.partyId, sourceRef: c.sourceVoucherNo || c.sourcePaymentId, amountCreated: c.amountCreated, remainingAmount: c.remainingAmount, usedAmount: c.usageHistory?.reduce((s: number, u: any) => s + Math.max(0, Number(u.amount || 0)), 0) || 0,
+    }));
+    const helperOutput = partyLedgers.get(party.id) || null;
+    return {
+      party: { id: party.id, name: party.name },
+      purchaseOrders: partyOrders,
+      supplierPayments: partyPayments,
+      partyCreditLedger: partyCredits,
+      helperOutput: {
+        rows: (helperOutput?.rows || []).map((r) => ({ date: r.date, type: r.type, reference: r.reference, payableIncrease: r.payableIncrease, actualPayment: r.actualPayment, payableApplied: r.payableApplied, creditCreated: r.creditCreated, creditUsed: r.creditUsed, runningPayable: r.runningPayable, runningCredit: r.runningCredit, netPayable: r.netPayable })),
+        summary: helperOutput?.summary || null,
+      },
+    };
+  }, [isPurchaseLedgerDebugEnabled, expandedPartyId, parties, orders, supplierPayments, partyCreditLedger, partyLedgers]);
+  useEffect(() => {
+    if (!purchaseLedgerDebugPayload) return;
+    console.log('[PURCHASE_LEDGER_DEBUG]', purchaseLedgerDebugPayload);
+  }, [purchaseLedgerDebugPayload]);
+
   const openPartialPaymentModal = (order: PurchaseOrder) => {
     setPaymentTargetOrder(order);
     setPartialPaymentAmount('');
@@ -746,18 +902,6 @@ export default function PurchasePanel() {
     refresh();
   };
 
-
-  const partyCreditsByPartyId = useMemo(() => {
-    const ledger = (loadData().partyCreditLedger || []) as Array<{ partyId?: string; partyName?: string; remainingAmount?: number }>;
-    const map = new Map<string, number>();
-    parties.forEach((party) => {
-      const total = ledger
-        .filter((entry) => partyMatchesCredit({ id: party.id, name: party.name }, entry))
-        .reduce((sum, entry) => sum + Math.max(0, Number(entry.remainingAmount || 0)), 0);
-      map.set(party.id, Number(total.toFixed(2)));
-    });
-    return map;
-  }, [parties, orders]);
 
   const receivePricePreviewRows = useMemo(() => {
     if (!receiveTargetOrder) return [] as Array<{
@@ -817,6 +961,7 @@ export default function PurchasePanel() {
       </div>
 
       {true ? (
+        <>
         <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader><CardTitle>Create Party</CardTitle></CardHeader>
@@ -837,34 +982,135 @@ export default function PurchasePanel() {
                 <div key={p.id} className="rounded-xl border p-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="font-medium">{p.name}</div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => startEditingParty(p, true)}
-                      className="h-8 px-2 text-xs"
-                    >
-                      <Pencil className="mr-1 h-3.5 w-3.5" />
-                      Edit
-                    </Button>
+                    <div className="flex gap-1">
+                      <Button type="button" variant="outline" size="sm" onClick={() => openPartyPaymentModal(p)} className="h-8 px-2 text-xs">Give Payment</Button>
+                      <Button type="button" variant="outline" size="sm" onClick={() => startEditingParty(p, true)} className="h-8 px-2 text-xs"><Pencil className="mr-1 h-3.5 w-3.5" />Edit</Button>
+                      <Button type="button" variant="outline" size="sm" onClick={() => void deletePartySafely(p)} className="h-8 px-2 text-xs text-red-600"><Trash2 className="mr-1 h-3.5 w-3.5" />Delete</Button>
+                    </div>
                   </div>
                   <div className="text-xs text-muted-foreground">{p.phone || '—'} · GST: {p.gst || '—'} · {p.location || '—'}</div>
                   <div className="text-xs text-muted-foreground">Contact: {p.contactPerson || '—'}</div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-                    <SummaryCard label="Payable" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPurchase || 0)}`} />
-                    <SummaryCard label="Payments" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPaid || 0)}`} />
-                    <SummaryCard label="Net Payable" value={`₹${formatNumber(partyFinancials.get(p.id)?.remaining || 0)}`} />
+                    <SummaryCard label="Total Purchase" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPurchase || 0)}`} />
+                    <SummaryCard label="Actual Payments" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.actualPayments || 0)}`} />
+                    <SummaryCard label="Payable Applied" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.payableApplied || 0)}`} />
+                  </div>
+                  <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                    <SummaryCard label="Credit Created" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.creditCreated || partyLedgers.get(p.id)?.summary.partyCreditCreated || 0)}`} />
+                    <SummaryCard label="Credit Used" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.creditUsed || partyLedgers.get(p.id)?.summary.partyCreditUsed || 0)}`} />
+                    <SummaryCard label="Gross Payable" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.grossPayable || partyLedgers.get(p.id)?.summary.remainingPayable || 0)}`} />
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                    <SummaryCard label="Our Credit" value={`₹${formatNumber((partyCreditsByPartyId.get(p.id) || 0))}`} />
-                    <SummaryCard label="Net Payable" value={`₹${formatNumber(Math.max(0, (partyFinancials.get(p.id)?.remaining || 0) - (partyCreditsByPartyId.get(p.id) || 0)))}`} />
+                    <SummaryCard label="Our Credit" value={`₹${formatNumber((partyLedgers.get(p.id)?.summary.ourCredit || 0))}`} />
+                    <SummaryCard label="Net Payable" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.netPayable || 0)}`} />
+                  </div>
+                  <div className="mt-2">
+                    <Button size="sm" variant="outline" onClick={() => setExpandedPartyId((prev) => prev === p.id ? null : p.id)}>{expandedPartyId === p.id ? 'Hide Ledger' : 'View Ledger'}</Button>
                   </div>
                 </div>
               ))}
               {!parties.length && <div className="text-sm text-muted-foreground">No parties yet.</div>}
+              {deletePartyError && <div className="text-xs text-red-600">{deletePartyError}</div>}
             </CardContent>
           </Card>
         </div>
+        <Card className="border-violet-200 bg-violet-50/50">
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between gap-2">
+              <span>New ERP Supplier Compare</span>
+              <Button size="sm" variant="outline" onClick={() => setShowErpSupplierCompare((prev) => !prev)}>
+                {showErpSupplierCompare ? 'Hide' : 'Show'}
+              </Button>
+            </CardTitle>
+            <p className="text-xs text-violet-800">Read-only comparison — does not affect production supplier balances.</p>
+          </CardHeader>
+          {showErpSupplierCompare && (
+            <CardContent className="space-y-3">
+              <div className="rounded border bg-white p-2 text-xs text-slate-700">
+                <div>Global payable status: <span className="uppercase font-semibold">{erpTopLevel.payable.status}</span></div>
+                <div>Legacy payable: ₹{formatNumber(erpSupplierComparison.legacyPayable)} • Ledger payable: ₹{formatNumber(erpSupplierComparison.ledgerPayable)} • Delta: ₹{formatNumber(erpSupplierComparison.delta)}</div>
+                <div>Reasons: {erpTopLevel.payable.reasons?.length ? erpTopLevel.payable.reasons.join(' • ') : 'None'}</div>
+              </div>
+              <div className="rounded border bg-white p-2 text-xs">
+                <div className="font-medium mb-1">Warnings / Ambiguities</div>
+                {erpSupplierWarnings.length ? <ul className="list-disc pl-5 space-y-0.5 text-slate-700">{erpSupplierWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <div className="text-slate-500">No warnings emitted.</div>}
+              </div>
+              <div className="overflow-x-auto rounded border bg-white">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-50">
+                    <tr className="text-left border-b">
+                      <th className="p-2">Supplier</th>
+                      <th className="p-2 text-right">Legacy Payable</th>
+                      <th className="p-2 text-right">Ledger Payable</th>
+                      <th className="p-2 text-right">Legacy Credit</th>
+                      <th className="p-2 text-right">Ledger Credit</th>
+                      <th className="p-2 text-right">Payable Δ</th>
+                      <th className="p-2 text-right">Credit Δ</th>
+                      <th className="p-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {erpSupplierRows.map((row) => (
+                      <tr key={row.partyId} className="border-b">
+                        <td className="p-2">{row.partyName} <span className="text-muted-foreground">({row.partyId})</span></td>
+                        <td className="p-2 text-right">₹{formatNumber(row.legacyPayable)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(row.ledgerPayable)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(row.legacyCredit)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(row.ledgerCredit)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(row.payableDelta)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(row.creditDelta)}</td>
+                        <td className={`p-2 font-medium uppercase ${row.status === 'match' ? 'text-emerald-700' : 'text-red-700'}`}>{row.status}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          )}
+        </Card>
+        {expandedPartyId && (
+          <Card>
+            <CardHeader><CardTitle>Party Ledger</CardTitle></CardHeader>
+            <CardContent>
+              {!partyLedgerRows.length ? <div className="text-sm text-muted-foreground">No ledger rows available.</div> : (
+                <div className="overflow-auto rounded-xl border">
+                  {isPurchaseLedgerDebugEnabled && purchaseLedgerDebugPayload && (
+                    <div className="p-2 border-b">
+                      <Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(JSON.stringify(purchaseLedgerDebugPayload, null, 2))}>Copy Ledger Debug JSON</Button>
+                    </div>
+                  )}
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <th className="p-2 text-left">Date</th><th className="p-2 text-left">Type</th><th className="p-2 text-left">Reference</th><th className="p-2 text-left">Description</th>
+                        <th className="p-2 text-right">Purchase / Payable +</th><th className="p-2 text-right">Actual Payment</th><th className="p-2 text-right">Payable Applied</th><th className="p-2 text-right">Credit Created</th><th className="p-2 text-right">Credit Used</th><th className="p-2 text-right">Gross Payable</th><th className="p-2 text-right">Our Credit</th><th className="p-2 text-right">Net Payable</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {partyLedgerRows.map((row, idx) => (
+                        <tr key={`${row.reference}-${idx}`} className="border-t">
+                          <td className="p-2">{row.date ? new Date(row.date).toLocaleDateString('en-GB') : '—'}</td>
+                          <td className="p-2">{{ purchase: 'Purchase Created', supplier_payment: 'Supplier Payment', credit_used: 'Credit Used', legacy_payment: 'Legacy Payment', reversal: 'Reversal' }[row.type] || row.type || '—'}</td>
+                          <td className="p-2">{row.reference || '—'}</td>
+                          <td className="p-2">{row.description || '—'}</td>
+                          <td className="p-2 text-right">{row.payableIncrease ? `₹${formatNumber(row.payableIncrease)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.actualPayment ? `₹${formatNumber(row.actualPayment)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.payableApplied ? `₹${formatNumber(row.payableApplied)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.creditCreated ? `₹${formatNumber(row.creditCreated)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.creditUsed ? `₹${formatNumber(row.creditUsed)}` : '—'}</td>
+                          <td className="p-2 text-right">₹{formatNumber((row.grossPayable ?? row.runningGrossPayable ?? row.runningPayable) || 0)}</td>
+                          <td className="p-2 text-right">₹{formatNumber((row.ourCredit ?? row.runningOurCredit ?? row.runningCredit) || 0)}</td>
+                          <td className="p-2 text-right font-semibold">₹{formatNumber((row.netPayable ?? row.runningNetPayable) || 0)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+        </>
       ) : (
         <>
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
@@ -1370,6 +1616,22 @@ export default function PurchasePanel() {
             <Button variant="outline" onClick={() => setShowReceivePopup(false)}>Cancel</Button>
             <Button onClick={confirmReceiveOrder}><Truck className="w-4 h-4 mr-1" /> Confirm Receive</Button>
           </div>
+        </div>
+      </Modal>
+      <Modal open={showPartyPaymentPopup} onClose={() => setShowPartyPaymentPopup(false)} title="Give Payment to Party">
+        <div className="space-y-3">
+          <div className="text-sm">Party: <span className="font-semibold">{paymentTargetParty?.name || '—'}</span></div>
+          <div className="grid grid-cols-3 gap-2">
+            <SummaryCard label="Payable" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0)))}`} />
+            <SummaryCard label="Our Credit" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
+            <SummaryCard label="Net Payable" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0) - Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
+          </div>
+          <div><Label>Amount</Label><Input type="number" value={partialPaymentAmount} onChange={e => setPartialPaymentAmount(e.target.value === '' ? '' : Number(e.target.value))} /></div>
+          <div><Label>Method</Label><select className="h-10 w-full rounded-md border px-3 text-sm" value={partialPaymentMethod} onChange={e => setPartialPaymentMethod(e.target.value as 'cash' | 'online')}><option value="cash">Cash</option><option value="online">Online</option></select></div>
+          <div><Label>Date</Label><Input type="date" value={partyPaymentDate} onChange={e => setPartyPaymentDate(e.target.value)} /></div>
+          <div><Label>Note</Label><Input value={partialPaymentNote} onChange={e => setPartialPaymentNote(e.target.value)} placeholder="Optional note" /></div>
+          {partyPaymentError && <div className="text-xs text-red-600">{partyPaymentError}</div>}
+          <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setShowPartyPaymentPopup(false)}>Cancel</Button><Button onClick={submitPartyPayment}>Save Payment</Button></div>
         </div>
       </Modal>
       <Modal open={showPaymentPopup} onClose={() => setShowPaymentPopup(false)} title="Pay Supplier Due">

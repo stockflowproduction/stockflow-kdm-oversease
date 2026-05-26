@@ -1,8 +1,10 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { StoreProfile, TAX_OPTIONS } from '../types';
 import { loadData, updateStoreProfile, uploadImageFileToCloudinary } from '../services/storage';
 import { logout, getCurrentUser } from '../services/auth';
+import { auth } from '../services/firebase';
+import { createWhatsAppSession, getWhatsAppQr, getWhatsAppStatus, getWhatsAppServerUrl } from '../services/whatsapp';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Label, Select } from '../components/ui';
 import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText } from 'lucide-react';
 
@@ -21,6 +23,15 @@ export default function Settings() {
   const [confirmPinInput, setConfirmPinInput] = useState('');
   const [pinMessage, setPinMessage] = useState<string | null>(null);
   const [uploadMessage, setUploadMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const [waStatus, setWaStatus] = useState<'checking' | 'connected' | 'not_connected' | 'server_unavailable'>('checking');
+  const [waMessage, setWaMessage] = useState<string | null>(null);
+  const [waModalOpen, setWaModalOpen] = useState(false);
+  const [waQr, setWaQr] = useState<string>('');
+  const waPollTimerRef = useRef<number | null>(null);
+  const isInvoiceSendDebugEnabled = () => { try { return window.location.href.includes('invoiceSendDebug=1') || window.localStorage.getItem('INVOICE_SEND_DEBUG') === '1'; } catch { return false; } };
+  const logDebug = (payload: unknown) => { if (isInvoiceSendDebugEnabled()) console.log('[INVOICE_SEND_DEBUG]', payload); };
+  const [waResolvedServerUrl, setWaResolvedServerUrl] = useState<string>('');
+  const [waEnvPresent, setWaEnvPresent] = useState<boolean>(false);
 
   useEffect(() => {
     const refreshData = () => {
@@ -34,12 +45,15 @@ export default function Settings() {
       setUserEmail(getCurrentUser());
     };
     refreshData();
+    refreshWhatsAppResolutionDebug();
+    void checkWhatsAppStatus();
     window.addEventListener('storage', refreshData);
     window.addEventListener('local-storage-update', refreshData);
 
   return () => {
         window.removeEventListener('storage', refreshData);
         window.removeEventListener('local-storage-update', refreshData);
+        clearWaPollTimer();
     };
   }, []);
 
@@ -114,6 +128,91 @@ export default function Settings() {
       setUploadingField(null);
     }
   };
+
+  const clearWaPollTimer = () => {
+    if (waPollTimerRef.current !== null) {
+      window.clearInterval(waPollTimerRef.current);
+      waPollTimerRef.current = null;
+    }
+  };
+
+
+  const refreshWhatsAppResolutionDebug = () => {
+    try {
+      setWaResolvedServerUrl(getWhatsAppServerUrl());
+    } catch {
+      setWaResolvedServerUrl('');
+    }
+    const rawEnv = ((import.meta as any)?.env?.VITE_WHATSAPP_SERVER_URL || '').trim();
+    setWaEnvPresent(Boolean(rawEnv));
+  };
+
+  const checkWhatsAppStatus = async () => {
+    const uid = auth?.currentUser?.uid;
+    if (!uid) {
+      setWaStatus('not_connected');
+      setWaMessage('Please sign in again to continue');
+      return;
+    }
+    setWaMessage(null);
+    refreshWhatsAppResolutionDebug();
+    try {
+      const status = await getWhatsAppStatus(uid);
+      logDebug({ step: 'whatsapp_status_result', connected: status.connected });
+      setWaStatus(status.connected ? 'connected' : 'not_connected');
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL is not configured')) {
+        setWaMessage('Server URL is not configured');
+      }
+      logDebug({ step: 'whatsapp_status_result', error: error instanceof Error ? error.message : String(error) });
+      setWaStatus('server_unavailable');
+    }
+  };
+
+  const handleConnectWhatsApp = async () => {
+    const uid = auth?.currentUser?.uid;
+    if (!uid) {
+      setWaMessage('Please sign in again to continue');
+      return;
+    }
+    setWaMessage(null);
+    refreshWhatsAppResolutionDebug();
+    setWaQr('');
+    setWaModalOpen(true);
+    logDebug({ step: 'whatsapp_create_session_start' });
+    try {
+      await createWhatsAppSession(uid);
+      logDebug({ step: 'whatsapp_create_session_success' });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL is not configured')) {
+        setWaMessage('Server URL is not configured');
+      }
+      logDebug({ step: 'whatsapp_create_session_failure', error: error instanceof Error ? error.message : String(error) });
+      setWaMessage(error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL is not configured') ? 'Server URL is not configured' : 'Unable to connect WhatsApp');
+      setWaModalOpen(false);
+      return;
+    }
+    clearWaPollTimer();
+    const poll = async () => {
+      try {
+        const [qrRes, statusRes] = await Promise.all([getWhatsAppQr(uid), getWhatsAppStatus(uid)]);
+        logDebug({ step: 'whatsapp_qr_poll_result', hasQr: Boolean(qrRes.qr), connected: Boolean(qrRes.connected) });
+        logDebug({ step: 'whatsapp_status_result', connected: statusRes.connected });
+        if (qrRes.qr) setWaQr(qrRes.qr);
+        if (statusRes.connected || qrRes.connected) {
+          clearWaPollTimer();
+          setWaModalOpen(false);
+          setWaStatus('connected');
+          setWaMessage('WhatsApp connected successfully');
+        }
+      } catch (error) {
+        setWaMessage(error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL is not configured') ? 'Server URL is not configured' : 'Unable to connect WhatsApp');
+      }
+    };
+    await poll();
+    waPollTimerRef.current = window.setInterval(() => { void poll(); }, 2000);
+  };
+
   const handleCatalogFirstPageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -276,6 +375,23 @@ export default function Settings() {
 
 
         <Card>
+          <CardHeader><CardTitle>WhatsApp Integration</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm">Connection status: {waStatus === 'checking' ? 'Checking...' : waStatus === 'connected' ? 'Connected' : waStatus === 'server_unavailable' ? 'Server unavailable' : 'Not Connected'}</p>
+            <div className="flex gap-2">
+              <Button type="button" variant="outline" onClick={handleConnectWhatsApp}>Connect WhatsApp</Button>
+              <Button type="button" variant="outline" onClick={() => void checkWhatsAppStatus()}>Check Status</Button>
+            </div>
+            {waMessage && <p className="text-xs text-muted-foreground">{waMessage}</p>}
+            {isInvoiceSendDebugEnabled() && (
+              <p className="text-[11px] text-muted-foreground">
+                WhatsApp server: {waResolvedServerUrl || 'not resolved'} · Env present: {waEnvPresent ? 'yes' : 'no'}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
           <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Manager PIN</CardTitle></CardHeader>
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground">Temporary default PIN is <span className="font-semibold">1234</span> until you set a new PIN.</p>
@@ -301,6 +417,20 @@ export default function Settings() {
          <Button onClick={handleSave} className="min-w-[200px] h-11"><Save className="w-4 h-4 mr-2" /> Save Profile</Button>
          {success && <span className="text-green-600 font-medium">Profile Saved!</span>}
       </div>
+
+      {waModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-background rounded-lg border p-4 w-full max-w-md space-y-3">
+            <h3 className="text-lg font-semibold">Connect WhatsApp</h3>
+            <p className="text-sm text-muted-foreground">Open WhatsApp → Linked Devices → Link a Device → Scan this QR.</p>
+            {waQr ? <img src={waQr} alt="WhatsApp QR" className="w-56 h-56 object-contain mx-auto" /> : <p className="text-sm">Waiting for QR...</p>}
+            <div className="flex justify-end">
+              <Button type="button" variant="outline" onClick={() => { clearWaPollTimer(); setWaModalOpen(false); }}>Close</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

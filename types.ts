@@ -635,6 +635,9 @@ export interface DeleteCompensationRecord {
   customerName?: string;
   amount: number;
   mode: 'cash_refund';
+  source?: 'explicit_refund' | 'legacy_auto';
+  isExplicitRefund?: boolean;
+  refundConfirmed?: boolean;
   reason?: string;
   createdAt: string;
 }
@@ -693,6 +696,18 @@ export interface UpdatedTransactionRecord {
   };
 }
 
+export interface ManualCashbookEntry {
+  id: string;
+  date: string;
+  type: 'cash_in' | 'cash_out';
+  amount: number;
+  details: string;
+  paymentMethod: 'Cash';
+  createdAt: string;
+  updatedAt?: string;
+  isDeleted?: boolean;
+}
+
 export interface AppState {
   products: Product[];
   transactions: Transaction[];
@@ -723,6 +738,7 @@ export interface AppState {
   purchaseOrders?: PurchaseOrder[];
   supplierPayments?: SupplierPaymentLedgerEntry[];
   partyCreditLedger?: PartyCreditLedgerEntry[];
+  manualCashbookEntries?: ManualCashbookEntry[];
   variantsMaster?: string[];
   colorsMaster?: string[];
   migrationMarkers?: MigrationMarkers;

@@ -24,6 +24,7 @@ const PurchasePanel = lazy(() => import('./pages/PurchasePanel'));
 const ProductAnalytics = lazy(() => import('./pages/ProductAnalytics'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Cashbook = lazy(() => import('./pages/Cashbook'));
+const ErpPreview = lazy(() => import('./pages/ErpPreview'));
 
 // --- Components ---
 
@@ -234,6 +235,7 @@ export default function App() {
             <NavItem to="/settings" icon={SettingsIcon} label="Settings" />
             <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" />
             <NavItem to="/finance" icon={Landmark} label="Finance" />
+            <NavItem to="/erp-preview" icon={BarChart3} label="New ERP View" />
             <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />
             <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Parties" />
 
@@ -315,6 +317,12 @@ export default function App() {
                               </div>
                               <span className="font-medium text-sm">Finance</span>
                          </Link>
+                         <Link to="/erp-preview" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
+                              <div className="p-3 bg-violet-100 text-violet-600 rounded-full mb-2">
+                                  <BarChart3 className="w-6 h-6" />
+                              </div>
+                              <span className="font-medium text-sm">New ERP View</span>
+                         </Link>
                          <Link to="/freight-booking" className="flex flex-col items-center justify-center p-4 bg-muted/50 rounded-xl hover:bg-muted transition-colors border border-transparent hover:border-primary/20">
                               <div className="p-3 bg-orange-100 text-orange-600 rounded-full mb-2">
                                   <Truck className="w-6 h-6" />
@@ -359,6 +367,7 @@ export default function App() {
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
                 <Route path="/cashbook" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Cashbook /></ProtectedRoute>} />
                 <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
+                <Route path="/erp-preview" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><ErpPreview /></ProtectedRoute>} />
                 <Route path="/freight-booking" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><FreightBooking /></ProtectedRoute>} />
                 <Route path="/purchase-panel" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><PurchasePanel /></ProtectedRoute>} />
                 

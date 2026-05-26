@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { loadData, getSaleSettlementBreakdown, getCanonicalCustomerBalanceSnapshot, buildUpfrontOrderLedgerEffects } from '../services/storage';
-import { CashAdjustment, Expense, PurchaseOrder, Transaction, UpfrontOrder } from '../types';
+import { loadData, getSaleSettlementBreakdown, getCanonicalCustomerBalanceSnapshot, buildUpfrontOrderLedgerEffects, createManualCashbookEntry } from '../services/storage';
+import { CashAdjustment, Expense, ManualCashbookEntry, PurchaseOrder, Transaction, UpfrontOrder } from '../types';
 import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
+import { buildErpLedgerFromLegacyData, compareLegacyVsLedger } from '../services/erpComparison';
 
-type LedgerType = 'sale' | 'payment' | 'purchase' | 'supplier_payment' | 'expense' | 'return' | 'adjustment' | 'credit' | 'deleted_sale' | 'deleted_refund' | 'custom_order_receivable' | 'custom_order_payment';
+type LedgerType = 'sale' | 'payment' | 'purchase' | 'supplier_payment' | 'expense' | 'return' | 'adjustment' | 'credit' | 'deleted_sale' | 'deleted_refund' | 'custom_order_receivable' | 'custom_order_payment' | 'manual_cash_in' | 'manual_cash_out';
 type PayType = 'cash' | 'online' | 'credit' | 'mixed' | 'na';
 
 type Row = {
@@ -123,13 +124,15 @@ const getDeletedTransactionLedgerRow = (deleted: any, customerMap: Map<string, s
       id: `dtx-${deleted.id || originalId}`,
       date,
       type: 'deleted_sale',
-      description: `Deleted Sale #${reference} — ${party}`,
+      description: `Deleted Sale Audit #${reference} — ${party}`,
       reference,
       party,
       payment,
-      cashIn: settlement.cashPaid,
+      // Deleted transaction rows are audit-only and must not impact cash/bank KPIs.
+      // Real cash payout (if any) is represented by explicit delete compensation rows.
+      cashIn: 0,
       cashOut: 0,
-      bankIn: settlement.onlinePaid,
+      bankIn: 0,
       bankOut: 0,
       receivableIncrease: settlement.creditDue,
       receivableDecrease: 0,
@@ -143,8 +146,8 @@ const getDeletedTransactionLedgerRow = (deleted: any, customerMap: Map<string, s
   if (txType === 'payment') {
     const amount = Math.abs(toNum(original?.total));
     const payment = getCashbookPaymentMethod(original);
-    return { id: `dtx-${deleted.id || originalId}`, date, type: 'deleted_sale', description: `Deleted Payment #${reference} — ${party}`, reference, party, payment,
-      cashIn: payment === 'cash' ? amount : 0, cashOut: 0, bankIn: payment === 'online' ? amount : 0, bankOut: 0,
+    return { id: `dtx-${deleted.id || originalId}`, date, type: 'deleted_sale', description: `Deleted Payment Audit #${reference} — ${party}`, reference, party, payment,
+      cashIn: 0, cashOut: 0, bankIn: 0, bankOut: 0,
       receivableIncrease: 0, receivableDecrease: amount, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 };
   }
 
@@ -221,7 +224,8 @@ const normalizeTransactionForCashbook = (tx: Transaction, customerMap: Map<strin
 };
 
 export default function Cashbook() {
-  const data = useMemo(() => loadData(), []);
+  const [reloadKey, setReloadKey] = useState(0);
+  const data = useMemo(() => loadData(), [reloadKey]);
   const [from, setFrom] = useState(''); const [to, setTo] = useState('');
   const [payFilter, setPayFilter] = useState<'all' | 'cash' | 'online' | 'credit'>('all');
   const [typeFilter, setTypeFilter] = useState<'all' | LedgerType>('all');
@@ -229,6 +233,23 @@ export default function Cashbook() {
   const [full, setFull] = useState(false); const [visibleRowCount, setVisibleRowCount] = useState(100);
   const [visibleRegisterRowCount, setVisibleRegisterRowCount] = useState(50);
   const [activeTab, setActiveTab] = useState<'ledger' | 'register'>('ledger');
+  const [isAddCashOpen, setIsAddCashOpen] = useState(false);
+  const [manualDate, setManualDate] = useState(new Date().toISOString().slice(0, 10));
+  const [manualType, setManualType] = useState<'cash_in' | 'cash_out'>('cash_in');
+  const [manualAmount, setManualAmount] = useState('');
+  const [manualDetails, setManualDetails] = useState('');
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [showErpCashbookCompare, setShowErpCashbookCompare] = useState(false);
+
+  useEffect(() => {
+    const handleReload = () => setReloadKey((k) => k + 1);
+    window.addEventListener('local-storage-update', handleReload);
+    window.addEventListener('storage', handleReload);
+    return () => {
+      window.removeEventListener('local-storage-update', handleReload);
+      window.removeEventListener('storage', handleReload);
+    };
+  }, []);
 
   const safeTransactions = asArray<Transaction>(data.transactions);
   const safePurchaseOrders = asArray<PurchaseOrder>(data.purchaseOrders);
@@ -240,7 +261,38 @@ export default function Cashbook() {
   const safeUpdatedTransactionEvents = asArray<any>(data.updatedTransactionEvents);
   const safeCustomers = asArray<any>(data.customers);
   const safeUpfrontOrders = asArray<UpfrontOrder>((data as any).upfrontOrders);
+  const safeManualCashbookEntries = asArray<ManualCashbookEntry>((data as any).manualCashbookEntries).filter((entry) => !entry?.isDeleted);
   const customerMap = useMemo(() => new Map(safeCustomers.map((c) => [c.id, c.name || ''])), [safeCustomers]);
+
+  const openManualCashModal = (type: 'cash_in' | 'cash_out') => {
+    setManualError(null);
+    setManualType(type);
+    setIsAddCashOpen(true);
+  };
+
+  const handleSaveManualEntry = async () => {
+    const amount = Number(manualAmount);
+    if (!manualDate) { setManualError('Date is required.'); return; }
+    if (!Number.isFinite(amount) || amount <= 0) { setManualError('Amount must be greater than 0.'); return; }
+    if (manualType === 'cash_out' && amount > Math.max(0, Number(kpi.cash || 0))) {
+      setManualError('Cash out cannot exceed available cash.');
+      return;
+    }
+    setManualError(null);
+    await createManualCashbookEntry({
+      date: new Date(`${manualDate}T00:00:00`).toISOString(),
+      type: manualType,
+      amount,
+      details: manualDetails.trim(),
+      isDeleted: false,
+    });
+    setIsAddCashOpen(false);
+    setManualAmount('');
+    setManualDetails('');
+    setManualType('cash_in');
+    setManualDate(new Date().toISOString().slice(0, 10));
+    setReloadKey((k) => k + 1);
+  };
 
   const supplierPaymentRows = useMemo<Row[]>(() => {
     const directRows: Row[] = safeSupplierPayments
@@ -249,7 +301,7 @@ export default function Cashbook() {
         const amount = Math.max(0, Number(sp.amount || 0));
         const paymentMethod = getSupplierPaymentMethod(sp.method);
         const isOnline = paymentMethod === 'online';
-        const payableApplied = Math.max(0, Number(sp.payableApplied || 0));
+        const payableApplied = Math.max(0, Number((sp.paymentAppliedToPayable ?? sp.payableApplied ?? 0) || 0));
         const partyCreditCreated = Math.max(0, Number(sp.partyCreditCreated || 0));
         const overpaymentText = partyCreditCreated > 0
           ? ` • Payable reduced ${fmt(payableApplied)} • Party credit added ${fmt(partyCreditCreated)}`
@@ -263,7 +315,7 @@ export default function Cashbook() {
           party: sp.partyName || 'Supplier',
           payment: paymentMethod,
           cashIn: 0, cashOut: isOnline ? 0 : amount, bankIn: 0, bankOut: isOnline ? amount : 0,
-          receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: amount, storeCreditIncrease: 0, storeCreditDecrease: 0,
+          receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: payableApplied, storeCreditIncrease: partyCreditCreated, storeCreditDecrease: 0,
         };
       });
     const legacyMap = new Map<string, { date: string; party: string; method: 'cash' | 'online'; note: string; amount: number; allocations: number }>();
@@ -313,29 +365,51 @@ export default function Cashbook() {
     const adjRows: Row[] = safeCashAdjustments.map((a) => ({ id: `adj-${a.id}`, date: a.createdAt, type: 'adjustment', description: a.type === 'cash_addition' ? `Manual Cash Added — ${a.note || ''}` : `Manual Cash Withdrawn — ${a.note || ''}`,
       reference: a.id, party: '-', payment: 'cash', cashIn: a.type === 'cash_addition' ? a.amount : 0, cashOut: a.type === 'cash_withdrawal' ? a.amount : 0, bankIn: 0, bankOut: 0,
       receivableIncrease: 0, receivableDecrease: 0, payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0 }));
+    const manualRows: Row[] = safeManualCashbookEntries.map((entry) => ({
+      id: `mce-${entry.id}`,
+      date: entry.date || entry.createdAt,
+      type: entry.type === 'cash_in' ? 'manual_cash_in' : 'manual_cash_out',
+      description: entry.details?.trim() || (entry.type === 'cash_in' ? 'Manual Cash In' : 'Manual Cash Out'),
+      reference: entry.id,
+      party: '-',
+      payment: 'cash',
+      cashIn: entry.type === 'cash_in' ? Math.max(0, Number(entry.amount || 0)) : 0,
+      cashOut: entry.type === 'cash_out' ? Math.max(0, Number(entry.amount || 0)) : 0,
+      bankIn: 0,
+      bankOut: 0,
+      receivableIncrease: 0,
+      receivableDecrease: 0,
+      payableIncrease: 0,
+      payableDecrease: 0,
+      storeCreditIncrease: 0,
+      storeCreditDecrease: 0,
+    }));
     const activeTxIds = new Set(safeTransactions.map((tx) => String(tx.id)));
     const deletedTxRows: Row[] = safeDeletedTransactions
       .filter((deleted) => !activeTxIds.has(String(deleted?.originalTransactionId || deleted?.originalTransaction?.id || '')))
       .map((deleted) => getDeletedTransactionLedgerRow(deleted, customerMap))
       .filter((row): row is Row => !!row);
     const deletedByOriginalId = new Map(safeDeletedTransactions.map((d) => [String(d?.originalTransactionId || d?.originalTransaction?.id || ''), d]));
-    const compensationRows: Row[] = safeDeleteCompensations.map((c) => {
+    const compensationRows: Row[] = safeDeleteCompensations.flatMap((c) => {
       const linkedDeleted = deletedByOriginalId.get(String(c.transactionId));
       const reference = linkedDeleted ? getCashbookReference({ ...(linkedDeleted.originalTransaction || {}), id: c.transactionId }) : (String(c.transactionId || '').slice(-6) || 'UNKNOWN');
       const party = c.customerName || linkedDeleted?.customerName || 'Customer';
       const isOrphan = !linkedDeleted;
-      return {
+      const isExplicitRefund = c?.isExplicitRefund === true || c?.refundConfirmed === true || c?.source === 'explicit_refund';
+      const baseRow: Row = {
         id: `dc-${c.id}`,
         date: c.createdAt,
         type: 'deleted_refund' as LedgerType,
-        description: isOrphan ? `Deleted Refund (orphan) #${reference} — ${party}` : `Refund on Deleted Sale #${reference} — ${party}`,
+        description: isExplicitRefund
+          ? (isOrphan ? `Explicit Delete Refund (orphan) #${reference} — ${party}` : `Explicit Delete Refund #${reference} — ${party}`)
+          : (isOrphan ? `Delete Compensation Audit (orphan) #${reference} — ${party}` : `Delete Compensation Audit #${reference} — ${party}`),
         reference: String(c.transactionId || c.id),
         party,
-        payment: c.mode === 'online_refund' ? 'online' as PayType : 'cash' as PayType,
+        payment: isExplicitRefund ? (c.mode === 'online_refund' ? 'online' as PayType : 'cash' as PayType) : 'na' as PayType,
         cashIn: 0,
-        cashOut: c.mode === 'online_refund' ? 0 : Math.max(0, toNum(c.amount)),
+        cashOut: isExplicitRefund ? (c.mode === 'online_refund' ? 0 : Math.max(0, toNum(c.amount))) : 0,
         bankIn: 0,
-        bankOut: c.mode === 'online_refund' ? Math.max(0, toNum(c.amount)) : 0,
+        bankOut: isExplicitRefund ? (c.mode === 'online_refund' ? Math.max(0, toNum(c.amount)) : 0) : 0,
         receivableIncrease: 0,
         receivableDecrease: 0,
         payableIncrease: 0,
@@ -343,6 +417,31 @@ export default function Cashbook() {
         storeCreditIncrease: 0,
         storeCreditDecrease: 0,
       };
+      if (!isExplicitRefund || !linkedDeleted?.originalTransaction) return [baseRow];
+      const originalTx = linkedDeleted.originalTransaction as Transaction;
+      const originalSettlement = getCashbookSaleBreakdown(originalTx, originalTx as any);
+      const originalCashIn = Math.max(0, Number(originalSettlement.cashPaid || 0));
+      if (originalCashIn <= 0) return [baseRow];
+      const originalCashRow: Row = {
+        id: `dc-src-${c.id}`,
+        date: c.createdAt,
+        type: 'deleted_refund' as LedgerType,
+        description: isOrphan ? `Deleted Sale Original Cash (orphan) #${reference} — ${party}` : `Deleted Sale Original Cash #${reference} — ${party}`,
+        reference: String(c.transactionId || c.id),
+        party,
+        payment: 'cash',
+        cashIn: originalCashIn,
+        cashOut: 0,
+        bankIn: 0,
+        bankOut: 0,
+        receivableIncrease: 0,
+        receivableDecrease: 0,
+        payableIncrease: 0,
+        payableDecrease: 0,
+        storeCreditIncrease: 0,
+        storeCreditDecrease: 0,
+      };
+      return [originalCashRow, baseRow];
     });
     const corrRows: Row[] = [
       ...compensationRows,
@@ -379,8 +478,8 @@ export default function Cashbook() {
         receivableDecrease: Math.max(0, effect.receivableDecrease), payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: 0, storeCreditDecrease: 0,
       }];
     });
-    return [...txRows, ...deletedTxRows, ...purchaseRows, ...supplierPaymentRows, ...expenseRows, ...adjRows, ...corrRows, ...upfrontRows].filter((r) => !!r.date && (r.cashIn || r.cashOut || r.bankIn || r.bankOut || r.receivableIncrease || r.receivableDecrease || r.payableIncrease || r.payableDecrease || r.storeCreditIncrease || r.storeCreditDecrease));
-  }, [safeTransactions, safeDeletedTransactions, customerMap, safePurchaseOrders, safeExpenses, safeCashAdjustments, safeDeleteCompensations, safeUpdatedTransactionEvents, supplierPaymentRows, safeUpfrontOrders, safeCustomers]);
+    return [...txRows, ...deletedTxRows, ...purchaseRows, ...supplierPaymentRows, ...expenseRows, ...adjRows, ...manualRows, ...corrRows, ...upfrontRows].filter((r) => !!r.date && (r.cashIn || r.cashOut || r.bankIn || r.bankOut || r.receivableIncrease || r.receivableDecrease || r.payableIncrease || r.payableDecrease || r.storeCreditIncrease || r.storeCreditDecrease));
+  }, [safeTransactions, safeDeletedTransactions, customerMap, safePurchaseOrders, safeExpenses, safeCashAdjustments, safeManualCashbookEntries, safeDeleteCompensations, safeUpdatedTransactionEvents, supplierPaymentRows, safeUpfrontOrders, safeCustomers]);
 
   const allLedgerRows = useMemo(() => asArray<Row>(rows), [rows]);
 
@@ -403,14 +502,20 @@ export default function Cashbook() {
     const q = search.trim().toLowerCase(); if (!q) return true; return `${r.description} ${r.reference} ${r.party}`.toLowerCase().includes(q);
   }).sort((a, b) => sort === 'newest' ? new Date(b.date).getTime() - new Date(a.date).getTime() : new Date(a.date).getTime() - new Date(b.date).getTime()), [allLedgerRows, from, to, payFilter, typeFilter, search, sort]);
 
-  // Cashbook KPI cards intentionally use allLedgerRows only. Dashboard-equivalent values are logged only for reconciliation comparison.
+  const currentWindowRows = useMemo(() => asArray<Row>(allLedgerRows).filter((r) => {
+    const t = new Date(r.date).getTime();
+    if (from && t < new Date(`${from}T00:00:00`).getTime()) return false;
+    if (to && t > new Date(`${to}T23:59:59`).getTime()) return false;
+    return true;
+  }), [allLedgerRows, from, to]);
+
+  // Cashbook KPI cards intentionally use current window rows so cash closing reflects selected range/session.
   const kpi = useMemo(() => {
-    // Source of truth for cash/bank KPI: normalized allLedgerRows (after supplier direct + legacy grouping).
-    const allRows = allLedgerRows; // all-time, not filtered/paginated
-    const cash = allRows.reduce((sum, r) => sum + r.cashIn - r.cashOut, 0);
-    const bank = allRows.reduce((sum, r) => sum + r.bankIn - r.bankOut, 0);
-    const ledgerReceivableKpi = allRows.reduce((sum, r) => sum + r.receivableIncrease - r.receivableDecrease, 0);
-    const ledgerPayableKpi = allRows.reduce((sum, r) => sum + r.payableIncrease - r.payableDecrease, 0);
+    const scopeRows = currentWindowRows;
+    const cash = scopeRows.reduce((sum, r) => sum + r.cashIn - r.cashOut, 0);
+    const bank = scopeRows.reduce((sum, r) => sum + r.bankIn - r.bankOut, 0);
+    const ledgerReceivableKpi = scopeRows.reduce((sum, r) => sum + r.receivableIncrease - r.receivableDecrease, 0);
+    const ledgerPayableKpi = scopeRows.reduce((sum, r) => sum + r.payableIncrease - r.payableDecrease, 0);
 
     const canonicalSnapshot: any = getCanonicalCustomerBalanceSnapshot(safeCustomers, safeTransactions);
     const balances: Map<string, any> = canonicalSnapshot?.balances instanceof Map ? canonicalSnapshot.balances : new Map<string, any>();
@@ -446,7 +551,44 @@ export default function Cashbook() {
     }
 
     return { cash, bank, receivable: ledgerReceivableKpi, payable: ledgerPayableKpi };
-  }, [allLedgerRows, safeCustomers, safeTransactions, safePurchaseOrders]);
+  }, [currentWindowRows, safeCustomers, safeTransactions, safePurchaseOrders]);
+  const erpCompareInput = useMemo(() => ({
+    transactions: safeTransactions,
+    deletedTransactions: safeDeletedTransactions,
+    deleteCompensations: safeDeleteCompensations,
+    supplierPayments: safeSupplierPayments,
+    purchaseOrders: safePurchaseOrders,
+    manualCashbookEntries: safeManualCashbookEntries,
+    upfrontOrders: safeUpfrontOrders,
+    customers: safeCustomers,
+    products: asArray<any>((data as any).products),
+    cashSessions: asArray<any>((data as any).cashSessions),
+    expenses: safeExpenses,
+  }), [safeTransactions, safeDeletedTransactions, safeDeleteCompensations, safeSupplierPayments, safePurchaseOrders, safeManualCashbookEntries, safeUpfrontOrders, safeCustomers, data, safeExpenses]);
+  const erpLegacyVsLedger = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
+  const erpBuild = useMemo(() => buildErpLedgerFromLegacyData(erpCompareInput), [erpCompareInput]);
+  const legacyCashbookCashMovementTotal = useMemo(
+    () => currentWindowRows.reduce((sum, row) => sum + Number(row.cashIn || 0) - Number(row.cashOut || 0), 0),
+    [currentWindowRows]
+  );
+  const legacyCashbookBankMovementTotal = useMemo(
+    () => currentWindowRows.reduce((sum, row) => sum + Number(row.bankIn || 0) - Number(row.bankOut || 0), 0),
+    [currentWindowRows]
+  );
+  const erpWarningFlags = useMemo(() => {
+    const flags: string[] = [];
+    if (safeDeleteCompensations.some((c: any) => c?.isExplicitRefund || c?.refundConfirmed || c?.source === 'explicit_refund')) flags.push('deleted-sale explicit refund linkage');
+    if (safeTransactions.some((tx) => tx.type === 'return' && !tx.returnHandlingMode)) flags.push('return refund vs reduce-due ambiguity');
+    if (safeManualCashbookEntries.length > 0) flags.push('manual cash in/out');
+    if (safeSupplierPayments.some((sp: any) => String(sp?.method || '').toLowerCase() === 'cash')) flags.push('supplier cash out');
+    if (safeExpenses.length > 0) flags.push('expenses');
+    if (safeTransactions.some((tx) => tx.type === 'payment' && String(tx.paymentMethod || '').toLowerCase() === 'cash')) flags.push('customer payment cash in');
+    if (safeUpfrontOrders.some((order) => asArray<any>(order.paymentHistory).some((p) => String(p?.method || '').toLowerCase().includes('cash')))) flags.push('upfront/custom order cash in');
+    if (erpBuild.auditFindings.some((f) => f.code === 'MISSING_SALE_SETTLEMENT')) flags.push('fallback settlement usage');
+    if (erpBuild.auditFindings.some((f) => f.code === 'LEGACY_HISTORICAL_REFERENCE')) flags.push('historical_reference usage');
+    return flags;
+  }, [safeDeleteCompensations, safeTransactions, safeManualCashbookEntries, safeSupplierPayments, safeExpenses, safeUpfrontOrders, erpBuild.auditFindings]);
+  const availableCashForManualOut = useMemo(() => Math.max(0, Number(kpi.cash || 0)), [kpi.cash]);
   useEffect(() => {
     const recon = reconcileReceivableSurfaces({
       customers: safeCustomers as any,
@@ -619,12 +761,50 @@ export default function Cashbook() {
   const visibleRegisterRows = useMemo(() => registerRows.slice(0, visibleRegisterRowCount), [registerRows, visibleRegisterRowCount]);
 
   return <div className="space-y-4">
-    <div><h1 className="text-2xl font-bold">Cashbook</h1><p className="text-sm text-muted-foreground">Track all cash and bank flows across your business.</p></div>
+    <div className="flex items-start justify-between gap-3">
+      <div><h1 className="text-2xl font-bold">Cashbook</h1><p className="text-sm text-muted-foreground">Track all cash and bank flows across your business.</p></div>
+      <div className="flex items-center gap-2">
+        <button className="border rounded px-3 h-9 bg-emerald-600 text-white border-emerald-700" onClick={() => openManualCashModal('cash_in')}>Cash In</button>
+        <button className="border rounded px-3 h-9 bg-rose-50 text-rose-700 border-rose-300" onClick={() => openManualCashModal('cash_out')}>Cash Out</button>
+      </div>
+    </div>
     <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">
       <div className="rounded border p-3 bg-emerald-50"><div>Net Cash Movement</div><div className="text-xl font-bold text-emerald-700">{fmt(kpi.cash)}</div></div>
       <div className="rounded border p-3 bg-blue-50"><div>Net Bank Movement</div><div className="text-xl font-bold text-blue-700">{fmt(kpi.bank)}</div></div>
       <div className="rounded border p-3 bg-orange-50"><div>Customer/Party Receivable</div><div className="text-xl font-bold text-orange-700">{fmt(kpi.receivable)}</div></div>
       <div className="rounded border p-3 bg-rose-50"><div>Customer/Party Payable</div><div className="text-xl font-bold text-rose-700">{fmt(kpi.payable)}</div></div>
+    </div>
+    <div className="rounded border border-violet-200 bg-violet-50/50 p-3 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="font-semibold">New ERP Cashbook Compare</div>
+        <button onClick={() => setShowErpCashbookCompare((prev) => !prev)} className="border rounded px-3 h-8 text-xs bg-white">
+          {showErpCashbookCompare ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      <div className="text-xs text-violet-800">Read-only comparison — does not affect production cashbook rows.</div>
+      {showErpCashbookCompare && (
+        <div className="space-y-3 text-sm">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+            <div className="rounded border bg-white p-2"><div className="text-[11px] text-slate-500">Legacy cashbook cash movement total</div><div className="font-semibold">{fmt(legacyCashbookCashMovementTotal)}</div></div>
+            <div className="rounded border bg-white p-2"><div className="text-[11px] text-slate-500">Ledger-derived cash movement total</div><div className="font-semibold">{fmt(erpLegacyVsLedger.cash.ledgerValue)}</div></div>
+            <div className="rounded border bg-white p-2"><div className="text-[11px] text-slate-500">Bank/online ledger movement</div><div className="font-semibold">{fmt(erpLegacyVsLedger.bank.ledgerValue)}</div></div>
+            <div className="rounded border bg-white p-2"><div className="text-[11px] text-slate-500">Delta (ledger - legacy cash)</div><div className={`font-semibold ${Math.abs(erpLegacyVsLedger.cash.delta) < 0.01 ? 'text-emerald-700' : 'text-red-700'}`}>{fmt(erpLegacyVsLedger.cash.delta)}</div></div>
+          </div>
+          <div className="rounded border bg-white p-2 text-xs text-slate-700">
+            <div>Status: <span className="uppercase font-semibold">{erpLegacyVsLedger.cash.status}</span></div>
+            <div>Legacy bank movement total: {fmt(legacyCashbookBankMovementTotal)} • Ledger bank delta: {fmt(erpLegacyVsLedger.bank.delta)}</div>
+            <div>Reasons: {erpLegacyVsLedger.cash.reasons.length ? erpLegacyVsLedger.cash.reasons.join(' • ') : 'None'}</div>
+          </div>
+          <div className="rounded border bg-white p-2 text-xs">
+            <div className="font-medium mb-1">Warnings / Ambiguities</div>
+            {erpWarningFlags.length ? (
+              <ul className="list-disc pl-5 space-y-0.5 text-slate-700">
+                {erpWarningFlags.map((flag) => <li key={flag}>{flag}</li>)}
+              </ul>
+            ) : <div className="text-slate-500">No warnings emitted.</div>}
+          </div>
+        </div>
+      )}
     </div>
     <div className="rounded border p-3 space-y-3">
       <div className="flex gap-2">
@@ -637,12 +817,12 @@ export default function Cashbook() {
         <input type="date" value={from} onChange={e => setFrom(e.target.value)} className="border rounded px-2 h-9" />
         <input type="date" value={to} onChange={e => setTo(e.target.value)} className="border rounded px-2 h-9" />
         <select value={payFilter} onChange={e => setPayFilter(e.target.value as any)} className="border rounded px-2 h-9"><option value="all">All Payment</option><option value="cash">Cash</option><option value="online">Bank/Online</option><option value="credit">Credit</option></select>
-        <select value={typeFilter} onChange={e => setTypeFilter(e.target.value as any)} className="border rounded px-2 h-9"><option value="all">All Type</option><option value="sale">Sale</option><option value="credit">Credit Sale</option><option value="payment">Payment</option><option value="return">Return</option><option value="deleted_sale">Deleted Sale</option><option value="deleted_refund">Deleted Refund</option><option value="purchase">Purchase</option><option value="supplier_payment">Supplier Payment</option><option value="expense">Expense</option><option value="adjustment">Adjustment</option><option value="custom_order_receivable">Custom Order</option><option value="custom_order_payment">Custom Order Payment</option></select>
+        <select value={typeFilter} onChange={e => setTypeFilter(e.target.value as any)} className="border rounded px-2 h-9"><option value="all">All Type</option><option value="sale">Sale</option><option value="credit">Credit Sale</option><option value="payment">Payment</option><option value="return">Return</option><option value="deleted_sale">Deleted Sale</option><option value="deleted_refund">Deleted Refund</option><option value="purchase">Purchase</option><option value="supplier_payment">Supplier Payment</option><option value="expense">Expense</option><option value="adjustment">Adjustment</option><option value="manual_cash_in">Manual Cash In</option><option value="manual_cash_out">Manual Cash Out</option><option value="custom_order_receivable">Custom Order</option><option value="custom_order_payment">Custom Order Payment</option></select>
         <select value={sort} onChange={e => setSort(e.target.value as any)} className="border rounded px-2 h-9"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select>
         <button onClick={() => setFull(v => !v)} className="border rounded px-2 h-9">{full ? 'Compact columns' : 'Show full accountant columns'}</button>
       </div>
       <input placeholder="Search description/customer/party/reference" value={search} onChange={e => setSearch(e.target.value)} className="border rounded px-2 h-9 w-full" />
-      <div className="overflow-auto"><table className="min-w-[1400px] w-full text-xs"><thead><tr className="text-left border-b"><th>Date</th><th>Type</th><th>Description</th><th>Payment</th><th className="text-right">Cash In</th><th className="text-right">Cash Out</th><th className="text-right">Bank In</th><th className="text-right">Bank Out</th><th className="text-right">Recv +</th><th className="text-right">Recv -</th><th className="text-right">Pay +</th><th className="text-right">Pay -</th><th className="text-right">SC +</th><th className="text-right">SC -</th><th className="text-right">Cash Bal</th><th className="text-right">Bank Bal</th></tr></thead><tbody>{visibleRows.map((r) => { const bal = rowsWithChronoBalances.get(r.id) || { cash: 0, bank: 0 }; return <tr key={r.id} className="border-b"><td>{new Date(r.date).toLocaleString()}</td><td>{({sale:'Sale',credit:'Credit Sale',payment:'Payment',return:'Return',deleted_sale:'Deleted Sale',deleted_refund:'Deleted Refund',purchase:'Purchase',supplier_payment:'Supplier Payment',expense:'Expense',adjustment:'Adjustment',custom_order_receivable:'Custom Order',custom_order_payment:'Custom Order Payment'} as Record<string,string>)[r.type] || r.type}</td><td>{r.description}</td><td>{r.payment}</td><td className="text-right text-emerald-700">{r.cashIn ? fmt(r.cashIn) : '-'}</td><td className="text-right text-red-600">{r.cashOut ? fmt(r.cashOut) : '-'}</td><td className="text-right text-blue-700">{r.bankIn ? fmt(r.bankIn) : '-'}</td><td className="text-right text-red-600">{r.bankOut ? fmt(r.bankOut) : '-'}</td><td className="text-right">{r.receivableIncrease ? fmt(r.receivableIncrease) : '-'}</td><td className="text-right">{r.receivableDecrease ? fmt(r.receivableDecrease) : '-'}</td><td className="text-right">{r.payableIncrease ? fmt(r.payableIncrease) : '-'}</td><td className="text-right">{r.payableDecrease ? fmt(r.payableDecrease) : '-'}</td><td className="text-right">{r.storeCreditIncrease ? fmt(r.storeCreditIncrease) : '-'}</td><td className="text-right">{r.storeCreditDecrease ? fmt(r.storeCreditDecrease) : '-'}</td><td className="text-right">{fmt(bal.cash)}</td><td className="text-right">{fmt(bal.bank)}</td></tr>; })}</tbody></table></div>
+      <div className="overflow-auto"><table className="min-w-[1400px] w-full text-xs"><thead><tr className="text-left border-b"><th>Date</th><th>Type</th><th>Description</th><th>Payment</th><th className="text-right">Cash In</th><th className="text-right">Cash Out</th><th className="text-right">Bank In</th><th className="text-right">Bank Out</th><th className="text-right">Recv +</th><th className="text-right">Recv -</th><th className="text-right">Pay +</th><th className="text-right">Pay -</th><th className="text-right">SC +</th><th className="text-right">SC -</th><th className="text-right">Cash Bal</th><th className="text-right">Bank Bal</th></tr></thead><tbody>{visibleRows.map((r) => { const bal = rowsWithChronoBalances.get(r.id) || { cash: 0, bank: 0 }; return <tr key={r.id} className="border-b"><td>{new Date(r.date).toLocaleString()}</td><td>{({sale:'Sale',credit:'Credit Sale',payment:'Payment',return:'Return',deleted_sale:'Deleted Sale',deleted_refund:'Deleted Refund',purchase:'Purchase',supplier_payment:'Supplier Payment',expense:'Expense',adjustment:'Adjustment',manual_cash_in:'Manual Cash In',manual_cash_out:'Manual Cash Out',custom_order_receivable:'Custom Order',custom_order_payment:'Custom Order Payment'} as Record<string,string>)[r.type] || r.type}</td><td>{r.description}</td><td>{r.payment}</td><td className="text-right text-emerald-700">{r.cashIn ? fmt(r.cashIn) : '-'}</td><td className="text-right text-red-600">{r.cashOut ? fmt(r.cashOut) : '-'}</td><td className="text-right text-blue-700">{r.bankIn ? fmt(r.bankIn) : '-'}</td><td className="text-right text-red-600">{r.bankOut ? fmt(r.bankOut) : '-'}</td><td className="text-right">{r.receivableIncrease ? fmt(r.receivableIncrease) : '-'}</td><td className="text-right">{r.receivableDecrease ? fmt(r.receivableDecrease) : '-'}</td><td className="text-right">{r.payableIncrease ? fmt(r.payableIncrease) : '-'}</td><td className="text-right">{r.payableDecrease ? fmt(r.payableDecrease) : '-'}</td><td className="text-right">{r.storeCreditIncrease ? fmt(r.storeCreditIncrease) : '-'}</td><td className="text-right">{r.storeCreditDecrease ? fmt(r.storeCreditDecrease) : '-'}</td><td className="text-right">{fmt(bal.cash)}</td><td className="text-right">{fmt(bal.bank)}</td></tr>; })}</tbody></table></div>
       <div className="flex items-center justify-between text-xs text-muted-foreground"><span>Showing {Math.min(visibleRows.length, filteredDisplayRows.length)} of {filteredDisplayRows.length} entries</span>{filteredDisplayRows.length > visibleRowCount && <button onClick={() => setVisibleRowCount((p) => p + 100)} className="border rounded px-3 py-1 text-foreground">Load More (100)</button>}</div>
       </>
       )}
@@ -704,5 +884,39 @@ export default function Cashbook() {
         </div>
       )}
     </div>
+    {isAddCashOpen && (
+      <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+        <div className="bg-white rounded-lg border shadow-lg w-full max-w-md p-4 space-y-3">
+          <h2 className="text-lg font-semibold">Add Cash Entry</h2>
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Date</label>
+            <input type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)} className="border rounded px-2 h-9 w-full" />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Type</label>
+            <select value={manualType} onChange={(e) => setManualType(e.target.value as 'cash_in' | 'cash_out')} className="border rounded px-2 h-9 w-full">
+              <option value="cash_in">Cash In</option>
+              <option value="cash_out">Cash Out</option>
+            </select>
+          </div>
+          {manualType === 'cash_out' && (
+            <div className="text-xs text-muted-foreground">Available cash: {fmt(availableCashForManualOut)}</div>
+          )}
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Amount</label>
+            <input type="number" min="0" step="0.01" value={manualAmount} onChange={(e) => setManualAmount(e.target.value)} className="border rounded px-2 h-9 w-full" />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Details / note</label>
+            <textarea value={manualDetails} onChange={(e) => setManualDetails(e.target.value)} className="border rounded px-2 py-2 w-full min-h-[80px]" placeholder="Optional details" />
+          </div>
+          {manualError && <div className="text-xs text-red-600">{manualError}</div>}
+          <div className="flex justify-end gap-2">
+            <button className="border rounded px-3 h-9" onClick={() => setIsAddCashOpen(false)}>Cancel</button>
+            <button className="border rounded px-3 h-9 bg-slate-900 text-white" onClick={handleSaveManualEntry}>Save Entry</button>
+          </div>
+        </div>
+      </div>
+    )}
   </div>;
 }

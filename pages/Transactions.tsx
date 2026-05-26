@@ -91,7 +91,10 @@ export default function Transactions() {
   const [editingOnlinePaid, setEditingOnlinePaid] = useState('');
   const [editingCreditDue, setEditingCreditDue] = useState('');
   const [editingReturnMode, setEditingReturnMode] = useState<'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit'>('refund_cash');
-  const [newSaleProductId, setNewSaleProductId] = useState('');
+  const [isProductPickerOpen, setIsProductPickerOpen] = useState(false);
+  const [productPickerSearch, setProductPickerSearch] = useState('');
+  const [productPickerQuantities, setProductPickerQuantities] = useState<Record<string, number>>({});
+  const [recentlyAddedProductId, setRecentlyAddedProductId] = useState<string | null>(null);
   const [editingError, setEditingError] = useState<string | null>(null);
   const [editingSectionWarning, setEditingSectionWarning] = useState<{ section: 'lines' | 'settlement' | 'customer' | 'general'; message: string } | null>(null);
   const [isSavingTransaction, setIsSavingTransaction] = useState(false);
@@ -1021,20 +1024,63 @@ export default function Transactions() {
     setEditingItems(prev => prev.filter((_, i) => i !== index));
   };
 
-  const addSaleLine = () => {
-    if (!newSaleProductId || !editingTx || editingTx.type !== 'sale') return;
-    const product = products.find(p => p.id === newSaleProductId);
-    if (!product) return;
-    const line: CartItem = {
-      ...product,
-      quantity: 1,
-      sellPrice: product.sellPrice || 0,
-      buyPrice: product.buyPrice || 0,
-      selectedVariant: product.variants?.[0] || NO_VARIANT,
-      selectedColor: product.colors?.[0] || NO_COLOR,
-    };
-    setEditingItems(prev => [...prev, line]);
-    setNewSaleProductId('');
+  const getProductPickerImage = (product: Product) => {
+    const firstGalleryImage = Array.isArray((product as any).galleryImages) ? (product as any).galleryImages[0] : '';
+    const firstImageObj = Array.isArray((product as any).images) ? (product as any).images[0] : null;
+    const firstImageObjSrc = typeof firstImageObj === 'string'
+      ? firstImageObj
+      : (firstImageObj?.src || firstImageObj?.url || '');
+    return product.thumbnailImage || product.image || (product as any).imageSrc || firstGalleryImage || firstImageObjSrc || '';
+  };
+
+  const filteredProductsForPicker = useMemo(() => {
+    const term = productPickerSearch.trim().toLowerCase();
+    if (!term) return products;
+    return products.filter((product) => {
+      const haystack = [
+        product.name,
+        product.barcode,
+        product.category,
+        (product as any).sku,
+        product.variants?.join(' '),
+        product.colors?.join(' '),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(term);
+    });
+  }, [productPickerSearch, products]);
+
+  const updateProductPickerQty = (productId: string, value: number) => {
+    const safeQty = Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1;
+    setProductPickerQuantities(prev => ({ ...prev, [productId]: safeQty }));
+  };
+
+  const addProductFromPicker = (product: Product) => {
+    if (!editingTx || editingTx.type !== 'sale') return;
+    const requestedQty = Math.max(1, Math.floor(productPickerQuantities[product.id] || 1));
+    setEditingItems((prev) => {
+      const existingIndex = prev.findIndex((line) =>
+        line.id === product.id
+        && (line.selectedVariant || NO_VARIANT) === (product.variants?.[0] || NO_VARIANT)
+        && (line.selectedColor || NO_COLOR) === (product.colors?.[0] || NO_COLOR)
+      );
+      if (existingIndex >= 0) {
+        return prev.map((line, index) => index === existingIndex
+          ? { ...line, quantity: Math.max(1, Number(line.quantity || 0) + requestedQty) }
+          : line
+        );
+      }
+      const line: CartItem = {
+        ...product,
+        quantity: requestedQty,
+        sellPrice: product.sellPrice || 0,
+        buyPrice: product.buyPrice || 0,
+        selectedVariant: product.variants?.[0] || NO_VARIANT,
+        selectedColor: product.colors?.[0] || NO_COLOR,
+      };
+      return [...prev, line];
+    });
+    setRecentlyAddedProductId(product.id);
+    setTimeout(() => setRecentlyAddedProductId((current) => (current === product.id ? null : current)), 1500);
   };
 
   const deletePreview = useMemo(
@@ -1064,6 +1110,7 @@ export default function Transactions() {
       reasonNote,
       compensationMode,
       compensationAmount: payableAmount,
+      createCashCompensation: compensationMode === 'cash_refund',
     });
     setTransactions(next);
     setSelectedTransactionIds(prev => prev.filter(id => id !== deleteTargetTx.id));
@@ -2495,7 +2542,19 @@ export default function Transactions() {
           <Card className="w-full max-w-5xl max-h-[90vh] overflow-hidden">
             <CardHeader className="border-b py-3 flex flex-row items-center justify-between gap-2">
               <CardTitle>{isBatchEditing ? `Batch Edit ${batchEditTransactionIndex + 1}/${batchEditTransactionIds.length}` : `Edit #${editingTx.id.slice(-6)}`} • {editingTx.type.toUpperCase()}</CardTitle>
-              <div className="text-xs text-muted-foreground">{new Date(editingTx.date).toLocaleString()} • {editingTx.customerName || 'Walk-in customer'}</div>
+              <div className="flex items-center gap-2">
+                <div className="text-xs text-muted-foreground">{new Date(editingTx.date).toLocaleString()} • {editingTx.customerName || 'Walk-in customer'}</div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 hover:bg-destructive/10 hover:text-destructive"
+                  onClick={closeTransactionEditor}
+                  aria-label="Close edit transaction"
+                >
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="p-3 space-y-3 overflow-y-auto max-h-[calc(90vh-136px)]">
               {editingError && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{editingError}</div>}
@@ -2555,12 +2614,8 @@ export default function Transactions() {
                   )}
                   {editingSectionWarning?.section === 'lines' && <div className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[12px] text-red-700">{editingSectionWarning.message}</div>}
                   {editingTx.type === 'sale' && (
-                    <div className="grid grid-cols-[minmax(0,1fr)_96px] gap-2">
-                      <Select value={newSaleProductId} onChange={e => setNewSaleProductId(e.target.value)}>
-                        <option value="">Add product…</option>
-                        {products.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}
-                      </Select>
-                      <Button type="button" variant="outline" onClick={addSaleLine}>Add Line</Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" variant="outline" onClick={() => setIsProductPickerOpen(true)}>Select Product</Button>
                     </div>
                   )}
                   <div className="space-y-1">
@@ -2671,6 +2726,67 @@ export default function Transactions() {
                   {isSavingTransaction ? 'Saving…' : remainingBatchTransactions > 0 ? `Update & Next (${remainingBatchTransactions} left)` : 'Update & Next'}
                 </Button>
                 <Button onClick={() => void handleSaveTransaction(false)} disabled={isSavingTransaction}>{isSavingTransaction ? 'Saving…' : 'Save'}</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      {editingTx?.type === 'sale' && isProductPickerOpen && (
+        <div className="fixed inset-0 bg-black/70 z-[70] flex items-center justify-center p-4">
+          <Card className="w-full max-w-5xl max-h-[90vh] overflow-hidden">
+            <CardHeader className="border-b py-3 flex flex-row items-center justify-between gap-2">
+              <CardTitle>Select Product</CardTitle>
+              <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={() => setIsProductPickerOpen(false)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </CardHeader>
+            <CardContent className="p-3 space-y-3 overflow-y-auto max-h-[calc(90vh-136px)]">
+              <div className="sticky top-0 z-10 bg-background pb-2">
+                <Input
+                  value={productPickerSearch}
+                  onChange={(e) => setProductPickerSearch(e.target.value)}
+                  placeholder="Search products by name, SKU, barcode, category..."
+                />
+              </div>
+              {filteredProductsForPicker.length === 0 ? (
+                <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No products found</div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {filteredProductsForPicker.map((product) => {
+                    const qty = Math.max(1, Math.floor(productPickerQuantities[product.id] || 1));
+                    const imageSrc = getProductPickerImage(product);
+                    const isOutOfStock = Number(product.stock || 0) <= 0;
+                    return (
+                      <div key={product.id} className="rounded-md border p-2.5 space-y-2">
+                        <div className="flex gap-2">
+                          <div className="h-14 w-14 rounded border bg-muted overflow-hidden shrink-0">
+                            {imageSrc ? <img src={imageSrc} alt={product.name} className="h-full w-full object-cover" /> : <Package className="w-full h-full p-2 opacity-30" />}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="font-medium text-sm truncate">{product.name}</div>
+                            <div className="text-xs text-muted-foreground truncate">{(product as any).sku || product.barcode || 'No SKU/Barcode'}</div>
+                            <div className="text-xs text-muted-foreground truncate">{product.category || 'Uncategorized'}</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="font-semibold">₹{formatMoneyPrecise(product.sellPrice || 0)}</span>
+                          <span className={isOutOfStock ? 'text-red-600 text-xs font-medium' : 'text-muted-foreground text-xs'}>{isOutOfStock ? 'Out of Stock' : `Stock: ${product.stock || 0}`}</span>
+                        </div>
+                        <div className="grid grid-cols-[auto_60px_auto_1fr] gap-1.5 items-center">
+                          <Button type="button" variant="outline" className="h-8 px-2" onClick={() => updateProductPickerQty(product.id, qty - 1)}>-</Button>
+                          <Input type="number" min="1" value={qty} className="h-8 px-2 text-center" onChange={(e) => updateProductPickerQty(product.id, Number(e.target.value || 1))} />
+                          <Button type="button" variant="outline" className="h-8 px-2" onClick={() => updateProductPickerQty(product.id, qty + 1)}>+</Button>
+                          <Button type="button" className="h-8" onClick={() => addProductFromPicker(product)} disabled={isOutOfStock}>
+                            {recentlyAddedProductId === product.id ? 'Added' : 'Add'}
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="border-t pt-2 flex justify-end">
+                <Button type="button" onClick={() => setIsProductPickerOpen(false)}>Done</Button>
               </div>
             </CardContent>
           </Card>

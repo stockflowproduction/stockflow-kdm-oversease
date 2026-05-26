@@ -20,7 +20,11 @@
     "migration:phase3f:validate-import": "node --experimental-strip-types migration/phase3f/validate-mongo-import.ts",
     "migration:phase3f:rollback": "node --experimental-strip-types migration/phase3f/rollback-mongo-import.ts",
     "migration:phase3f:run-cycle": "node --experimental-strip-types migration/phase3f/run-full-migration-cycle.ts",
-    "migration:check": "node --experimental-strip-types migration/phase3f/ci-migration-check.ts"
+    "migration:check": "node --experimental-strip-types migration/phase3f/ci-migration-check.ts",
+    "test": "rm -rf .tmp-tests && tsc -p tsconfig.erp-tests.json && node scripts/fix-test-import-extensions.cjs && node --test .tmp-tests/tests/erp-readonly.test.js",
+    "test:erp": "rm -rf .tmp-tests && tsc -p tsconfig.erp-tests.json && node scripts/fix-test-import-extensions.cjs && node --test .tmp-tests/tests/erp-readonly.test.js",
+    "sample:firestore": "node --experimental-strip-types scripts/firestore-scenario-sampler.ts",
+    "export:firestore:canonical": "node --experimental-strip-types scripts/firestore-canonical-export.ts"
   },
   "dependencies": {
     "@google/genai": "^1.31.0",
