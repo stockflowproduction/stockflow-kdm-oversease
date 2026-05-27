@@ -555,7 +555,6 @@ export default function Admin() {
     // Strict Validation
     const missingFields: string[] = [];
     if (!String(formData.name || '').trim()) missingFields.push('Product Name');
-    if (!String(formData.barcode || '').trim()) missingFields.push('SKU / Product Code');
     if (!String(formData.category || '').trim()) missingFields.push('Category');
     if (!hasCombos && (formData.buyPrice === '' || formData.buyPrice === null || formData.buyPrice === undefined)) missingFields.push('Buy Price');
     if (!hasCombos && (formData.sellPrice === '' || formData.sellPrice === null || formData.sellPrice === undefined)) missingFields.push('Sell Price');

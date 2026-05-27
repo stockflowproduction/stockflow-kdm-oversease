@@ -8,6 +8,7 @@ import { buildPurchasePartyLedger } from '../services/purchaseLedger';
 import { buildErpLedgerFromLegacyData, compareLegacyVsLedger } from '../services/erpComparison';
 import { generateAccountStatementPDF } from '../services/pdf';
 import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
+import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 
 type CustomerReceivableRow = Customer & { receivable: number };
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[]; partyCredit?: number };
@@ -181,6 +182,15 @@ export default function Dashboard() {
 
   const canonicalSnapshot = useMemo(() => getCanonicalCustomerBalanceSnapshot(customers, transactions), [customers, transactions]);
 
+  const canonicalCustomerBalanceById = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof getCanonicalCustomerBalanceView>>();
+    customers.forEach((customer) => {
+      const view = getCanonicalCustomerBalanceView(customer, customers, transactions, upfrontOrders);
+      map.set(customer.id, view);
+    });
+    return map;
+  }, [customers, transactions, upfrontOrders]);
+
   const compositeByCustomer = useMemo(() => {
     const map = new Map<string, number>();
     customers.forEach((customer) => {
@@ -297,7 +307,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     const ledger = buildCustomerReceivableLedgerProjection(customer);
     const hasStoreCreditLedgerActivity = Math.max(0, Number(ledger.summary.storeCreditAdded || 0)) > 0 || Math.max(0, Number(ledger.summary.storeCreditUsed || 0)) > 0;
     const projectedNetStoreCredit = Math.max(0, Number(ledger.summary.storeCreditAdded || 0) - Number(ledger.summary.storeCreditUsed || 0));
-    const fallbackPersistedStoreCredit = Math.max(0, Number(customer.storeCredit || 0));
+    const fallbackPersistedStoreCredit = Math.max(0, Number(canonicalCustomerBalanceById.get(customer.id)?.canonicalStoreCredit || 0));
     const displayStoreCredit = hasStoreCreditLedgerActivity ? projectedNetStoreCredit : fallbackPersistedStoreCredit;
     return { ...customer, receivable: ledger.summary.currentReceivable, storeCredit: displayStoreCredit } as CustomerReceivableRow;
   }).sort((a, b) => a.name.localeCompare(b.name)), [customers, transactions, upfrontOrders]);

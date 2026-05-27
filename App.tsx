@@ -12,6 +12,7 @@ import { Button } from './components/ui';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 import { NewUiPreviewBanner } from './components/NewUiPreviewBanner';
 import Settings from './pages/Settings';
+const WhatsAppLogs = lazy(() => import('./pages/WhatsAppLogs'));
 
 const Admin = lazy(() => import('./pages/Admin'));
 const Sales = lazy(() => import('./pages/Sales'));
@@ -365,6 +366,7 @@ export default function App() {
                 <Route path="/customers" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Customers /></ProtectedRoute>} />
                 <Route path="/pdf" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Reports /></ProtectedRoute>} />
                 <Route path="/settings" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Settings /></ProtectedRoute>} />
+                <Route path="/whatsapp-logs" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><WhatsAppLogs /></ProtectedRoute>} />
                 <Route path="/cashbook" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Cashbook /></ProtectedRoute>} />
                 <Route path="/finance" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Finance /></ProtectedRoute>} />
                 <Route path="/erp-preview" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><ErpPreview /></ProtectedRoute>} />

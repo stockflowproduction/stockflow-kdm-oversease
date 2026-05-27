@@ -3,12 +3,12 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Product, CartItem, Transaction, Customer, TAX_OPTIONS } from '../types';
+import { Product, CartItem, Transaction, Customer, UpfrontOrder, TAX_OPTIONS } from '../types';
 import { formatItemNameWithVariant, getAvailableStockForCombination, getProductStockRows, getResolvedBuyPriceForCombination, getResolvedSellPriceForCombination, NO_COLOR, NO_VARIANT, productHasCombinationStock } from '../services/productVariants';
 import { getStockBucketKey } from '../services/stockBuckets';
-import { loadData, processTransaction, addCustomer, updateCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft, uploadDataUrlImageToCloudinary } from '../services/storage';
+import { loadData, processTransaction, addCustomer, updateCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft } from '../services/storage';
 import { generateReceiptPDF, generateReceiptPDFDataUrl } from '../services/pdf';
-import { getWhatsAppServerUrl, sendInvoiceToWhatsApp } from '../services/whatsapp';
+import { shareTransactionInvoiceViaWhatsApp } from '../services/whatsappShare';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
@@ -16,6 +16,7 @@ import { ShoppingCart, Trash2, X, Plus, Minus, Search, AlertCircle, CheckCircle,
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { auth } from '../services/firebase';
+import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 
 const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromMoneyCents = (value: number) => value / 100;
@@ -31,33 +32,6 @@ const logInvoiceSendDebug = (payload: unknown) => {
   if (!isInvoiceSendDebugEnabled()) return;
   console.log(INVOICE_SEND_DEBUG_PREFIX, JSON.stringify(payload, null, 2));
 };
-const dataUrlToUint8Array = (dataUrl: string): Uint8Array => {
-  const base64 = dataUrl.split(',')[1] || '';
-  const binary = atob(base64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-};
-const renderPdfFirstPageToImageDataUrl = async (pdfDataUrl: string): Promise<string> => {
-  const pdfjsLib = await import(/* @vite-ignore */ 'https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.mjs');
-  (pdfjsLib as any).GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs';
-  const bytes = dataUrlToUint8Array(pdfDataUrl);
-  const loadingTask = (pdfjsLib as any).getDocument({ data: bytes });
-  const pdf = await loadingTask.promise;
-  const page = await pdf.getPage(1);
-  const viewport = page.getViewport({ scale: 2.2 });
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('Unable to render invoice image.');
-  canvas.width = Math.ceil(viewport.width);
-  canvas.height = Math.ceil(viewport.height);
-  await page.render({ canvasContext: context, viewport }).promise;
-  const imageDataUrl = canvas.toDataURL('image/png');
-  if (typeof pdf.destroy === 'function') pdf.destroy();
-  return imageDataUrl;
-};
-
 const getProductCardImage = (product: Product): string | null => {
   const anyProduct = product as any;
   const gallery0 = Array.isArray(anyProduct.galleryImages) ? anyProduct.galleryImages[0] : null;
@@ -247,6 +221,7 @@ export default function Sales() {
   useEffect(() => { persistInvoiceCarts(invoiceCarts, activeCartId); }, [invoiceCarts, activeCartId]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const cartRef = useRef<CartItem[]>([]);
@@ -306,6 +281,7 @@ export default function Sales() {
   const settlementPanelRef = useRef<HTMLDivElement | null>(null);
   const [settlementHint, setSettlementHint] = useState<string | null>(null);
   const [sendInvoiceMessage, setSendInvoiceMessage] = useState<string | null>(null);
+  const [waSendingStage, setWaSendingStage] = useState<string | null>(null);
   const activeCart = useMemo(() => invoiceCarts.find(c => c.id === activeCartId) || null, [invoiceCarts, activeCartId]);
 
   useEffect(() => {
@@ -421,6 +397,7 @@ export default function Sales() {
       setProducts(data.products);
       setCustomers(data.customers);
       setTransactions(data.transactions);
+      setUpfrontOrders(Array.isArray(data.upfrontOrders) ? data.upfrontOrders : []);
       
       if (data.profile.defaultTaxLabel) {
           const defaultOpt = TAX_OPTIONS.find(o => o.label === data.profile.defaultTaxLabel) || TAX_OPTIONS[0];
@@ -926,24 +903,31 @@ export default function Sales() {
       const payableAfterCredit = checkoutMoney.remainingPayable;
       const cashPaid = checkoutMoney.cashPaid;
       const onlinePaid = checkoutMoney.onlinePaid;
+      const shouldAllowOverpayAsCreditSubmit = rawOverpaymentValue > 0 && !!finalCustomer && storeOverpaymentAsCredit;
       if (!isReturnMode) {
           if (!Number.isFinite(cashPaid) || cashPaid < 0 || !Number.isFinite(onlinePaid) || onlinePaid < 0) {
               setCheckoutError('Cash/Online paid values must be valid non-negative numbers.');
               return;
           }
-          if (checkoutMoney.hasWholeOverpay) {
+          if (checkoutMoney.hasWholeOverpay && !shouldAllowOverpayAsCreditSubmit) {
               setCheckoutError(`Paid now ₹${formatMoneyWhole(checkoutMoney.settlementPaidNowWhole)} cannot exceed payable ₹${formatMoneyWhole(checkoutMoney.remainingPayableWhole)} under whole-money rule.`);
               return;
           }
       }
       const creditDue = isReturnMode ? 0 : clampCreditDueAmount(autoCreditDueValue);
 
-      const splitTotal = roundMoneyWhole(cashPaid + onlinePaid + creditDue + appliedStoreCredit);
-      const totalWhole = roundMoneyWhole(Math.max(0, total));
-      if (!isReturnMode && Math.abs(splitTotal - totalWhole) > 0.001) {
-          setCheckoutError(`Payment split mismatch. Total is ₹${formatMoneyWhole(totalWhole)}, but Cash + Online + Credit + Store Credit is ₹${formatMoneyWhole(splitTotal)}. Please adjust the split.`);
+      const splitTotal = roundMoneyWhole(cashPaid + onlinePaid + creditDue);
+      const payableAfterCreditWhole = roundMoneyWhole(Math.max(0, payableAfterCredit));
+      const splitMismatch = Math.abs(splitTotal - payableAfterCreditWhole) > 0.001;
+      if (!isReturnMode && splitMismatch && !shouldAllowOverpayAsCreditSubmit) {
+          setCheckoutError(`Payment split mismatch. Payable after store credit is ₹${formatMoneyWhole(payableAfterCreditWhole)}, but Cash + Online + Credit is ₹${formatMoneyWhole(splitTotal)}. Please adjust the split.`);
           return;
       }
+      const settlementCashPaid = !isReturnMode && shouldAllowOverpayAsCreditSubmit
+        ? Math.max(0, roundMoneyWhole(payableAfterCreditWhole - onlinePaid - creditDue))
+        : cashPaid;
+      const settlementOnlinePaid = onlinePaid;
+      const settlementCreditDue = creditDue;
       if (!isReturnMode && creditDue > 0 && !finalCustomer) {
           setCheckoutError("Customer is required when credit due is created.");
           return;
@@ -976,6 +960,14 @@ export default function Sales() {
           })();
 
       let currentCashDetails: { cashReceived: number; changeReturned: number } | null = null;
+      const existingCustomerDueAtSubmit = Math.max(0, selectedCustomerDue);
+      const dueAdjustmentFromOverpay = shouldAllowOverpayAsCreditSubmit
+        ? Math.min(existingCustomerDueAtSubmit, Math.max(0, rawOverpaymentValue))
+        : 0;
+      const checkoutStoreCreditCreated =
+        !isReturnMode && shouldAllowOverpayAsCreditSubmit
+          ? Math.max(0, rawOverpaymentValue - dueAdjustmentFromOverpay)
+          : 0;
       if (!isReturnMode && cashPaid > 0) {
           const safeCashReceived = hasTenderedInput ? Math.max(0, Number(cashReceivedInput || 0)) : 0;
           if (hasTenderedInput && safeCashReceived < cashPaid) {
@@ -983,8 +975,7 @@ export default function Sales() {
             return;
           }
           const rawOverpay = hasTenderedInput ? Math.max(0, safeCashReceived - cashPaid) : 0;
-          const storeCreditCreated = (storeOverpaymentAsCredit && finalCustomer) ? rawOverpay : 0;
-          const changeReturned = Math.max(0, rawOverpay - storeCreditCreated);
+          const changeReturned = Math.max(0, rawOverpay - checkoutStoreCreditCreated);
           currentCashDetails = {
               cashReceived: Number.isFinite(safeCashReceived) ? safeCashReceived : 0,
               changeReturned: Number.isFinite(changeReturned) ? changeReturned : 0
@@ -995,7 +986,8 @@ export default function Sales() {
           id: Date.now().toString(), items: [...cart], total, subtotal, discount: totalDiscount, tax: taxAmount,
           taxRate: selectedTax.value, taxLabel: selectedTax.label, date: buildEffectiveTransactionDate(), type: isReturnMode ? 'return' : 'sale',
           customerId: finalCustomer?.id, customerName: finalCustomer?.name, paymentMethod: resolvedPaymentMethod, storeCreditUsed: appliedStoreCredit,
-          storeCreditCreated: !isReturnMode && storeOverpaymentAsCredit && finalCustomer ? Math.max(0, rawOverpaymentValue) : 0,
+          storeCreditCreated: checkoutStoreCreditCreated,
+          paymentAppliedToReceivable: dueAdjustmentFromOverpay,
           cashReceived: !isReturnMode ? Math.max(0, Number(cashReceivedInput || 0)) : undefined,
           changeReturned: !isReturnMode ? (storeOverpaymentAsCredit && finalCustomer ? 0 : Math.max(0, rawOverpaymentValue)) : undefined,
           customerPhone: finalCustomer?.phone,
@@ -1004,12 +996,11 @@ export default function Sales() {
           gstApplied: isReturnMode ? false : isGstApplied,
           returnHandlingMode: isReturnMode ? returnHandlingMode : undefined,
           saleSettlement: isReturnMode ? undefined : {
-            cashPaid,
-            onlinePaid,
-            creditDue,
+            cashPaid: settlementCashPaid,
+            onlinePaid: settlementOnlinePaid,
+            creditDue: settlementCreditDue,
           }
       };
-
       const completedCartId = activeCartId;
       pendingCheckoutRef.current = { transactionId: tx.id, cart: [...cart], transaction: tx, cashDetails: currentCashDetails };
       setTransactionSyncStatus({ phase: 'pending', message: 'Saving sale locally…' });
@@ -1070,63 +1061,23 @@ export default function Sales() {
       setCheckoutError(msg);
       return;
     }
-    const currentUser = auth.currentUser;
-    logInvoiceSendDebug({
-      step: 'whatsapp_server_url_resolved',
-      serverUrl: getWhatsAppServerUrl(),
-      userIdPresent: Boolean(currentUser?.uid),
-    });
-    if (!currentUser?.uid) {
-      const signInMsg = 'Please sign in again to send WhatsApp invoice';
-      setSendInvoiceMessage(signInMsg);
-      setCheckoutError(signInMsg);
-      return;
-    }
     try {
+      setWaSendingStage('Preparing PDF...');
       const canonicalPdfDataUrl = generateReceiptPDFDataUrl(tx, customers, transactionCashDetails || undefined);
-      logInvoiceSendDebug({
-        step: 'pdf_data_url_generated',
-        dataUrlPrefix: canonicalPdfDataUrl.slice(0, 50),
-        dataUrlLength: canonicalPdfDataUrl.length,
-        isPdfDataUrl: canonicalPdfDataUrl.startsWith('data:application/pdf'),
-      });
-      logInvoiceSendDebug({ step: 'pdf_to_image_render_start' });
-      const invoiceImageDataUrl = await renderPdfFirstPageToImageDataUrl(canonicalPdfDataUrl);
-      logInvoiceSendDebug({
-        step: 'pdf_to_image_render_success',
-        imageDataUrlPrefix: invoiceImageDataUrl.slice(0, 50),
-        imageDataUrlLength: invoiceImageDataUrl.length,
-        startsWithPng: invoiceImageDataUrl.startsWith('data:image/png'),
-      });
-      logInvoiceSendDebug({ step: 'cloudinary_image_upload_start' });
-      const cloudinaryUrl = await uploadDataUrlImageToCloudinary(invoiceImageDataUrl);
-      logInvoiceSendDebug({ step: 'cloudinary_image_upload_success', cloudinaryUrl, urlType: typeof cloudinaryUrl });
-      const maskedPhone = customerPhone.length > 4 ? `${'*'.repeat(Math.max(0, customerPhone.length - 4))}${customerPhone.slice(-4)}` : '****';
-      const payload = {
-        userId: currentUser.uid,
-        customerPhone,
-        customerName,
-        invoiceNo,
-        // pdfUrl field kept for API compatibility; value is now invoice image URL.
-        pdfUrl: typeof cloudinaryUrl === 'string' ? cloudinaryUrl : String((cloudinaryUrl as any)?.secure_url || ''),
-      };
-      logInvoiceSendDebug({
-        step: 'whatsapp_send_invoice_payload_shape',
-        userIdPresent: Boolean(payload.userId),
-        customerPhoneMasked: maskedPhone,
-        hasCustomerName: Boolean(payload.customerName),
-        hasInvoiceNo: Boolean(payload.invoiceNo),
-        hasPdfUrl: Boolean(payload.pdfUrl),
-      });
-      await sendInvoiceToWhatsApp(payload);
-      setSendInvoiceMessage('Invoice sent to WhatsApp');
+      const invoicePdfBlob = await (await fetch(canonicalPdfDataUrl)).blob();
+      setWaSendingStage('Sending WhatsApp message...');
+      const result = await shareTransactionInvoiceViaWhatsApp({ ...tx, customerPhone, customerName, invoiceNo }, invoicePdfBlob);
+      setWaSendingStage(result.ok ? 'Sent successfully' : `Failed: ${result.message}`);
+      setSendInvoiceMessage(result.message);
     } catch (error) {
       logInvoiceSendDebug({
         step: 'send_failed',
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorMessage: error instanceof Error ? error.message : String(error),
       });
-      setSendInvoiceMessage('Failed to send WhatsApp invoice');
+      setSendInvoiceMessage(error instanceof Error ? error.message : 'Failed to send WhatsApp invoice');
+    } finally {
+      setTimeout(() => setWaSendingStage(null), 1000);
     }
   };
 
@@ -1145,23 +1096,14 @@ export default function Sales() {
       || (selectedCustomer.phone && c.phone === selectedCustomer.phone)
       || (selectedCustomer.name && c.name === selectedCustomer.name)
     ));
-    console.log('[POS DEBUG] selectedCustomer', selectedCustomer);
-    console.log('[POS DEBUG] matchedCustomer', matchedCustomer || null);
-    console.log('[POS DEBUG] customersLoaded', {
-      count: customers?.length,
-      sample: customers?.slice?.(0, 3)?.map((c) => ({ id: c.id, name: c.name, totalDue: c.totalDue })),
-    });
     return matchedCustomer || selectedCustomer;
   }, [selectedCustomer, customers]);
-  const availableStoreCredit = Math.max(0, Number(resolvedSelectedCustomer?.storeCredit || 0));
-  const selectedCustomerDue = Math.max(0, Number(resolvedSelectedCustomer?.totalDue || 0));
-  console.log('[POS DEBUG] resolvedSelectedCustomer', resolvedSelectedCustomer);
-  console.log('[POS DEBUG] selectedCustomerDue', {
-    raw: resolvedSelectedCustomer?.totalDue,
-    computed: selectedCustomerDue,
-    type: typeof resolvedSelectedCustomer?.totalDue,
-  });
-  console.log('[POS DEBUG] shouldRenderDue', selectedCustomerDue > 0);
+  const safeCustomers = Array.isArray(customers) ? customers : [];
+  const safeTransactions = Array.isArray(transactions) ? transactions : [];
+  const safeUpfrontOrders = Array.isArray(upfrontOrders) ? upfrontOrders : [];
+  const selectedCustomerBalanceView = useMemo(() => getCanonicalCustomerBalanceView(resolvedSelectedCustomer, safeCustomers, safeTransactions, safeUpfrontOrders), [resolvedSelectedCustomer, safeCustomers, safeTransactions, safeUpfrontOrders]);
+  const availableStoreCredit = selectedCustomerBalanceView.canonicalStoreCredit;
+  const selectedCustomerDue = selectedCustomerBalanceView.canonicalDue;
   const originalInvoiceTotal = Math.max(0, Number(buildCheckoutMoney({
     cartItems: cart,
     taxRate: selectedTax.value,
@@ -1196,20 +1138,47 @@ export default function Sales() {
   const taxVal = checkoutPreview.taxAmount;
   const grandTotal = checkoutPreview.total;
   const storeCreditUsed = appliedStoreCredit;
+  const remainingStoreCreditAfterInvoice = Math.max(0, availableStoreCredit - appliedStoreCredit);
   const cashPaidValue = checkoutPreview.cashPaid;
   const onlinePaidValue = checkoutPreview.onlinePaid;
   const autoCreditDueValue = Math.max(0, roundMoneyWhole(checkoutPreview.remainingPayableWhole - cashPaidValue - onlinePaidValue));
-  const splitTotalValue = roundMoneyWhole(cashPaidValue + onlinePaidValue + autoCreditDueValue + storeCreditUsed);
-  const hasSettlementOverpay = !isReturnMode && roundMoneyWhole(cashPaidValue + onlinePaidValue) > roundMoneyWhole(checkoutPreview.remainingPayableWhole);
+  const splitTotalValue = roundMoneyWhole(cashPaidValue + onlinePaidValue + autoCreditDueValue);
+  const payableAfterStoreCredit = roundMoneyWhole(checkoutPreview.remainingPayableWhole);
+  const hasSettlementOverpay = !isReturnMode && roundMoneyWhole(cashPaidValue + onlinePaidValue) > payableAfterStoreCredit;
   const rawTenderedInput = (cashReceivedInput || '').trim();
   const hasTenderedInput = rawTenderedInput !== '';
   const cashTenderedValue = hasTenderedInput ? Math.max(0, Number(rawTenderedInput || 0)) : 0;
   const cashToCollectValue = Math.max(0, Number(cashPaidValue || 0));
   const displayedCashTenderedValue = hasTenderedInput ? cashTenderedValue : null;
-  const rawOverpaymentValue = hasTenderedInput ? Math.max(0, cashTenderedValue - cashToCollectValue) : 0;
+  const rawOverpaymentValue = Math.max(0, roundMoneyWhole(cashPaidValue + onlinePaidValue - payableAfterStoreCredit));
+  const dueAdjustmentFromOverpayPreview = Math.min(Math.max(0, selectedCustomerDue), rawOverpaymentValue);
+  const remainingStoreCreditFromOverpayPreview = Math.max(0, rawOverpaymentValue - dueAdjustmentFromOverpayPreview);
   const storeCreditToCreate = storeOverpaymentAsCredit ? rawOverpaymentValue : 0;
   const cashChangeValue = storeOverpaymentAsCredit ? 0 : rawOverpaymentValue;
   const cashShortfallValue = hasTenderedInput ? Math.max(0, cashToCollectValue - cashTenderedValue) : 0;
+  const shouldAllowOverpayAsCredit = rawOverpaymentValue > 0 && !!resolvedSelectedCustomer && storeOverpaymentAsCredit;
+
+  const handleToggleStoreCredit = () => {
+    if (isReturnMode || !selectedCustomer) return;
+    const enabling = !useStoreCreditApplied;
+    setUseStoreCreditApplied(enabling);
+    if (!enabling) {
+      setStoreCreditInput('0');
+      return;
+    }
+    const maxCredit = Math.max(0, Math.min(availableStoreCredit, originalInvoiceTotal));
+    const payableAfterStoreCredit = Math.max(0, roundMoneyWhole(originalInvoiceTotal - maxCredit));
+    setStoreCreditInput(String(maxCredit));
+    setCashPaidInput(String(payableAfterStoreCredit));
+    setOnlinePaidInput('0');
+    setCreditDueInput('0');
+    setAllCreditMode(false);
+    setCashManuallyEdited(false);
+    setOnlineManuallyEdited(false);
+    setCashReceivedDirty(false);
+    setCashReceivedInput(String(payableAfterStoreCredit));
+  };
+
   useEffect(() => {
     setUseStoreCreditApplied(false);
     setStoreCreditInput('0');
@@ -1286,6 +1255,9 @@ export default function Sales() {
     const nameB = (b.name || '').trim().toLowerCase();
     return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
   });
+
+  useEffect(() => {
+  }, [products.length, filteredProducts.length, productSearch, selectedCategory]);
   const filteredCustomers = customerSearch ? customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || c.phone.includes(customerSearch)) : [];
   const productTotalPages = Math.max(1, Math.ceil(filteredProducts.length / POS_PRODUCTS_PER_PAGE));
   const paginatedProducts = filteredProducts.slice((productPage - 1) * POS_PRODUCTS_PER_PAGE, productPage * POS_PRODUCTS_PER_PAGE);
@@ -1924,10 +1896,7 @@ export default function Sales() {
                 ) : rawOverpaymentValue > 0 ? (
                   <div className="space-y-2">
                     <div className={`font-semibold ${getPaymentStatusColorClass('cash').replace('bg-green-50 border-green-200 ', '')}`}>Change due ₹{formatMoneyPrecise(cashChangeValue || rawOverpaymentValue)}</div>
-                    <Button size="sm" variant={storeOverpaymentAsCredit ? 'default' : 'outline'} disabled={!selectedCustomer} onClick={() => setStoreOverpaymentAsCredit(v => !v)}>
-                      {storeOverpaymentAsCredit ? `₹${formatMoneyPrecise(storeCreditToCreate)} will be saved as store credit` : `Store Amount (₹${formatMoneyPrecise(rawOverpaymentValue)}) in Store Credit`}
-                    </Button>
-                    {!selectedCustomer && <div className="text-[11px] text-muted-foreground">Select or create a customer to save store credit.</div>}
+                    
                   </div>
                 ) : cashShortfallValue > 0 ? (
                   <div className={`font-semibold ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}>Cash short by ₹{formatMoneyPrecise(cashShortfallValue)}</div>
@@ -1940,9 +1909,32 @@ export default function Sales() {
                 <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(onlinePaidValue)}</span></div>
                 <div className="flex justify-between font-semibold"><span>Credit Due</span><span>₹{formatMoneyWhole(autoCreditDueValue)}</span></div>
                 <div className="flex justify-between font-semibold"><span>Split Total</span><span>₹{formatMoneyWhole(splitTotalValue)}</span></div>
-                {hasSettlementOverpay && (
+                {hasSettlementOverpay && !shouldAllowOverpayAsCredit && (
                   <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{formatMoneyWhole(Math.max(0, roundMoneyWhole(cashPaidValue + onlinePaidValue - checkoutPreview.remainingPayableWhole)))}</p>
                 )}
+
+                {rawOverpaymentValue > 0 && resolvedSelectedCustomer && (
+                  <div className="mt-2 rounded border border-orange-200 bg-orange-50 p-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">
+                        Change due: ₹{formatMoneyPrecise(rawOverpaymentValue)}
+                      </span>
+                    </div>
+                    <div className="mt-1 space-y-1 text-xs">
+                      <div className="flex items-center justify-between"><span>Applied to previous due</span><span className="font-semibold">₹{formatMoneyPrecise(dueAdjustmentFromOverpayPreview)}</span></div>
+                      <div className="flex items-center justify-between"><span>Saved as store credit</span><span className="font-semibold text-emerald-700">₹{formatMoneyPrecise(remainingStoreCreditFromOverpayPreview)}</span></div>
+                    </div>
+                    <label className="mt-2 flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={storeOverpaymentAsCredit}
+                        onChange={(e) => setStoreOverpaymentAsCredit(e.target.checked)}
+                      />
+                      Save change as store credit
+                    </label>
+                  </div>
+                )}
+
               </div>
             </div>
 
@@ -1959,19 +1951,17 @@ export default function Sales() {
                   <Input placeholder="Search phone or name..." value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} />
                 ) : (
                   <div className="bg-muted p-2 rounded border">
-                    <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <p className="text-sm font-bold truncate">{resolvedSelectedCustomer?.name || selectedCustomer.name}</p>
                         <p className="text-xs text-muted-foreground">{resolvedSelectedCustomer?.phone || selectedCustomer.phone}</p>
+                        {selectedCustomerDue > 0 && (
+                          <p className="mt-1 text-xs font-semibold text-orange-700">
+                            Existing Due: ₹{formatMoneyPrecise(selectedCustomerDue)}
+                          </p>
+                        )}
                       </div>
-                      {selectedCustomerDue > 0 && (
-                        <div className="text-right shrink-0">
-                          <p className="text-xs font-semibold text-orange-700 whitespace-nowrap">Due: ₹{formatMoneyPrecise(selectedCustomerDue)}</p>
-                        </div>
-                      )}
-                    </div>
-                    <div className="mt-1 flex justify-end">
-                      <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
+                      <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)} className="shrink-0 self-center">Change</Button>
                     </div>
                   </div>
                 )}
@@ -1994,11 +1984,12 @@ export default function Sales() {
 
             {!isReturnMode && selectedCustomer && (
               <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-semibold text-muted-foreground uppercase">Customer has ₹{formatMoneyPrecise(availableStoreCredit)} store credit.</span>
-                  <span className="font-bold">₹{formatMoneyPrecise(availableStoreCredit)}</span>
+                <div className="text-xs space-y-1">
+                  <div className="flex items-center justify-between"><span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span><span className="font-bold">₹{formatMoneyPrecise(availableStoreCredit)}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to this invoice</span><span className="font-semibold">₹{formatMoneyPrecise(appliedStoreCredit)}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-muted-foreground">Remaining after invoice</span><span className="font-semibold text-emerald-700">₹{formatMoneyPrecise(remainingStoreCreditAfterInvoice)}</span></div>
                 </div>
-                <Button size="sm" variant={useStoreCreditApplied ? 'default' : 'outline'} disabled={maxUsableStoreCredit <= 0} onClick={() => setUseStoreCreditApplied(v => !v)}>
+                <Button size="sm" variant={useStoreCreditApplied ? 'default' : 'outline'} disabled={maxUsableStoreCredit <= 0} onClick={handleToggleStoreCredit}>
                   {useStoreCreditApplied ? 'Remove Store Credit' : `Use Store Credit`}
                 </Button>
                 {useStoreCreditApplied && (
@@ -2250,10 +2241,7 @@ export default function Sales() {
                       ) : rawOverpaymentValue > 0 ? (
                         <div className="space-y-2">
                           <div className={`font-semibold ${getPaymentStatusColorClass('cash').replace('bg-green-50 border-green-200 ', '')}`}>Change due ₹{formatMoneyPrecise(cashChangeValue || rawOverpaymentValue)}</div>
-                          <Button size="sm" variant={storeOverpaymentAsCredit ? 'default' : 'outline'} disabled={!selectedCustomer} onClick={() => setStoreOverpaymentAsCredit(v => !v)}>
-                            {storeOverpaymentAsCredit ? `₹${formatMoneyPrecise(storeCreditToCreate)} will be saved as store credit` : `Store Amount (₹${formatMoneyPrecise(rawOverpaymentValue)}) in Store Credit`}
-                          </Button>
-                          {!selectedCustomer && <div className="text-[11px] text-muted-foreground">Select or create a customer to save store credit.</div>}
+                          
                         </div>
                       ) : cashShortfallValue > 0 ? (
                         <div className={`font-semibold ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}>Cash short by ₹{formatMoneyPrecise(cashShortfallValue)}</div>
@@ -2266,9 +2254,32 @@ export default function Sales() {
                       <div className="flex justify-between"><span>Online Paid</span><span>₹{formatMoneyWhole(onlinePaidValue)}</span></div>
                       <div className="flex justify-between font-semibold"><span>Credit Due</span><span>₹{formatMoneyWhole(autoCreditDueValue)}</span></div>
                       <div className="flex justify-between font-semibold"><span>Split Total</span><span>₹{formatMoneyWhole(splitTotalValue)}</span></div>
-                      {hasSettlementOverpay && (
+                      {hasSettlementOverpay && !shouldAllowOverpayAsCredit && (
                         <p className="text-[11px] font-bold text-destructive">Paid amount exceeds payable by ₹{formatMoneyWhole(Math.max(0, roundMoneyWhole(cashPaidValue + onlinePaidValue - checkoutPreview.remainingPayableWhole)))}</p>
                       )}
+
+
+                {rawOverpaymentValue > 0 && resolvedSelectedCustomer && (
+                  <div className="mt-2 rounded border border-orange-200 bg-orange-50 p-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">
+                        Change due: ₹{formatMoneyPrecise(rawOverpaymentValue)}
+                      </span>
+                    </div>
+                    <div className="mt-1 space-y-1 text-xs">
+                      <div className="flex items-center justify-between"><span>Applied to previous due</span><span className="font-semibold">₹{formatMoneyPrecise(dueAdjustmentFromOverpayPreview)}</span></div>
+                      <div className="flex items-center justify-between"><span>Saved as store credit</span><span className="font-semibold text-emerald-700">₹{formatMoneyPrecise(remainingStoreCreditFromOverpayPreview)}</span></div>
+                    </div>
+                    <label className="mt-2 flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={storeOverpaymentAsCredit}
+                        onChange={(e) => setStoreOverpaymentAsCredit(e.target.checked)}
+                      />
+                      Save change as store credit
+                    </label>
+                  </div>
+                )}
                     </div>
                   </div>
                 )}
@@ -2293,19 +2304,17 @@ export default function Sales() {
                       </div>
                     ) : (
                       <div className="bg-muted p-3 rounded-lg border">
-                        <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center justify-between gap-3">
                           <div className="text-sm min-w-0">
                             <p className="font-bold truncate">{resolvedSelectedCustomer?.name || selectedCustomer.name}</p>
                             <p className="text-xs text-muted-foreground">{resolvedSelectedCustomer?.phone || selectedCustomer.phone}</p>
+                            {selectedCustomerDue > 0 && (
+                              <p className="mt-1 text-xs font-semibold text-orange-700">
+                                Existing Due: ₹{formatMoneyPrecise(selectedCustomerDue)}
+                              </p>
+                            )}
                           </div>
-                          {selectedCustomerDue > 0 && (
-                            <div className="text-right shrink-0">
-                              <p className="text-xs font-semibold text-orange-700 whitespace-nowrap">Due: ₹{formatMoneyPrecise(selectedCustomerDue)}</p>
-                            </div>
-                          )}
-                        </div>
-                        <div className="mt-1 flex justify-end">
-                          <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)}>Change</Button>
+                          <Button variant="ghost" size="sm" onClick={() => setSelectedCustomer(null)} className="shrink-0 self-center">Change</Button>
                         </div>
                       </div>
                     )}
@@ -2364,12 +2373,13 @@ export default function Sales() {
 
                 {!isReturnMode && selectedCustomer && (
                   <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-muted-foreground uppercase">Customer has ₹{formatMoneyPrecise(availableStoreCredit)} store credit.</span>
-                      <span className="font-bold">₹{formatMoneyPrecise(availableStoreCredit)}</span>
+                    <div className="text-xs space-y-1">
+                      <div className="flex items-center justify-between"><span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span><span className="font-bold">₹{formatMoneyPrecise(availableStoreCredit)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to this invoice</span><span className="font-semibold">₹{formatMoneyPrecise(appliedStoreCredit)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-muted-foreground">Remaining after invoice</span><span className="font-semibold text-emerald-700">₹{formatMoneyPrecise(remainingStoreCreditAfterInvoice)}</span></div>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
-                      <Button size="sm" variant={useStoreCreditApplied ? 'default' : 'outline'} disabled={maxUsableStoreCredit <= 0} onClick={() => setUseStoreCreditApplied(v => !v)}>
+                      <Button size="sm" variant={useStoreCreditApplied ? 'default' : 'outline'} disabled={maxUsableStoreCredit <= 0} onClick={handleToggleStoreCredit}>
                         {useStoreCreditApplied ? 'Remove Store Credit' : `Use Store Credit`}
                       </Button>
                     </div>
@@ -2447,6 +2457,15 @@ export default function Sales() {
       )}
 
       {/* Success Modal */}
+      {waSendingStage && (
+          <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/45">
+              <div className="rounded-lg bg-background p-4 shadow-lg min-w-[280px]">
+                  <p className="text-sm font-medium mb-2">{waSendingStage}</p>
+                  <div className="h-2 w-full rounded bg-muted overflow-hidden"><div className="h-full w-2/3 animate-pulse bg-primary" /></div>
+              </div>
+          </div>
+      )}
+
       {transactionComplete && (
           <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[90] flex items-center justify-center p-4">
               <Card className="w-full max-sm text-center shadow-2xl animate-in zoom-in">
@@ -2474,6 +2493,12 @@ export default function Sales() {
                           <p className="font-semibold">Settlement Breakdown</p>
                           <p>Total Invoice: {formatINRWhole(Math.abs(transactionComplete.total))}</p>
                           <p>Store Credit Used: {formatINRPrecise(Number(transactionComplete.storeCreditUsed || 0))}</p>
+                          {(Number(transactionComplete.paymentAppliedToReceivable || 0) > 0 || Number(transactionComplete.storeCreditCreated || 0) > 0) && (
+                            <>
+                              <p>Applied to Previous Due: {formatINRPrecise(Number(transactionComplete.paymentAppliedToReceivable || 0))}</p>
+                              <p>Store Credit Created: {formatINRPrecise(Number(transactionComplete.storeCreditCreated || 0))}</p>
+                            </>
+                          )}
                           <p>Cash Paid: {formatINRPrecise(Number(transactionComplete.saleSettlement?.cashPaid || 0))}</p>
                           <p>Online Paid: {formatINRPrecise(Number(transactionComplete.saleSettlement?.onlinePaid || 0))}</p>
                           <p>Credit Due: {formatINRPrecise(Number(transactionComplete.saleSettlement?.creditDue || 0))}</p>
