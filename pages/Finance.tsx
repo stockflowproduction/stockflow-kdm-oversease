@@ -9,6 +9,7 @@ import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, U
 import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
 import { compareCashSession, compareLegacyVsLedger } from '../services/erpComparison';
+import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 
 type Expense = {
   id: string;
@@ -734,6 +735,35 @@ function MoneyTile({ label, value, tone = 'neutral' }: { label: string; value: s
 }
 
 export default function Finance() {
+  const formatExpenseLoggedDate = (expense: Expense) => {
+    const rawExpense = expense as Expense & { date?: unknown; timestamp?: unknown; expenseDate?: unknown };
+    const pick = rawExpense.createdAt ?? rawExpense.date ?? rawExpense.timestamp ?? rawExpense.expenseDate;
+    if (!pick) return 'Date not available';
+    const normalize = (value: unknown): Date | null => {
+      if (!value) return null;
+      if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+      if (typeof value === 'string' || typeof value === 'number') {
+        const d = new Date(value);
+        return Number.isNaN(d.getTime()) ? null : d;
+      }
+      if (typeof value === 'object') {
+        const anyValue = value as any;
+        if (typeof anyValue?.toDate === 'function') {
+          const d = anyValue.toDate();
+          return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
+        }
+        if (typeof anyValue?.seconds === 'number') {
+          const ms = anyValue.seconds * 1000 + (typeof anyValue?.nanoseconds === 'number' ? anyValue.nanoseconds / 1_000_000 : 0);
+          const d = new Date(ms);
+          return Number.isNaN(d.getTime()) ? null : d;
+        }
+      }
+      return null;
+    };
+    const parsed = normalize(pick);
+    return parsed ? parsed.toLocaleDateString() : 'Date not available';
+  };
+
   const [data, setData] = useState<AppState>(loadData());
   const [errors, setErrors] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<FinanceTabKey>('cash');
@@ -1226,7 +1256,17 @@ export default function Finance() {
 
   const expensesTotalForDate = useMemo(() => filteredExpenses.reduce((sum, e) => sum + e.amount, 0), [filteredExpenses]);
 
-  const creditCustomers = useMemo(() => data.customers.filter(c => c.totalDue > 0).sort((a, b) => b.totalDue - a.totalDue), [data.customers]);
+
+  const canonicalCustomerBalanceById = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof getCanonicalCustomerBalanceView>>();
+    data.customers.forEach((customer) => {
+      const view = getCanonicalCustomerBalanceView(customer, data.customers, data.transactions, data.upfrontOrders || []);
+      map.set(customer.id, view);
+    });
+    return map;
+  }, [data.customers, data.transactions, data.upfrontOrders]);
+
+  const creditCustomers = useMemo(() => data.customers.filter(c => (canonicalCustomerBalanceById.get(c.id)?.canonicalDue || 0) > 0).sort((a, b) => (canonicalCustomerBalanceById.get(b.id)?.canonicalDue || 0) - (canonicalCustomerBalanceById.get(a.id)?.canonicalDue || 0)), [data.customers, canonicalCustomerBalanceById]);
 
   const dueStoreCreditSummary = useMemo(() => {
     const snapshot = getCanonicalCustomerBalanceSnapshot(data.customers, data.transactions);
@@ -3349,8 +3389,9 @@ export default function Finance() {
                       ) : (
                         <div className="h-full overflow-auto rounded-2xl border border-slate-200">
                           <div className="sticky top-0 z-10 grid grid-cols-12 gap-2 bg-slate-50 px-3 py-2 text-[11px] font-semibold text-slate-600">
-                            <div className="col-span-6">Expense</div>
-                            <div className="col-span-3">Category</div>
+                            <div className="col-span-5">Expense</div>
+                            <div className="col-span-2">Date</div>
+                            <div className="col-span-2">Category</div>
                             <div className="col-span-2 text-right">Amount</div>
                             <div className="col-span-1 text-right" />
                           </div>
@@ -3358,12 +3399,13 @@ export default function Finance() {
                           <div className="divide-y divide-slate-200">
                             {filteredExpenses.map(e => (
                               <div key={e.id} className="grid grid-cols-12 gap-2 px-3 py-3">
-                                <div className="col-span-6 min-w-0">
+                                <div className="col-span-5 min-w-0">
                                   <div className="truncate text-sm font-semibold text-slate-900">{e.title}</div>
                                   <div className="mt-0.5 truncate text-xs text-slate-500">{e.note ? e.note : '—'}</div>
                                 </div>
 
-                                <div className="col-span-3"><span className="inline-flex rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-inset ring-slate-200">{e.category}</span></div>
+                                <div className="col-span-2 text-xs text-slate-600">{formatExpenseLoggedDate(e)}</div>
+                                <div className="col-span-2"><span className="inline-flex rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-inset ring-slate-200">{e.category}</span></div>
                                 <div className="col-span-2 text-right text-sm font-semibold text-slate-900">{formatINR(e.amount)}</div>
                                 <div className="col-span-1 flex justify-end">
                                   <Button type="button" variant="ghost" onClick={() => removeExpense(e.id)} className="h-8 w-8 p-0 text-rose-600">✕</Button>
@@ -3397,8 +3439,8 @@ export default function Finance() {
                     <p className="text-sm text-muted-foreground">Last Visit: {new Date(customer.lastVisit).toLocaleDateString()}</p>
                   </div>
                   <div className="text-right">
-                    <p className="font-bold text-red-700">Due: {formatINRSummary(customer.totalDue)}</p>
-                    <Button size="sm" onClick={() => { setCollectingCustomer(customer); setPaymentAmount(customer.totalDue.toFixed(2)); }}>Collect Payment</Button>
+                    <p className="font-bold text-red-700">Due: {formatINRSummary(canonicalCustomerBalanceById.get(customer.id)?.canonicalDue || 0)}</p>
+                    <Button size="sm" onClick={() => { const due = canonicalCustomerBalanceById.get(customer.id)?.canonicalDue || 0; setCollectingCustomer(customer); setPaymentAmount(due.toFixed(2)); }}>Collect Payment</Button>
                   </div>
                 </div>
               ))}

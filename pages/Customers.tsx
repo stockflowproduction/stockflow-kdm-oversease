@@ -5,6 +5,9 @@ import autoTable from 'jspdf-autotable';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
 import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction, auditCustomerPaymentAllocations, previewCustomerRepairedAllocationView } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
+import { shareCustomerLedgerViaWhatsApp } from '../services/whatsappShare';
+import { appendWhatsAppLog } from '../services/whatsappLogs';
+import { auth } from '../services/firebase';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -81,6 +84,7 @@ export default function Customers() {
   const [addCustomerError, setAddCustomerError] = useState<string | null>(null);
   const [upfrontOrderError, setUpfrontOrderError] = useState<string | null>(null);
   const [collectPaymentError, setCollectPaymentError] = useState<string | null>(null);
+  const [waSendingStage, setWaSendingStage] = useState<string | null>(null);
   const [customerEditError, setCustomerEditError] = useState<string | null>(null);
   
   const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', gstName: '', gstNumber: '' });
@@ -776,6 +780,43 @@ export default function Customers() {
       doc.save(`Customer_Dues_Report.pdf`);
   };
 
+
+  const handleShareCustomerLedger = async (customer: Customer) => {
+    if (!customer.phone) return setWaSendingStage('Failed: Customer phone number is missing.');
+    try {
+      setWaSendingStage('Preparing PDF...');
+      const customerTx = transactions.filter(tx => tx.customerId === customer.id);
+      const profile = loadData().profile || {};
+      const rows = customerTx.map(row => ({
+        date: row.date,
+        reference: row.id,
+        description: row.customerName || customer.name,
+        type: row.type,
+        debit: row.type === 'sale' ? Math.abs(Number(row.total || 0)) : 0,
+        credit: row.type !== 'sale' ? Math.abs(Number(row.total || 0)) : 0,
+        balance: 0,
+      }));
+      const pdfBlob = await generateAccountStatementPDF({
+        profile,
+        entityLabel: 'BILLED TO',
+        entityName: customer.name,
+        entityMeta: [customer.phone || '', `Customer ID: ${customer.id}`],
+        rows,
+        fileName: `Statement_${customer.name.replace(/\s+/g, '_')}.pdf`,
+        returnBlob: true,
+      });
+      setWaSendingStage('Sending WhatsApp message...');
+      const result = await shareCustomerLedgerViaWhatsApp(customer, pdfBlob || undefined);
+      const uid = auth?.currentUser?.uid || '';
+      await appendWhatsAppLog(uid, { type: 'ledger', customerId: customer.id, customerName: customer.name, customerPhone: customer.phone, ledgerId: `LEDGER-${customer.id}`, pdfUrl: '', status: result.ok ? 'sent' : 'failed', error: result.ok ? null : result.reason, sentAt: result.ok ? new Date().toISOString() : null, createdBy: uid, meta: { customerId: customer.id } });
+      setWaSendingStage(result.ok ? 'Sent successfully' : `Failed: ${result.message}`);
+    } catch (error) {
+      setWaSendingStage('Failed: Ledger PDF could not be prepared. Please try again.');
+    } finally {
+      setTimeout(() => setWaSendingStage(null), 1200);
+    }
+  };
+
   const handleExport = (format: 'pdf' | 'excel') => {
       if (exportType === 'statement' && viewingCustomer) {
           if (format === 'pdf') {
@@ -800,6 +841,14 @@ export default function Customers() {
 
   return (
     <div className="space-y-6 pb-24 md:pb-0 relative">
+      {waSendingStage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="rounded-lg bg-background p-4 shadow-lg min-w-[280px]">
+            <p className="text-sm font-medium mb-2">{waSendingStage}</p>
+            <div className="h-2 w-full rounded bg-muted overflow-hidden"><div className="h-full w-2/3 animate-pulse bg-primary" /></div>
+          </div>
+        </div>
+      )}
       {isInitialLoading && (
         <div className="space-y-3 p-1">
           <div className="h-8 w-56 animate-pulse rounded bg-muted" />
@@ -954,7 +1003,8 @@ export default function Customers() {
             </tr>
           </thead>
           <tbody>
-            {paginatedCustomers.map((customer) => (
+            {paginatedCustomers.map((customer) => {
+              return (
               <tr key={customer.id} className="border-t hover:bg-muted/20">
                 <td className="p-3">
                   <input
@@ -978,6 +1028,7 @@ export default function Customers() {
                 <td className="p-3">
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" variant="outline" onClick={() => setViewingCustomer(customer)}>View Details</Button>
+                    <Button size="sm" variant="outline" onClick={() => void handleShareCustomerLedger(customer)}>WhatsApp Ledger</Button>
                     <Button size="sm" variant="outline" onClick={() => openCreateOrderForCustomer(customer)}>+ Create Order</Button>
                     <Button size="sm" variant="outline" onClick={() => openCustomerEditor(customer)}>Edit</Button>
                     <Button size="sm" variant="destructive" onClick={() => {
@@ -991,7 +1042,8 @@ export default function Customers() {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1136,6 +1188,9 @@ export default function Customers() {
                                </Button>
                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-slate-200 shadow-sm" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}>
                                    <FileText className="w-4 h-4 mr-1.5" /> Get Statement
+                               </Button>
+                               <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-emerald-200 text-emerald-700 shadow-sm" onClick={() => { if (viewingCustomer) void handleShareCustomerLedger(viewingCustomer); }}>
+                                 WhatsApp Ledger
                                </Button>
                                {customerLedgerDebugEnabled && (
                                  <Button size="sm" variant="outline" className="flex-1 text-xs font-bold border-amber-200 text-amber-700 shadow-sm" onClick={() => {

@@ -24,7 +24,8 @@
     "test": "rm -rf .tmp-tests && tsc -p tsconfig.erp-tests.json && node scripts/fix-test-import-extensions.cjs && node --test .tmp-tests/tests/erp-readonly.test.js",
     "test:erp": "rm -rf .tmp-tests && tsc -p tsconfig.erp-tests.json && node scripts/fix-test-import-extensions.cjs && node --test .tmp-tests/tests/erp-readonly.test.js",
     "sample:firestore": "node --experimental-strip-types scripts/firestore-scenario-sampler.ts",
-    "export:firestore:canonical": "node --experimental-strip-types scripts/firestore-canonical-export.ts"
+    "export:firestore:canonical": "node --experimental-strip-types scripts/firestore-canonical-export.ts",
+    "export:firestore": "node --experimental-strip-types scripts/firestore-full-export.ts"
   },
   "dependencies": {
     "@google/genai": "^1.31.0",
@@ -38,6 +39,7 @@
     "jspdf-autotable": "^5.0.2",
     "lucide-react": "^0.556.0",
     "mongodb": "^7.2.0",
+    "multer": "^1.4.5-lts.1",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-qr-code": "^2.0.18",

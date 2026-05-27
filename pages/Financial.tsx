@@ -163,10 +163,13 @@ export default function Financial() {
     const receivableCustomers = customerFilter === 'all'
       ? data.customers
       : data.customers.filter(c => c.id === customerFilter);
-    const dueReceivable = receivableCustomers.reduce((s, c) => s + Math.max(0, safe(c.totalDue)), 0);
-    const overdueDues = receivableCustomers.filter(c => Math.max(0, safe(c.totalDue)) > 0 && ((Date.now() - new Date(c.lastVisit).getTime()) / 86400000) > 30)
-      .reduce((s, c) => s + Math.max(0, safe(c.totalDue)), 0);
-    const topCustomersByDue = [...receivableCustomers].sort((a, b) => safe(b.totalDue) - safe(a.totalDue)).slice(0, 10);
+    const dueReceivable = receivableCustomers.reduce((s, c) => s + getCanonicalCustomerBalanceView(c, customers, transactions, upfrontOrders).canonicalDue, 0);
+    const overdueDues = receivableCustomers.filter(c => getCanonicalCustomerBalanceView(c, customers, transactions, upfrontOrders).canonicalDue > 0 && ((Date.now() - new Date(c.lastVisit).getTime()) / 86400000) > 30)
+      .reduce((s, c) => s + getCanonicalCustomerBalanceView(c, customers, transactions, upfrontOrders).canonicalDue, 0);
+    const topCustomersByDue = [...receivableCustomers]
+      .map((c) => ({ ...c, totalDue: getCanonicalCustomerBalanceView(c, customers, transactions, upfrontOrders).canonicalDue }))
+      .sort((a, b) => safe(b.totalDue) - safe(a.totalDue))
+      .slice(0, 10);
 
     const cashCollectedToday = filtered
       .filter(t => isSaleLikeTx(t) && inRange(t.date, startOfDay(now), now))

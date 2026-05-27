@@ -6,7 +6,9 @@ import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, Upf
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { auth } from '../services/firebase';
 import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, TransactionPageCursor } from '../services/storage';
-import { generateReceiptPDF } from '../services/pdf';
+import { generateReceiptPDF, generateReceiptPDFDataUrl } from '../services/pdf';
+import { shareTransactionInvoiceViaWhatsApp } from '../services/whatsappShare';
+import { appendWhatsAppLog } from '../services/whatsappLogs';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
 import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, Trash2 } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -116,6 +118,7 @@ export default function Transactions() {
   const [transactionPage, setTransactionPage] = useState(1);
   const [deletedPage, setDeletedPage] = useState(1);
   const [transactionsWindowCursor, setTransactionsWindowCursor] = useState<TransactionPageCursor>(null);
+  const [waSendingStage, setWaSendingStage] = useState<string | null>(null);
   const [deletedWindowCursor, setDeletedWindowCursor] = useState<TransactionPageCursor>(null);
   const [hasMoreTransactionsWindow, setHasMoreTransactionsWindow] = useState(false);
   const [hasMoreDeletedWindow, setHasMoreDeletedWindow] = useState(false);
@@ -1504,6 +1507,25 @@ export default function Transactions() {
     return `Cash ${formatINRPrecise(settlement.cashPaid)} • Online ${formatINRPrecise(settlement.onlinePaid)} • Due ${formatINRPrecise(settlement.creditDue)}${used > 0 ? ` • SC ${formatINRPrecise(used)}` : ''}`;
   };
 
+
+  const handleShareInvoiceWhatsApp = async (tx: Transaction) => {
+    if (!tx.customerPhone) return setWaSendingStage('Failed: Customer phone number is missing.');
+    try {
+      setWaSendingStage('Preparing PDF...');
+      const pdfDataUrl = generateReceiptPDFDataUrl(tx, customers);
+      const pdfBlob = await (await fetch(pdfDataUrl)).blob();
+      setWaSendingStage('Sending WhatsApp message...');
+      const result = await shareTransactionInvoiceViaWhatsApp(tx, pdfBlob);
+      const uid = auth?.currentUser?.uid || '';
+      await appendWhatsAppLog(uid, { type: 'invoice', customerId: tx.customerId || '', customerName: tx.customerName || '', customerPhone: tx.customerPhone || '', invoiceId: tx.id, invoiceNumber: tx.invoiceNo || tx.id, pdfUrl: '', status: result.ok ? 'sent' : 'failed', error: result.ok ? null : result.reason, sentAt: result.ok ? new Date().toISOString() : null, createdBy: uid, meta: { transactionId: tx.id } });
+      setWaSendingStage(result.ok ? 'Sent successfully' : `Failed: ${result.message}`);
+    } catch (error) {
+      setWaSendingStage(`Failed: ${error instanceof Error ? error.message : 'Failed to prepare invoice PDF.'}`);
+    } finally {
+      setTimeout(() => setWaSendingStage(null), 1200);
+    }
+  };
+
   const handleDownloadPDF = () => {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -1614,6 +1636,14 @@ export default function Transactions() {
 
   return (
     <div className="space-y-6 pb-20 md:pb-0">
+      {waSendingStage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="rounded-lg bg-background p-4 shadow-lg min-w-[280px]">
+            <p className="text-sm font-medium mb-2">{waSendingStage}</p>
+            <div className="h-2 w-full rounded bg-muted overflow-hidden"><div className="h-full w-2/3 animate-pulse bg-primary" /></div>
+          </div>
+        </div>
+      )}
       {isInitialLoading && (
         <div className="space-y-3 p-1">
           <div className="h-8 w-48 animate-pulse rounded bg-muted" />
@@ -1964,6 +1994,7 @@ export default function Transactions() {
                                                 {!tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openTransactionEditor(tx)}><Edit className="w-3.5 h-3.5" /></Button>}
                                                 {!tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>}
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleShareInvoiceWhatsApp(tx)}><Download className="w-3.5 h-3.5" /></Button>
                                             </div>
                                         </td>
                                     </tr>

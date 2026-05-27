@@ -1,10 +1,11 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { StoreProfile, TAX_OPTIONS } from '../types';
 import { loadData, updateStoreProfile, uploadImageFileToCloudinary } from '../services/storage';
 import { logout, getCurrentUser } from '../services/auth';
 import { auth } from '../services/firebase';
-import { createWhatsAppSession, getWhatsAppQr, getWhatsAppStatus, getWhatsAppServerUrl } from '../services/whatsapp';
+import { getConfiguredWhatsAppServerUrl, getWhatsAppHealth, getWhatsAppQr, getWhatsAppStatus, getWhatsAppMetrics, createWhatsAppSession, restartWhatsAppSession, logoutWhatsAppSession, sendInvoiceViaWhatsApp, sendCustomerLedgerViaWhatsApp } from '../services/whatsappStatus';
+import { appendWhatsAppLog, getWhatsAppLogStats } from '../services/whatsappLogs';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Label, Select } from '../components/ui';
 import { Save, LogOut, Store, Building2, Landmark, ShieldCheck, Percent, CheckCircle2, Image as ImageIcon, Trash2, FileText } from 'lucide-react';
 
@@ -32,6 +33,21 @@ export default function Settings() {
   const logDebug = (payload: unknown) => { if (isInvoiceSendDebugEnabled()) console.log('[INVOICE_SEND_DEBUG]', payload); };
   const [waResolvedServerUrl, setWaResolvedServerUrl] = useState<string>('');
   const [waEnvPresent, setWaEnvPresent] = useState<boolean>(false);
+  const waServerHost = useMemo(() => {
+    if (!waResolvedServerUrl) return '';
+    try { return new URL(waResolvedServerUrl).host; } catch { return ''; }
+  }, [waResolvedServerUrl]);
+  const [waConnectedNumber, setWaConnectedNumber] = useState<string>('');
+  const [waTotalInvoicesSent, setWaTotalInvoicesSent] = useState<number>(0);
+  const [waTotalLedgersSent, setWaTotalLedgersSent] = useState<number>(0);
+  const [waLastInvoiceSentAt, setWaLastInvoiceSentAt] = useState<string>('Not available');
+  const [waLastLedgerSentAt, setWaLastLedgerSentAt] = useState<string>('Not available');
+  const [waLastError, setWaLastError] = useState<string>('Not available');
+  const [waHealthSummary, setWaHealthSummary] = useState<string>('Not available');
+  const [waSentToday, setWaSentToday] = useState<number>(0);
+  const [waFailedSends, setWaFailedSends] = useState<number>(0);
+  const [waPendingSends, setWaPendingSends] = useState<number>(0);
+  const [waLast10, setWaLast10] = useState<any[]>([]);
 
   useEffect(() => {
     const refreshData = () => {
@@ -139,7 +155,7 @@ export default function Settings() {
 
   const refreshWhatsAppResolutionDebug = () => {
     try {
-      setWaResolvedServerUrl(getWhatsAppServerUrl());
+      setWaResolvedServerUrl(getConfiguredWhatsAppServerUrl());
     } catch {
       setWaResolvedServerUrl('');
     }
@@ -157,12 +173,23 @@ export default function Settings() {
     setWaMessage(null);
     refreshWhatsAppResolutionDebug();
     try {
-      const status = await getWhatsAppStatus(uid);
+      const [status, metrics] = await Promise.all([getWhatsAppStatus(uid), getWhatsAppMetrics(uid)]);
       logDebug({ step: 'whatsapp_status_result', connected: status.connected });
       setWaStatus(status.connected ? 'connected' : 'not_connected');
+      setWaConnectedNumber(String(metrics?.connectedNumber || status?.connectedNumber || status?.number || ''));
+      setWaTotalInvoicesSent(Number(metrics?.totalInvoicesSent || 0));
+      setWaTotalLedgersSent(Number(metrics?.totalLedgersSent || 0));
+      setWaLastInvoiceSentAt(String(metrics?.lastInvoiceSentAt || 'Not available'));
+      setWaLastLedgerSentAt(String(metrics?.lastLedgerSentAt || 'Not available'));
+      setWaLastError(String(metrics?.lastError || 'Not available'));
+      const stats = await getWhatsAppLogStats(uid);
+      setWaSentToday(stats.sentToday);
+      setWaFailedSends(stats.failed);
+      setWaPendingSends(stats.pending);
+      setWaLast10(stats.last10);
     } catch (error) {
-      if (error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL is not configured')) {
-        setWaMessage('Server URL is not configured');
+      if (error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL')) {
+        setWaMessage('WhatsApp server URL is not configured. Set VITE_WHATSAPP_SERVER_URL in Vercel Project Settings → Environment Variables, then redeploy.');
       }
       logDebug({ step: 'whatsapp_status_result', error: error instanceof Error ? error.message : String(error) });
       setWaStatus('server_unavailable');
@@ -184,11 +211,11 @@ export default function Settings() {
       await createWhatsAppSession(uid);
       logDebug({ step: 'whatsapp_create_session_success' });
     } catch (error) {
-      if (error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL is not configured')) {
-        setWaMessage('Server URL is not configured');
+      if (error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL')) {
+        setWaMessage('WhatsApp server URL is not configured. Set VITE_WHATSAPP_SERVER_URL in Vercel Project Settings → Environment Variables, then redeploy.');
       }
       logDebug({ step: 'whatsapp_create_session_failure', error: error instanceof Error ? error.message : String(error) });
-      setWaMessage(error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL is not configured') ? 'Server URL is not configured' : 'Unable to connect WhatsApp');
+      setWaMessage(error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL') ? 'WhatsApp server URL is not configured. Set VITE_WHATSAPP_SERVER_URL in Vercel Project Settings → Environment Variables, then redeploy.' : 'Unable to connect WhatsApp');
       setWaModalOpen(false);
       return;
     }
@@ -206,11 +233,68 @@ export default function Settings() {
           setWaMessage('WhatsApp connected successfully');
         }
       } catch (error) {
-        setWaMessage(error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL is not configured') ? 'Server URL is not configured' : 'Unable to connect WhatsApp');
+        setWaMessage(error instanceof Error && error.message.includes('VITE_WHATSAPP_SERVER_URL') ? 'WhatsApp server URL is not configured. Set VITE_WHATSAPP_SERVER_URL in Vercel Project Settings → Environment Variables, then redeploy.' : 'Unable to connect WhatsApp');
       }
     };
     await poll();
     waPollTimerRef.current = window.setInterval(() => { void poll(); }, 2000);
+  };
+
+
+  const handleTestHealth = async () => {
+    try {
+      const health = await getWhatsAppHealth();
+      const memory = health?.memory ? JSON.stringify(health.memory) : 'n/a';
+      setWaHealthSummary(`ok=${health?.success ?? health?.ok ?? true}; uptime=${health?.uptime ?? 'n/a'}; memory=${memory}`);
+      setWaMessage('Server health check successful.');
+    } catch (error) {
+      setWaHealthSummary('Unavailable');
+      setWaMessage(error instanceof Error ? error.message : 'Health check failed');
+    }
+  };
+
+  const handleOpenQr = async () => {
+    const uid = auth?.currentUser?.uid;
+    if (!uid) return setWaMessage('Please sign in again to continue');
+    try {
+      const qrRes = await getWhatsAppQr(uid);
+      if (qrRes?.qr) { setWaQr(qrRes.qr); setWaModalOpen(true); }
+      else setWaMessage('QR is not available yet. Start session first.');
+    } catch (error) {
+      setWaMessage(error instanceof Error ? error.message : 'Unable to fetch QR');
+    }
+  };
+
+  const handleRestartSession = async () => {
+    const uid = auth?.currentUser?.uid;
+    if (!uid) return setWaMessage('Please sign in again to continue');
+    await restartWhatsAppSession(uid);
+    setWaMessage('Disconnected. Generate New QR / Reconnect started.');
+    await handleConnectWhatsApp();
+  };
+
+  const handleLogoutSession = async () => {
+    const uid = auth?.currentUser?.uid;
+    if (!uid) return setWaMessage('Please sign in again to continue');
+    await logoutWhatsAppSession(uid);
+    setWaStatus('not_connected');
+    setWaMessage('Disconnected');
+    setWaQr('');
+  };
+
+
+  const handleRetryFailed = async (log: any) => {
+    const uid = auth?.currentUser?.uid;
+    if (!uid) return;
+    const payload = { ...(log.meta || {}), pdfUrl: log.pdfUrl || log?.meta?.pdfUrl || '' };
+    await appendWhatsAppLog(uid, { ...log, status: 'pending', retryOfLogId: log.id, createdBy: uid, meta: payload, pdfUrl: payload.pdfUrl });
+    try {
+      const res = log.type === 'invoice' ? await sendInvoiceViaWhatsApp(payload) : await sendCustomerLedgerViaWhatsApp(payload);
+      await appendWhatsAppLog(uid, { ...log, status: 'sent', sentAt: new Date().toISOString(), error: null, externalMessageId: res?.messageId || null, retryOfLogId: log.id, meta: payload, pdfUrl: payload.pdfUrl });
+    } catch (e) {
+      await appendWhatsAppLog(uid, { ...log, status: 'failed', error: e instanceof Error ? e.message : String(e), retryOfLogId: log.id, meta: payload, pdfUrl: payload.pdfUrl });
+    }
+    await checkWhatsAppStatus();
   };
 
   const handleCatalogFirstPageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -377,11 +461,23 @@ export default function Settings() {
         <Card>
           <CardHeader><CardTitle>WhatsApp Integration</CardTitle></CardHeader>
           <CardContent className="space-y-3">
+            {!waResolvedServerUrl && <p className="text-sm text-amber-700">WhatsApp server URL is not configured. Set VITE_WHATSAPP_SERVER_URL in Vercel Project Settings → Environment Variables, then redeploy.</p>}
+            <p className="text-xs text-muted-foreground">Config status: {waResolvedServerUrl ? 'configured' : 'missing'}</p>
+            <p className="text-xs text-muted-foreground">Configured host: {waServerHost || 'Not configured'}</p>
             <p className="text-sm">Connection status: {waStatus === 'checking' ? 'Checking...' : waStatus === 'connected' ? 'Connected' : waStatus === 'server_unavailable' ? 'Server unavailable' : 'Not Connected'}</p>
-            <div className="flex gap-2">
-              <Button type="button" variant="outline" onClick={handleConnectWhatsApp}>Connect WhatsApp</Button>
-              <Button type="button" variant="outline" onClick={() => void checkWhatsAppStatus()}>Check Status</Button>
+            <p className="text-sm">Connected number: {waConnectedNumber || 'Not available'}</p>
+            <div className="flex flex-wrap gap-2">
+              {waStatus === 'connected' ? (
+                <>
+                  <Button type="button" variant="outline" onClick={() => void handleLogoutSession()}>Disconnect</Button>
+                  <Button type="button" variant="outline" onClick={() => void handleRestartSession()}>Reconnect</Button>
+                </>
+              ) : (
+                <Button type="button" variant="outline" onClick={handleConnectWhatsApp}>Start Session</Button>
+              )}
+              <Button type="button" variant="outline" onClick={() => void checkWhatsAppStatus()}>Refresh Status</Button>
             </div>
+            {waQr && <div className="rounded border p-2"><p className="text-xs mb-2">Scan with WhatsApp</p><img src={waQr} alt="WhatsApp QR" className="w-40 h-40 object-contain" /></div>}
             {waMessage && <p className="text-xs text-muted-foreground">{waMessage}</p>}
             {isInvoiceSendDebugEnabled() && (
               <p className="text-[11px] text-muted-foreground">
