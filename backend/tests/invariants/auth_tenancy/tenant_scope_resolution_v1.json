@@ -1,5 +1,0 @@
-{
-  "name": "tenant_scope_resolution_v1",
-  "purpose": "Ensure tenant context resolves from allowed store scope only.",
-  "status": "placeholder"
-}

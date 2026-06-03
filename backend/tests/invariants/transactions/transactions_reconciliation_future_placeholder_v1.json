@@ -1,5 +1,0 @@
-{
-  "name": "transactions_reconciliation_future_placeholder_v1",
-  "scope": "deferred_mutation_placeholder",
-  "notes": "Reserved for future update/delete reconciliation fixtures; not executable in Phase 3A."
-}

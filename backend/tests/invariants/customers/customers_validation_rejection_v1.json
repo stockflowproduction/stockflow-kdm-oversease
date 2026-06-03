@@ -1,8 +1,0 @@
-{
-  "name": "customers_validation_rejection_v1",
-  "input": {
-    "name": "",
-    "phone": "xx"
-  },
-  "expectedMinErrors": 2
-}

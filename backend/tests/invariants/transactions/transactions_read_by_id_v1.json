@@ -1,5 +1,0 @@
-{
-  "name": "transactions_read_by_id_v1",
-  "scope": "read_only_placeholder",
-  "notes": "Get-by-id tenant-scoped read fixture placeholder."
-}

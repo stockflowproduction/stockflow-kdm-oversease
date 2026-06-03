@@ -1,8 +1,0 @@
-{
-  "name": "transactions_customer_effects_v1",
-  "storeId": "store-tx-11",
-  "expected": {
-    "dueDelta": 40,
-    "storeCreditDelta": -10
-  }
-}

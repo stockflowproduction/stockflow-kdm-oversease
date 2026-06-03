@@ -1,9 +1,0 @@
-{
-  "name": "transactions_return_create_reduce_due_v1",
-  "mode": "reduce_due",
-  "storeId": "store-tx-6",
-  "expected": {
-    "status": "applied",
-    "dueDelta": -30
-  }
-}

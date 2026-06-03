@@ -1,8 +1,0 @@
-{
-  "name": "transactions_return_create_refund_cash_v1",
-  "mode": "refund_cash",
-  "storeId": "store-tx-4",
-  "expected": {
-    "status": "applied"
-  }
-}

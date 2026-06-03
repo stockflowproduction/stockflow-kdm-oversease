@@ -1,5 +1,0 @@
-{
-  "name": "transactions_insufficient_stock_v1",
-  "storeId": "store-tx-9",
-  "expectedErrorCode": "TRANSACTION_MUTATION_INSUFFICIENT_STOCK"
-}

@@ -1,9 +1,0 @@
-{
-  "name": "customers_tenant_isolation_v1",
-  "storeA": "store-a",
-  "storeB": "store-b",
-  "input": {
-    "name": "Tenant Scoped",
-    "phone": "+1 555 5000"
-  }
-}

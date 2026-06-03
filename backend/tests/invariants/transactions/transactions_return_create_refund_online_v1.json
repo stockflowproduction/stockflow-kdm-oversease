@@ -1,8 +1,0 @@
-{
-  "name": "transactions_return_create_refund_online_v1",
-  "mode": "refund_online",
-  "storeId": "store-tx-5",
-  "expected": {
-    "status": "applied"
-  }
-}

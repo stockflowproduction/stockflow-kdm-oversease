@@ -31,6 +31,7 @@ import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeSt
 import { financeLog } from './financeLogger';
 import { roundMoneyWhole } from './numberFormat';
 import { emitFinanceSnapshot } from '../utils/financeDebugLogger';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 
 let isCloudSynced = false;
 let storeDocumentExists = false;
@@ -659,7 +660,7 @@ const getTransactionTimeHint = (transaction: Transaction) => {
 const getMatchingQuantityForBucket = (transaction: Transaction, productId: string, variant?: string, color?: string) => {
   const targetVariant = normalizeStockBucketVariant(variant);
   const targetColor = normalizeStockBucketColor(color);
-  return aggregateCartItemsByStockBucket(transaction.items || [])
+  return aggregateCartItemsByStockBucket(normalizeTransactionItems(transaction.items))
     .filter(bucket => bucket.productId === productId && bucket.variant === targetVariant && bucket.color === targetColor)
     .reduce((sum, bucket) => sum + bucket.quantity, 0);
 };
@@ -682,7 +683,7 @@ const getCustomerReturnCaps = (transaction: Transaction, historicalTransactions:
   const sortedHistory = historicalTransactions
     .filter(tx => tx.customerId === transaction.customerId)
     .sort((a, b) => getTransactionTimeHint(a) - getTransactionTimeHint(b));
-  const requestedBuckets = aggregateCartItemsByStockBucket(transaction.items || []);
+  const requestedBuckets = aggregateCartItemsByStockBucket(normalizeTransactionItems(transaction.items));
   let totalValueCap = 0;
   let totalCashCap = 0;
   let totalOnlineCap = 0;
@@ -699,7 +700,7 @@ const getCustomerReturnCaps = (transaction: Transaction, historicalTransactions:
         const cashRatio = Math.min(1, settlement.cashPaid / txTotal);
         const onlineRatio = Math.min(1, settlement.onlinePaid / txTotal);
         const dueRatio = Math.min(1, settlement.creditDue / txTotal);
-        const unitValue = toFiniteNonNegative((tx.items || []).find(item =>
+        const unitValue = toFiniteNonNegative(normalizeTransactionItems(tx.items).find(item =>
           item.id === bucket.productId
           && normalizeStockBucketVariant(item.selectedVariant) === bucket.variant
           && normalizeStockBucketColor(item.selectedColor) === bucket.color
@@ -1064,7 +1065,7 @@ const getTransactionAuditEffectSummary = (
   dueBeforeHint: number
 ) => {
   const amount = logMoney(Math.abs(toFiniteNumber(transaction.total, 0)));
-  const cogs = logMoney((transaction.items || []).reduce((sum, item) => sum + ((item.buyPrice || 0) * (item.quantity || 0)), 0));
+  const cogs = logMoney(normalizeTransactionItems(transaction.items).reduce((sum, item) => sum + ((item.buyPrice || 0) * (item.quantity || 0)), 0));
   if (transaction.type === 'sale') {
     const settlement = getSaleSettlementBreakdown(transaction);
     return {
@@ -1167,7 +1168,7 @@ const getTransactionCashbookEffectSnapshot = (
   dueBeforeHint: number
 ): CashbookEffectDeltaSnapshot => {
   const amount = roundCurrency(Math.abs(toFiniteNumber(transaction.total, 0)));
-  const cogsAmount = roundCurrency((transaction.items || []).reduce((sum, item) => sum + ((item.buyPrice || 0) * (item.quantity || 0)), 0));
+  const cogsAmount = roundCurrency(normalizeTransactionItems(transaction.items).reduce((sum, item) => sum + ((item.buyPrice || 0) * (item.quantity || 0)), 0));
   if (transaction.type === 'sale') {
     const settlement = getSaleSettlementBreakdown(transaction);
     const storeCreditUsed = roundCurrency(getRequestedStoreCreditUsed(transaction));
@@ -1264,9 +1265,11 @@ const areItemsEqualForAudit = (originalItems: CartItem[] = [], updatedItems: Car
 
 const getTransactionChangeAuditMeta = (originalTransaction: Transaction, updatedTransaction: Transaction): { changeTags: string[]; changeSummary: string } => {
   const changeTags: string[] = [];
-  if (!areItemsEqualForAudit(originalTransaction.items || [], updatedTransaction.items || [])) {
-    const qtyChanged = (originalTransaction.items || []).some((item, idx) => roundCurrency(toFiniteNonNegative(item.quantity)) !== roundCurrency(toFiniteNonNegative(updatedTransaction.items?.[idx]?.quantity)));
-    const priceChanged = (originalTransaction.items || []).some((item, idx) => roundCurrency(toFiniteNonNegative(item.sellPrice)) !== roundCurrency(toFiniteNonNegative(updatedTransaction.items?.[idx]?.sellPrice)));
+  const originalItems = normalizeTransactionItems<CartItem>(originalTransaction.items);
+  const updatedItems = normalizeTransactionItems<CartItem>(updatedTransaction.items);
+  if (!areItemsEqualForAudit(originalItems, updatedItems)) {
+    const qtyChanged = originalItems.some((item, idx) => roundCurrency(toFiniteNonNegative(item.quantity)) !== roundCurrency(toFiniteNonNegative(updatedItems[idx]?.quantity)));
+    const priceChanged = originalItems.some((item, idx) => roundCurrency(toFiniteNonNegative(item.sellPrice)) !== roundCurrency(toFiniteNonNegative(updatedItems[idx]?.sellPrice)));
     if (qtyChanged) changeTags.push('qty_changed');
     if (priceChanged) changeTags.push('price_changed');
     if (!qtyChanged && !priceChanged) changeTags.push('lines_changed');
@@ -1464,7 +1467,7 @@ const buildDeletedTransactionRecord = ({
     customerName: transaction.customerName,
     amount: Math.abs(transaction.total || 0),
     paymentMethod: transaction.paymentMethod,
-    itemSnapshot: transaction.items || [],
+    itemSnapshot: normalizeTransactionItems(transaction.items),
     beforeImpact: buildDeleteImpactSnapshot(beforeState, transaction.customerId),
     afterImpact: buildDeleteImpactSnapshot(afterState, transaction.customerId),
   };
@@ -1530,11 +1533,11 @@ export const getDeleteTransactionPreview = (transactionId: string): DeleteTransa
   const dueReduced = roundCurrency(Math.max(0, dueBefore - dueAfter));
   const totalAbs = Math.abs(toFiniteNumber(target.total, 0));
   const restoredLines = (target.type === 'sale' || target.type === 'return')
-    ? aggregateCartItemsByStockBucket(target.items || []).map((bucket) => {
+    ? aggregateCartItemsByStockBucket(normalizeTransactionItems(target.items)).map((bucket) => {
         const product = state.products.find(p => p.id === bucket.productId);
         return {
           productId: bucket.productId,
-          productName: product?.name || (target.items || []).find(item => item.id === bucket.productId)?.name,
+          productName: product?.name || normalizeTransactionItems(target.items).find(item => item.id === bucket.productId)?.name,
           variant: bucket.variant,
           color: bucket.color,
           qty: bucket.quantity,
@@ -1598,7 +1601,7 @@ const deleteTransactionAndReconcileInSubcollection = async (transaction: Transac
     if (!transactionSnap.exists()) return;
 
     const reversalType = getDeleteReversalTransactionType(transaction.type);
-    const bucketedItems = reversalType ? aggregateCartItemsByStockBucket(transaction.items || []) : [];
+    const bucketedItems = reversalType ? aggregateCartItemsByStockBucket(normalizeTransactionItems(transaction.items)) : [];
     const productIds = Array.from(new Set(bucketedItems.map(item => item.productId)));
 
     const productSnapshots = new Map<string, Awaited<ReturnType<typeof firestoreTx.get>>>();
@@ -1699,7 +1702,7 @@ const commitProcessTransactionAtomically = async ({
   return runFirestoreTransaction(db!, async (firestoreTx) => {
     const transactionRef = doc(db!, 'stores', user.uid, 'transactions', transaction.id);
     const existingTransactionSnap = await firestoreTx.get(transactionRef);
-    const bucketedItems = transaction.type === 'payment' ? [] : aggregateCartItemsByStockBucket(transaction.items);
+    const bucketedItems = transaction.type === 'payment' ? [] : aggregateCartItemsByStockBucket(normalizeTransactionItems(transaction.items));
 
     // Idempotency guard: repeated retries with same transaction id should not re-apply stock/customer deltas.
     if (existingTransactionSnap.exists()) {
@@ -1768,7 +1771,7 @@ const commitProcessTransactionAtomically = async ({
         }
       }
 
-      const updatedProduct = applyTransactionItemsToProduct(currentProduct, transaction.items, transaction.type);
+      const updatedProduct = applyTransactionItemsToProduct(currentProduct, normalizeTransactionItems(transaction.items), transaction.type);
       firestoreTx.set(productRef, sanitizeData(updatedProduct), { merge: true });
       committedProducts.push(updatedProduct);
     }
@@ -2127,8 +2130,8 @@ const buildKpiSnapshotPayload = (state: AppState, windowType: 'init' | 'after_tx
     .reduce((sum, tx) => roundCurrency(sum + Math.abs(tx.total)), 0);
   const returns = returnTransactions.reduce((sum, tx) => roundCurrency(sum + Math.abs(tx.total)), 0);
   const expenses = (state.expenses || []).reduce((sum, expense) => roundCurrency(sum + (expense.amount || 0)), 0);
-  const saleCogs = saleTransactions.reduce((sum, tx) => roundCurrency(sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0)), 0);
-  const returnCogs = returnTransactions.reduce((sum, tx) => roundCurrency(sum + tx.items.reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0)), 0);
+  const saleCogs = saleTransactions.reduce((sum, tx) => roundCurrency(sum + normalizeTransactionItems(tx.items).reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0)), 0);
+  const returnCogs = returnTransactions.reduce((sum, tx) => roundCurrency(sum + normalizeTransactionItems(tx.items).reduce((itemSum, item) => itemSum + ((item.buyPrice || 0) * item.quantity), 0)), 0);
   const cogs = roundCurrency(saleCogs - returnCogs);
   const grossSales = roundCurrency(saleSettlementTotals.totalSales);
   const salesReturns = roundCurrency(returns);
@@ -2578,7 +2581,7 @@ const applyTransactionItemsToProduct = (product: Product, items: CartItem[], tra
 
 const applyDeleteStockReversalToProduct = (product: Product, deletedTransaction: Transaction): Product => {
   if (deletedTransaction.type === 'payment') return product;
-  const relevantBuckets = aggregateCartItemsByStockBucket(deletedTransaction.items || []).filter(bucket => bucket.productId === product.id);
+  const relevantBuckets = aggregateCartItemsByStockBucket(normalizeTransactionItems(deletedTransaction.items)).filter(bucket => bucket.productId === product.id);
   if (!relevantBuckets.length) return product;
 
   let nextProduct = { ...product };
@@ -3189,7 +3192,7 @@ export const requestStoreProvisioning = async (context?: string) => {
     context: context || 'unknown',
     storeDocumentExists,
   });
-  throw new Error('Store is not provisioned. Provision via backend-admin path only.');
+  throw new Error('Store is not provisioned. Use privileged admin provisioning only.');
 };
 
 export const updateStoreProfile = (profile: StoreProfile) => {
@@ -3208,7 +3211,7 @@ export const resetData = () => {
       reason: 'resetData_blocked_client_side',
       message: 'Client-side full reset is disabled for incident remediation.',
     });
-    throw new Error('Reset is disabled in client. Use privileged backend-admin flow.');
+    throw new Error('Reset is disabled in client. Use privileged admin flow.');
 };
 
 export const addProduct = async (product: Product): Promise<Product[]> => {
@@ -3509,11 +3512,12 @@ const assertTransactionFinancials = (transaction: Transaction) => {
     return;
   }
 
-  if (!Array.isArray(transaction.items) || transaction.items.length === 0) {
+  const transactionItems = normalizeTransactionItems<CartItem>(transaction.items);
+  if (transactionItems.length === 0) {
     failValidation('INVALID_TRANSACTION_ITEMS', 'Transaction items are required for sale/return.');
   }
 
-  const computedSubtotal = transaction.items.reduce((sum, item) => {
+  const computedSubtotal = transactionItems.reduce((sum, item) => {
     if (!(Number.isFinite(item.quantity) && item.quantity > 0)) {
       failValidation('INVALID_ITEM_QUANTITY', 'Transaction item quantity must be greater than zero.', { itemId: item.id, quantity: item.quantity });
     }
@@ -3524,7 +3528,7 @@ const assertTransactionFinancials = (transaction: Transaction) => {
     return sum + (item.sellPrice * item.quantity);
   }, 0);
 
-  const computedDiscount = transaction.items.reduce((sum, item) => {
+  const computedDiscount = transactionItems.reduce((sum, item) => {
     const discount = item.discountAmount || 0;
     if (!Number.isFinite(discount) || discount < 0) {
       failValidation('INVALID_ITEM_DISCOUNT', 'Transaction item discount is invalid.', { itemId: item.id, discountAmount: item.discountAmount });
@@ -3598,7 +3602,7 @@ const assertTransactionFinancials = (transaction: Transaction) => {
 const assertTransactionInventoryRules = (transaction: Transaction, products: Product[], historicalTransactions: Transaction[]) => {
   if (transaction.type === 'payment' || transaction.type === 'customer_credit' || transaction.type === 'customer_cash_out') return;
   if (transaction.type === 'return') {
-    const linkedSourceGroups = (transaction.items || []).reduce((acc, item) => {
+    const linkedSourceGroups = normalizeTransactionItems(transaction.items).reduce((acc, item) => {
       if (!item.sourceTransactionId || !item.sourceLineCompositeKey) return acc;
       const key = `${item.sourceTransactionId}::${item.sourceLineCompositeKey}`;
       acc.set(key, {
@@ -3618,7 +3622,7 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
         });
       }
 
-      const originalSourceLineQty = (sourceSaleTx.items || [])
+      const originalSourceLineQty = normalizeTransactionItems<CartItem>(sourceSaleTx.items)
         .filter(item => getSourceLineCompositeKeyForItem(item) === group.sourceLineCompositeKey)
         .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
 
@@ -3631,7 +3635,7 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
 
       const alreadyReturnedQtyForSourceLine = historicalTransactions
         .filter(t => t.type === 'return')
-        .reduce((sum, tx) => sum + (tx.items || [])
+        .reduce((sum, tx) => sum + normalizeTransactionItems(tx.items)
           .filter(item => item.sourceTransactionId === group.sourceTransactionId && item.sourceLineCompositeKey === group.sourceLineCompositeKey)
           .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
 
@@ -3660,7 +3664,7 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
   }
 
   const productMap = new Map(products.map(p => [p.id, p]));
-  const bucketedItems = aggregateCartItemsByStockBucket(transaction.items);
+  const bucketedItems = aggregateCartItemsByStockBucket(normalizeTransactionItems(transaction.items));
 
   for (const item of bucketedItems) {
     const product = productMap.get(item.productId);
@@ -3690,11 +3694,11 @@ const assertTransactionInventoryRules = (transaction: Transaction, products: Pro
       if (transaction.customerId) {
         const bought = historicalTransactions
           .filter(t => t.customerId === transaction.customerId && t.type === 'sale')
-          .reduce((acc, t) => acc + t.items.filter(i => i.id === item.productId).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
+          .reduce((acc, t) => acc + normalizeTransactionItems(t.items).filter(i => i.id === item.productId).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
 
         const returned = historicalTransactions
           .filter(t => t.customerId === transaction.customerId && t.type === 'return')
-          .reduce((acc, t) => acc + t.items.filter(i => i.id === item.productId).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
+          .reduce((acc, t) => acc + normalizeTransactionItems(t.items).filter(i => i.id === item.productId).reduce((itemSum, line) => itemSum + (line.quantity || 0), 0), 0);
 
         if (item.quantity > (bought - returned)) {
           failValidation('RETURN_EXCEEDS_CUSTOMER_PURCHASE', 'Return quantity exceeds customer purchase history.', {
@@ -5265,7 +5269,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
   const newTransactions = [effectiveTransaction, ...data.transactions];
   let newProducts = [...data.products];
   if (effectiveTransaction.type === 'sale' || effectiveTransaction.type === 'return') {
-      newProducts = data.products.map(p => applyTransactionItemsToProduct(p, effectiveTransaction.items, effectiveTransaction.type));
+      newProducts = data.products.map(p => applyTransactionItemsToProduct(p, normalizeTransactionItems(effectiveTransaction.items), effectiveTransaction.type));
   }
   let newCustomers = [...data.customers];
   if (effectiveTransaction.customerId) {
@@ -5372,11 +5376,12 @@ export const processTransaction = (transaction: Transaction): AppState => {
       }
   }
   if (effectiveTransaction.type === 'sale') {
-    const gross = effectiveTransaction.items.reduce((sum, item) => sum + (item.sellPrice * item.quantity), 0);
+    const effectiveItems = normalizeTransactionItems<CartItem>(effectiveTransaction.items);
+    const gross = effectiveItems.reduce((sum, item) => sum + (item.sellPrice * item.quantity), 0);
     const discount = logMoney(effectiveTransaction.discount ?? Math.max(0, gross - Math.abs(effectiveTransaction.total)));
     const tax = logMoney(effectiveTransaction.tax);
     const net = logMoney(Math.abs(effectiveTransaction.total));
-    const cogs = logMoney(effectiveTransaction.items.reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0));
+    const cogs = logMoney(effectiveItems.reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0));
     financeLog.pnl('EVENT', {
       txId: effectiveTransaction.id,
       type: 'sale',
@@ -5389,8 +5394,9 @@ export const processTransaction = (transaction: Transaction): AppState => {
       scenarioClass: getTransactionScenarioClass(effectiveTransaction),
     });
   } else if (effectiveTransaction.type === 'return') {
+    const effectiveItems = normalizeTransactionItems<CartItem>(effectiveTransaction.items);
     const returnEffects = getReturnFinancialEffects(effectiveTransaction);
-    const cogs = logMoney(effectiveTransaction.items.reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0));
+    const cogs = logMoney(effectiveItems.reduce((sum, item) => sum + ((item.buyPrice || 0) * item.quantity), 0));
     financeLog.pnl('EVENT', {
       txId: effectiveTransaction.id,
       type: 'return',
@@ -5404,7 +5410,7 @@ export const processTransaction = (transaction: Transaction): AppState => {
     });
   }
   const touchedProductIds = effectiveTransaction.type !== 'payment'
-    ? Array.from(new Set(effectiveTransaction.items.map(item => item.id)))
+    ? Array.from(new Set(normalizeTransactionItems(effectiveTransaction.items).map(item => item.id)))
     : [];
 
   const legacyCustomerProductStatsSeed: Record<string, { soldQty: number; returnedQty: number }> = {};
@@ -5412,10 +5418,10 @@ export const processTransaction = (transaction: Transaction): AppState => {
     touchedProductIds.forEach((productId) => {
       const soldQty = data.transactions
         .filter(t => t.customerId === effectiveTransaction.customerId && t.type === 'sale')
-        .reduce((acc, t) => acc + t.items.filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
+        .reduce((acc, t) => acc + normalizeTransactionItems(t.items).filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       const returnedQty = data.transactions
         .filter(t => t.customerId === effectiveTransaction.customerId && t.type === 'return')
-        .reduce((acc, t) => acc + t.items.filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
+        .reduce((acc, t) => acc + normalizeTransactionItems(t.items).filter(i => i.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       legacyCustomerProductStatsSeed[productId] = { soldQty, returnedQty };
     });
   }
@@ -5605,7 +5611,7 @@ const toNumber = (value: any) => {
 };
 
 export const normalizeHistoricalTransactionForImport = (rawRow: Partial<Transaction> & Record<string, any>, customers: Customer[]): Transaction | null => {
-  const items = Array.isArray(rawRow.items) ? rawRow.items : [];
+  const items = normalizeTransactionItems(rawRow.items);
   const totalFromFields = [rawRow.total, rawRow.amount, rawRow.grandTotal, rawRow.billTotal, rawRow['Bill Total'], rawRow['Total'], rawRow['Amount'], rawRow['Paid Amount'], rawRow.paidAmount].map(toNumber).find(Number.isFinite);
   const hasSaleSignal = items.length > 0 || (Number.isFinite(totalFromFields) && Number(totalFromFields) > 0 && !rawRow.amount);
   const rawType = normalizeText(rawRow.type);
@@ -5746,7 +5752,7 @@ export const deleteTransaction = (
   );
   const inventoryLinesAffected = target.type === 'payment'
     ? 0
-    : aggregateCartItemsByStockBucket(target.items || []).length;
+    : aggregateCartItemsByStockBucket(normalizeTransactionItems(target.items)).length;
   if (FINANCE_RECON_TRACE_ENABLED) {
   }
   if (target.customerId) {
@@ -5827,7 +5833,7 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
   const nextTransactions = sortTransactionsDesc([effectiveUpdatedTransaction, ...stateWithoutOriginal.transactions]);
   const nextProducts = effectiveUpdatedTransaction.type === 'payment'
     ? [...stateWithoutOriginal.products]
-    : stateWithoutOriginal.products.map(product => applyTransactionItemsToProduct(product, effectiveUpdatedTransaction.items, effectiveUpdatedTransaction.type));
+    : stateWithoutOriginal.products.map(product => applyTransactionItemsToProduct(product, normalizeTransactionItems(effectiveUpdatedTransaction.items), effectiveUpdatedTransaction.type));
 
   const nextCustomers = stateWithoutOriginal.customers.map((customer) => {
     const customerTransactions = nextTransactions.filter(tx => tx.customerId === customer.id);
@@ -5852,8 +5858,8 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
   });
 
   const updateAffectedProductCount = Array.from(new Set([
-    ...(originalTransaction.type !== 'payment' ? originalTransaction.items.map(item => item.id) : []),
-    ...(effectiveUpdatedTransaction.type !== 'payment' ? effectiveUpdatedTransaction.items.map(item => item.id) : []),
+    ...(originalTransaction.type !== 'payment' ? normalizeTransactionItems(originalTransaction.items).map(item => item.id) : []),
+    ...(effectiveUpdatedTransaction.type !== 'payment' ? normalizeTransactionItems(effectiveUpdatedTransaction.items).map(item => item.id) : []),
   ])).length;
   const updateAffectedCustomerIds = new Set<string>();
   if (originalTransaction.customerId) updateAffectedCustomerIds.add(originalTransaction.customerId);
@@ -5909,8 +5915,8 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
   }
 
   const affectedProductIds = new Set<string>();
-  if (originalTransaction.type !== 'payment') originalTransaction.items.forEach(item => affectedProductIds.add(item.id));
-  if (effectiveUpdatedTransaction.type !== 'payment') effectiveUpdatedTransaction.items.forEach(item => affectedProductIds.add(item.id));
+  if (originalTransaction.type !== 'payment') normalizeTransactionItems(originalTransaction.items).forEach(item => affectedProductIds.add(item.id));
+  if (effectiveUpdatedTransaction.type !== 'payment') normalizeTransactionItems(effectiveUpdatedTransaction.items).forEach(item => affectedProductIds.add(item.id));
   const affectedCustomerIds = new Set<string>();
   if (originalTransaction.customerId) affectedCustomerIds.add(originalTransaction.customerId);
   if (effectiveUpdatedTransaction.customerId) affectedCustomerIds.add(effectiveUpdatedTransaction.customerId);
@@ -5950,10 +5956,10 @@ export const updateTransaction = async (updatedTransaction: Transaction): Promis
     await Promise.all(Array.from(affectedCustomerIds).flatMap((customerId) => Array.from(affectedProductIds).map(async (productId) => {
       const soldQty = nextTransactions
         .filter(tx => tx.customerId === customerId && tx.type === 'sale')
-        .reduce((sum, tx) => sum + tx.items.filter(item => item.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
+        .reduce((sum, tx) => sum + normalizeTransactionItems(tx.items).filter(item => item.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       const returnedQty = nextTransactions
         .filter(tx => tx.customerId === customerId && tx.type === 'return')
-        .reduce((sum, tx) => sum + tx.items.filter(item => item.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
+        .reduce((sum, tx) => sum + normalizeTransactionItems(tx.items).filter(item => item.id === productId).reduce((itemSum, item) => itemSum + (item.quantity || 0), 0), 0);
       const statsDocId = getCustomerProductStatsDocId(customerId, productId);
       await setDoc(doc(db!, 'stores', user.uid, 'customerProductStats', statsDocId), sanitizeData({
         customerId,

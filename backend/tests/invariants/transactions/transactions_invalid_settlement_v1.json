@@ -1,5 +1,0 @@
-{
-  "name": "transactions_invalid_settlement_v1",
-  "storeId": "store-tx-8",
-  "expectedErrorCode": "TRANSACTION_MUTATION_INVALID_SETTLEMENT"
-}

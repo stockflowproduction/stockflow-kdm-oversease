@@ -2,14 +2,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty } from '../types';
 import { applyPartyCreditToPurchaseOrder, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
-import { runProcurementShadowCompare } from '../services/procurementApi';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
 import { ArrowLeft, ArrowRight, ArrowUpDown, Building2, CalendarDays, Check, ChevronRight, ClipboardList, Filter, IndianRupee, Package, Pencil, Plus, Search, Trash2, Truck, User, X } from 'lucide-react';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { buildPurchasePartyLedger } from '../services/purchaseLedger';
-import { compareLegacyVsLedger, compareSupplierBalances } from '../services/erpComparison';
 
 type PurchaseTab = 'orders' | 'parties';
 type WizardStep = 'source' | 'product' | 'variants' | 'pricing' | 'review' | 'newProduct';
@@ -208,7 +206,6 @@ export default function PurchasePanel() {
   const [receivePriceMethod, setReceivePriceMethod] = useState<ReceivePriceMethod>('no_change');
   const [partyCreditToApply, setPartyCreditToApply] = useState<number | ''>('');
   const [partyCreditTouched, setPartyCreditTouched] = useState(false);
-  const [showErpSupplierCompare, setShowErpSupplierCompare] = useState(false);
   const [purchaseCreditApplyError, setPurchaseCreditApplyError] = useState<string | null>(null);
 
   const refresh = () => {
@@ -218,7 +215,6 @@ export default function PurchasePanel() {
     setProducts(data.products || []);
     setOrders(nextOrders);
     setParties(nextParties);
-    void runProcurementShadowCompare({ orders: nextOrders, parties: nextParties });
   };
 
   useEffect(() => {
@@ -804,41 +800,6 @@ export default function PurchasePanel() {
     if (!expandedPartyId) return [];
     return partyLedgers.get(expandedPartyId)?.rows || [];
   }, [expandedPartyId, partyLedgers]);
-  const erpCompareInput = useMemo(() => ({
-    transactions: dataSnapshot.transactions || [],
-    deletedTransactions: dataSnapshot.deletedTransactions || [],
-    deleteCompensations: dataSnapshot.deleteCompensations || [],
-    supplierPayments: supplierPayments || [],
-    purchaseOrders: orders || [],
-    manualCashbookEntries: dataSnapshot.manualCashbookEntries || [],
-    upfrontOrders: dataSnapshot.upfrontOrders || [],
-    customers: dataSnapshot.customers || [],
-    products: dataSnapshot.products || [],
-    cashSessions: dataSnapshot.cashSessions || [],
-    expenses: dataSnapshot.expenses || [],
-  }), [dataSnapshot, supplierPayments, orders]);
-  const erpSupplierComparison = useMemo(() => compareSupplierBalances(erpCompareInput), [erpCompareInput]);
-  const erpTopLevel = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
-  const erpSupplierRows = useMemo(() => (
-    parties.map((party) => {
-      const legacyPayable = Math.max(0, Number(partyFinancials.get(party.id)?.remaining || 0));
-      const legacyCredit = Math.max(0, Number(partyCreditsByPartyId.get(party.id) || 0));
-      const ledgerSummary = partyLedgers.get(party.id)?.summary;
-      const ledgerPayable = Math.max(0, Number(ledgerSummary?.netPayable || 0));
-      const ledgerCredit = Math.max(0, Number(ledgerSummary?.ourCredit || 0));
-      const payableDelta = ledgerPayable - legacyPayable;
-      const creditDelta = ledgerCredit - legacyCredit;
-      const status = Math.abs(payableDelta) < 0.01 && Math.abs(creditDelta) < 0.01 ? 'match' : 'mismatch';
-      return { partyId: party.id, partyName: party.name, legacyPayable, ledgerPayable, legacyCredit, ledgerCredit, payableDelta, creditDelta, status };
-    })
-  ), [parties, partyFinancials, partyCreditsByPartyId, partyLedgers]);
-  const erpSupplierWarnings = useMemo(() => {
-    const warnings = [...erpSupplierComparison.flags];
-    if ((orders || []).some((po: any) => Array.isArray(po.paymentHistory) && po.paymentHistory.length > 0)) warnings.push('legacy paymentHistory dependency');
-    if (erpSupplierComparison.delta !== 0) warnings.push('payable projection mismatch');
-    if (erpSupplierRows.some((row) => Math.abs(row.creditDelta) > 0.01)) warnings.push('supplier credit mismatch');
-    return Array.from(new Set(warnings));
-  }, [erpSupplierComparison, orders, erpSupplierRows]);
   const isPurchaseLedgerDebugEnabled = useMemo(() => {
     if (typeof window === 'undefined') return false;
     const queryEnabled = new URLSearchParams(window.location.search).get('purchaseLedgerDebug') === '1';
@@ -1014,60 +975,7 @@ export default function PurchasePanel() {
             </CardContent>
           </Card>
         </div>
-        <Card className="border-violet-200 bg-violet-50/50">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between gap-2">
-              <span>New ERP Supplier Compare</span>
-              <Button size="sm" variant="outline" onClick={() => setShowErpSupplierCompare((prev) => !prev)}>
-                {showErpSupplierCompare ? 'Hide' : 'Show'}
-              </Button>
-            </CardTitle>
-            <p className="text-xs text-violet-800">Read-only comparison — does not affect production supplier balances.</p>
-          </CardHeader>
-          {showErpSupplierCompare && (
-            <CardContent className="space-y-3">
-              <div className="rounded border bg-white p-2 text-xs text-slate-700">
-                <div>Global payable status: <span className="uppercase font-semibold">{erpTopLevel.payable.status}</span></div>
-                <div>Legacy payable: ₹{formatNumber(erpSupplierComparison.legacyPayable)} • Ledger payable: ₹{formatNumber(erpSupplierComparison.ledgerPayable)} • Delta: ₹{formatNumber(erpSupplierComparison.delta)}</div>
-                <div>Reasons: {erpTopLevel.payable.reasons?.length ? erpTopLevel.payable.reasons.join(' • ') : 'None'}</div>
-              </div>
-              <div className="rounded border bg-white p-2 text-xs">
-                <div className="font-medium mb-1">Warnings / Ambiguities</div>
-                {erpSupplierWarnings.length ? <ul className="list-disc pl-5 space-y-0.5 text-slate-700">{erpSupplierWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul> : <div className="text-slate-500">No warnings emitted.</div>}
-              </div>
-              <div className="overflow-x-auto rounded border bg-white">
-                <table className="w-full text-xs">
-                  <thead className="bg-slate-50">
-                    <tr className="text-left border-b">
-                      <th className="p-2">Supplier</th>
-                      <th className="p-2 text-right">Legacy Payable</th>
-                      <th className="p-2 text-right">Ledger Payable</th>
-                      <th className="p-2 text-right">Legacy Credit</th>
-                      <th className="p-2 text-right">Ledger Credit</th>
-                      <th className="p-2 text-right">Payable Δ</th>
-                      <th className="p-2 text-right">Credit Δ</th>
-                      <th className="p-2">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {erpSupplierRows.map((row) => (
-                      <tr key={row.partyId} className="border-b">
-                        <td className="p-2">{row.partyName} <span className="text-muted-foreground">({row.partyId})</span></td>
-                        <td className="p-2 text-right">₹{formatNumber(row.legacyPayable)}</td>
-                        <td className="p-2 text-right">₹{formatNumber(row.ledgerPayable)}</td>
-                        <td className="p-2 text-right">₹{formatNumber(row.legacyCredit)}</td>
-                        <td className="p-2 text-right">₹{formatNumber(row.ledgerCredit)}</td>
-                        <td className="p-2 text-right">₹{formatNumber(row.payableDelta)}</td>
-                        <td className="p-2 text-right">₹{formatNumber(row.creditDelta)}</td>
-                        <td className={`p-2 font-medium uppercase ${row.status === 'match' ? 'text-emerald-700' : 'text-red-700'}`}>{row.status}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </CardContent>
-          )}
-        </Card>
+
         {expandedPartyId && (
           <Card>
             <CardHeader><CardTitle>Party Ledger</CardTitle></CardHeader>

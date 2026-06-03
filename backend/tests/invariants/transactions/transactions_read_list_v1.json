@@ -1,5 +1,0 @@
-{
-  "name": "transactions_read_list_v1",
-  "scope": "read_only_placeholder",
-  "notes": "List/filter/pagination read-model fixture placeholder."
-}

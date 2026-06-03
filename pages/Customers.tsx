@@ -17,8 +17,7 @@ import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
-import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
-import { compareCustomerBalances, compareLegacyVsLedger } from '../services/erpComparison';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 
 const normalizePhone = (v?: string) => String(v || '').replace(/\D/g, '');
 const normalizeName = (v?: string) => String(v || '').trim().toLowerCase();
@@ -41,7 +40,7 @@ const getLineProductName = (item: any): string => {
 };
 
 const getTransactionProductSummary = (tx: Transaction, maxItems = 2): string => {
-  const items = Array.isArray((tx as any)?.items) ? (tx as any).items : [];
+  const items = normalizeTransactionItems((tx as any)?.items);
   if (!items.length) return 'No product details';
   const labels = items.map((item: any) => formatItemNameWithVariant(getLineProductName(item), item?.selectedVariant, item?.selectedColor));
   const unique = Array.from(new Set(labels));
@@ -71,7 +70,6 @@ export default function Customers() {
   const [batchEditCustomerIndex, setBatchEditCustomerIndex] = useState(0);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
-  const [showErpCustomerCompare, setShowErpCustomerCompare] = useState(false);
   const [exportType, setExportType] = useState<'statement' | 'dues_report' | 'invoice'>('statement');
   const [txToExport, setTxToExport] = useState<Transaction | null>(null);
 
@@ -227,23 +225,6 @@ export default function Customers() {
     const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
   }, [canonicalCustomers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold]);
-  const erpCompareInput = useMemo(() => ({
-    transactions,
-    upfrontOrders,
-    customers,
-    products,
-  }), [transactions, upfrontOrders, customers, products]);
-  const erpCustomerRows = useMemo(() => compareCustomerBalances(erpCompareInput), [erpCompareInput]);
-  const erpTopLevel = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
-  const erpCustomerWarningFlags = useMemo(() => {
-    const flags: string[] = [];
-    if (transactions.some((tx) => tx.type === 'historical_reference')) flags.push('historical_reference usage');
-    if (transactions.some((tx) => Number((tx as any).paymentAppliedToCustomOrderReceivable || 0) > 0)) flags.push('custom order receivable allocation');
-    if (transactions.some((tx) => tx.type === 'payment' && !Number((tx as any).paymentAppliedToReceivable || 0))) flags.push('paymentAppliedToReceivable ambiguity');
-    if (transactions.some((tx) => Number((tx as any).storeCreditCreated || 0) > 0 || Number((tx as any).storeCreditUsed || 0) > 0)) flags.push('storeCreditCreated/storeCreditUsed ambiguity');
-    if (erpTopLevel.receivable.status !== 'match') flags.push('customer projection mismatch');
-    return flags;
-  }, [transactions, erpTopLevel.receivable.status]);
   const customerTotalPages = Math.max(1, Math.ceil(filteredData.displayCustomers.length / CUSTOMERS_PAGE_SIZE));
   const paginatedCustomers = useMemo(
     () => filteredData.displayCustomers.slice((customerPage - 1) * CUSTOMERS_PAGE_SIZE, customerPage * CUSTOMERS_PAGE_SIZE),
@@ -257,17 +238,7 @@ export default function Customers() {
   useEffect(() => {
     setCustomerPage((prev) => Math.min(prev, customerTotalPages));
   }, [customerTotalPages]);
-  useEffect(() => {
-    const customerProjectionReceivable = canonicalCustomers.reduce((sum, c) => sum + Math.max(0, Number(c.totalDue || 0)), 0);
-    const recon = reconcileReceivableSurfaces({
-      customers,
-      transactions,
-      upfrontOrders,
-      customerProjectionReceivable,
-      sourceLabel: 'Customers',
-    });
-    logReceivableReconciliationIfNeeded(recon);
-  }, [customers, transactions, upfrontOrders, canonicalCustomers]);
+
 
   const viewingCustomerCanonical = useMemo(() => {
     if (!viewingCustomer) return null;
@@ -917,67 +888,7 @@ export default function Customers() {
           </div>
       </div>
 
-      <div className="rounded border border-violet-200 bg-violet-50/50 p-3 space-y-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="font-semibold">New ERP Customer Compare</div>
-          <Button variant="outline" size="sm" className="h-8" onClick={() => setShowErpCustomerCompare((prev) => !prev)}>
-            {showErpCustomerCompare ? 'Hide' : 'Show'}
-          </Button>
-        </div>
-        <div className="text-xs text-violet-800">Read-only comparison — does not affect production customer balances.</div>
-        {showErpCustomerCompare && (
-          <div className="space-y-3">
-            <div className="rounded border bg-white p-2 text-xs text-slate-700">
-              <div>Receivable status: <span className="uppercase font-semibold">{erpTopLevel.receivable.status}</span></div>
-              <div>Receivable delta (ledger - legacy): ₹{formatMoneyPrecise(erpTopLevel.receivable.delta)}</div>
-              <div>Reasons: {erpTopLevel.receivable.reasons.length ? erpTopLevel.receivable.reasons.join(' • ') : 'None'}</div>
-            </div>
-            <div className="rounded border bg-white p-2 text-xs">
-              <div className="font-medium mb-1">Warnings / Ambiguities</div>
-              {erpCustomerWarningFlags.length ? (
-                <ul className="list-disc pl-5 space-y-0.5 text-slate-700">
-                  {erpCustomerWarningFlags.map((flag) => <li key={flag}>{flag}</li>)}
-                </ul>
-              ) : <div className="text-slate-500">No warnings emitted.</div>}
-            </div>
-            <div className="overflow-x-auto rounded border bg-white">
-              <table className="w-full text-xs">
-                <thead className="bg-slate-50">
-                  <tr className="text-left border-b">
-                    <th className="p-2">Customer</th>
-                    <th className="p-2 text-right">Legacy Due</th>
-                    <th className="p-2 text-right">Ledger Receivable</th>
-                    <th className="p-2 text-right">Legacy Store Credit</th>
-                    <th className="p-2 text-right">Ledger Credit</th>
-                    <th className="p-2 text-right">Due Δ</th>
-                    <th className="p-2 text-right">Credit Δ</th>
-                    <th className="p-2">Status</th>
-                    <th className="p-2">Reasons / Warnings</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {erpCustomerRows.slice(0, 20).map((row) => {
-                    const status = Math.abs(row.dueDelta) < 0.01 && Math.abs(row.creditDelta) < 0.01 ? 'match' : 'mismatch';
-                    return (
-                      <tr key={row.customerId} className="border-b">
-                        <td className="p-2">{row.customerName} <span className="text-muted-foreground">({row.customerId})</span></td>
-                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.legacyDue)}</td>
-                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.ledgerReceivable)}</td>
-                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.legacyStoreCredit)}</td>
-                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.ledgerCreditLike)}</td>
-                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.dueDelta)}</td>
-                        <td className="p-2 text-right">₹{formatMoneyPrecise(row.creditDelta)}</td>
-                        <td className={`p-2 font-medium uppercase ${status === 'match' ? 'text-emerald-700' : 'text-red-700'}`}>{status}</td>
-                        <td className="p-2">{row.flags.length ? row.flags.join(' • ') : '—'}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </div>
+
 
       <div className="border rounded-xl overflow-x-auto bg-white">
         <table className="w-full text-sm">
@@ -1595,7 +1506,7 @@ export default function Customers() {
                   </CardHeader>
                   <CardContent className="overflow-y-auto p-4 space-y-4">
                       <div className="space-y-3">
-                        {selectedTx.items.map((item, i) => (
+                        {normalizeTransactionItems(selectedTx.items).map((item, i) => (
                             <div key={i} className="flex gap-4 items-center border-b border-slate-100 pb-4 last:border-0">
                                 <div className="h-12 w-12 bg-white rounded-xl flex items-center justify-center shrink-0 border shadow-sm overflow-hidden">
                                     {item.image ? <img src={item.image} className="w-full h-full object-contain" /> : <Package className="w-6 h-6 opacity-20" />}

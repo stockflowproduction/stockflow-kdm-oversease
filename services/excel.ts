@@ -4,6 +4,7 @@ import { Product, Transaction, Customer, CartItem } from '../types';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { getCanonicalReturnAllocation, getResolvedReturnHandlingMode, getSaleSettlementBreakdown, loadData } from './storage';
 import { formatMoneyPrecise } from './numberFormat';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 
 type TransactionFinanceEffect = {
     txId: string;
@@ -65,7 +66,7 @@ const buildTransactionEffects = (transactions: Transaction[]) => {
         const customerId = tx.customerId || '__walk_in__';
         const dueBefore = runningDue.get(customerId) || 0;
         const scBefore = runningStoreCredit.get(customerId) || 0;
-        const cogs = (tx.items || []).reduce((sum, item) => sum + ((item.buyPrice || 0) * (item.quantity || 0)), 0);
+        const cogs = normalizeTransactionItems(tx.items).reduce((sum, item) => sum + ((item.buyPrice || 0) * (item.quantity || 0)), 0);
 
         const base: TransactionFinanceEffect = {
             txId: tx.id,
@@ -250,7 +251,8 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
 
     transactions.forEach((t) => {
         const fx = effects.get(t.id);
-        const items = Array.isArray(t.items) && t.items.length > 0 ? t.items : [null];
+        const normalizedItems = normalizeTransactionItems(t.items);
+        const items = normalizedItems.length > 0 ? normalizedItems : [null];
         const customerPhone = t.customerId ? (customerPhoneById.get(t.customerId) || '') : '';
         const billNumber = `BILL-${t.id.slice(-6)}`;
 
@@ -343,7 +345,7 @@ export const exportDetailedSalesToExcel = (transactions: Transaction[]) => {
     
     transactions.forEach(t => {
         const fx = effects.get(t.id);
-        if (!t.items.length) {
+        if (!normalizeTransactionItems(t.items).length) {
             data.push({
                 'txId': t.id,
                 'date': new Date(t.date).toLocaleString(),
@@ -370,7 +372,7 @@ export const exportDetailedSalesToExcel = (transactions: Transaction[]) => {
             });
             return;
         }
-        t.items.forEach(item => {
+        normalizeTransactionItems(t.items).forEach(item => {
             const lineSubtotal = (item.sellPrice || 0) * (item.quantity || 0);
             const lineDiscount = item.discountAmount || 0;
             const lineNet = lineSubtotal - lineDiscount;
@@ -534,7 +536,7 @@ export const exportInvoiceToExcel = (transaction: Transaction) => {
 
     // Items
     const itemsHeader = [['#', 'Item Name', 'HSN', 'Qty', 'Price', 'Discount', 'Total']];
-    const itemsData = transaction.items.map((item, idx) => [
+    const itemsData = normalizeTransactionItems(transaction.items).map((item, idx) => [
         idx + 1,
 `${item.name} - ${item.selectedVariant || NO_VARIANT} - ${item.selectedColor || NO_COLOR}`,
         item.hsn || '-',

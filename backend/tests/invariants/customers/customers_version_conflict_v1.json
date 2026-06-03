@@ -1,8 +1,0 @@
-{
-  "name": "customers_version_conflict_v1",
-  "storeId": "store-a",
-  "input": {
-    "name": "Versioned Customer",
-    "phone": "+1 555 7000"
-  }
-}

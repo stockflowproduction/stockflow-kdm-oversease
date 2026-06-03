@@ -5,6 +5,7 @@ import { Transaction, Customer, Product, StoreProfile } from '../types';
 import { loadData } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
 import { formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from './numberFormat';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 
 type ReceiptPaymentDetails = {
     cashReceived?: number;
@@ -555,7 +556,7 @@ export const generateReceiptPDF = (
     doc.text(`Date: ${new Date(transaction.date).toLocaleDateString()}`, pageWidth - 14, billSectionY + 13, { align: "right" });
 
     // --- Items Table ---
-    const tableData = transaction.items.map((item, idx) => [
+    const tableData = normalizeTransactionItems(transaction.items).map((item, idx) => [
         idx + 1,
         formatInvoiceItemName(item),
         item.hsn || "-",
@@ -883,7 +884,7 @@ export const printThermalInvoice = (transaction: Transaction, customers: Custome
       </tr>
     </thead>
     <tbody>
-      ${transaction.items.map((item, idx) => `
+      ${normalizeTransactionItems(transaction.items).map((item, idx) => `
         <tr>
           <td>${idx + 1}</td>
           <td>

@@ -2,6 +2,7 @@ import * as XLSX from 'xlsx';
 import { CartItem, Customer, Product, PurchaseOrder, PurchaseOrderLine, Transaction } from '../types';
 import { addCategory, addCustomer, addHistoricalTransactions, addProduct, createPurchaseOrder, loadData, normalizeHistoricalTransactionForImport, processTransaction, updateCustomer, updateProduct, updatePurchaseOrder } from './storage';
 import { NO_COLOR, NO_VARIANT } from './productVariants';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 
 export type ImportIssue = { sheet: string; row: number; field: string; message: string };
 export type ImportResult = { totalRows: number; importedRows: number; errors: ImportIssue[]; warnings?: ImportIssue[]; summary: string };
@@ -323,7 +324,7 @@ export const downloadTransactionsData = (transactions?: Transaction[] | unknown)
   const rows: Record<string, any>[] = [];
   sourceTransactions.forEach(tx => {
     const customerPhone = tx.customerId ? (customersById.get(tx.customerId)?.phone || '') : '';
-    if (tx.type === 'payment' || !tx.items.length) {
+    if (tx.type === 'payment' || !normalizeTransactionItems(tx.items).length) {
       rows.push({
         'Transaction ID': tx.id,
         'Date': tx.date,
@@ -355,7 +356,7 @@ export const downloadTransactionsData = (transactions?: Transaction[] | unknown)
       });
       return;
     }
-    tx.items.forEach(item => {
+    normalizeTransactionItems(tx.items).forEach(item => {
       rows.push({
         'Transaction ID': tx.id,
         'Date': tx.date,
@@ -891,7 +892,7 @@ export const importTransactionsFromFile = async (
         discount: Number((existingTx.discount || 0).toFixed(2)),
         tax: Number((existingTx.tax || 0).toFixed(2)),
         paymentMethod: existingTx.paymentMethod || 'Cash',
-        itemCount: (existingTx.items || []).length,
+        itemCount: (normalizeTransactionItems(existingTx.items)).length,
       });
       const incomingComparable = JSON.stringify({
         type: computedTx.type,
@@ -900,7 +901,7 @@ export const importTransactionsFromFile = async (
         discount: Number((computedTx.discount || 0).toFixed(2)),
         tax: Number((computedTx.tax || 0).toFixed(2)),
         paymentMethod: computedTx.paymentMethod || 'Cash',
-        itemCount: (computedTx.items || []).length,
+        itemCount: (normalizeTransactionItems(computedTx.items)).length,
       });
       if (existingComparable !== incomingComparable) {
         errors.push({ sheet: 'Transactions', row: rowNo0, field: 'Transaction ID', message: 'Existing transactions are immutable and must match exported values' });

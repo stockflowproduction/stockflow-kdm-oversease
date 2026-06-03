@@ -1,8 +1,0 @@
-{
-  "name": "customers_archive_behavior_v1",
-  "storeId": "store-a",
-  "input": {
-    "name": "Archive Customer",
-    "phone": "+1 555 6000"
-  }
-}

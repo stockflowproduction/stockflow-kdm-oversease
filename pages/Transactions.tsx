@@ -17,6 +17,7 @@ import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadTransactionsData, downloadTransactionsTemplate, importHistoricalTransactionsFromFile } from '../services/importExcel';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 
 function ConfirmDialog({ open, title, message, onCancel, onConfirm }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void }) {
   if (!open) return null;
@@ -46,17 +47,7 @@ export default function Transactions() {
   const isSupplierPaymentVirtualTransaction = (tx?: Transaction | null) => !!tx?.id?.startsWith('supplier-payment-');
   const isCustomOrderPaymentRow = (tx?: Transaction | null) => !!tx && isUpfrontVirtualTransaction(tx) && String(tx.notes || '').toLowerCase().includes('order payment');
   const isCustomOrderReceivableRow = (tx?: Transaction | null) => !!tx && isUpfrontVirtualTransaction(tx) && !isCustomOrderPaymentRow(tx);
-  type BackendShadowTransaction = {
-    id: string;
-    type?: string;
-    transactionDate?: string;
-    customerId?: string;
-    customerName?: string;
-    paymentMethod?: 'Cash' | 'Credit' | 'Online';
-    notes?: string;
-    totals?: { grandTotal?: number };
-    lineItems?: Array<{ productId?: string; productName?: string; variant?: string; color?: string; quantity?: number; unitPrice?: number; unitCost?: number; buyPrice?: number }>;
-  };
+
 
   const TRANSACTIONS_ROWS_PER_PAGE = 25;
   const DELETED_ROWS_PER_PAGE = 25;
@@ -124,58 +115,6 @@ export default function Transactions() {
   const [hasMoreDeletedWindow, setHasMoreDeletedWindow] = useState(false);
   const [isTransactionWindowed, setIsTransactionWindowed] = useState(true);
   const [isDeletedWindowed, setIsDeletedWindowed] = useState(true);
-  const [firestoreShadowTransactions, setFirestoreShadowTransactions] = useState<Transaction[]>([]);
-  const [backendShadowTransactions, setBackendShadowTransactions] = useState<BackendShadowTransaction[]>([]);
-  const [backendShadowFetched, setBackendShadowFetched] = useState(false);
-  const [backendShadowError, setBackendShadowError] = useState<string | null>(null);
-  const backendRenderEnabled = typeof window !== 'undefined' && (
-    String((import.meta as any)?.env?.VITE_TX_BACKEND_RENDER || '').toLowerCase() === 'true'
-    || new URLSearchParams(window.location.search).get('txSource') === 'backend'
-  );
-  const shadowDiagnosticEnabled = typeof window !== 'undefined' && (
-    String((import.meta as any)?.env?.VITE_ENABLE_TX_SHADOW || '').toLowerCase() === 'true'
-    || new URLSearchParams(window.location.search).get('shadow') === '1'
-    || backendRenderEnabled
-  );
-  const backendRenderableTransactions = useMemo<Transaction[]>(() => backendShadowTransactions.map((tx) => {
-    const normalizedType = String(tx.type || '').toLowerCase();
-    const txType = (normalizedType === 'sale' || normalizedType === 'return' || normalizedType === 'payment' || normalizedType === 'historical_reference' || normalizedType === 'customer_credit' || normalizedType === 'customer_cash_out')
-      ? normalizedType
-      : 'payment';
-    const items: CartItem[] = (tx.lineItems || []).map((line, index) => {
-      const productId = String(line.productId || `backend-line-${index + 1}`);
-      const quantity = Number(line.quantity || 0);
-      const unitPrice = Number(line.unitPrice || 0);
-      const unitCost = Number((line as any).unitCost ?? line.buyPrice ?? 0);
-      return {
-        id: productId,
-        barcode: '',
-        name: String(line.productName || `Backend Item ${index + 1}`),
-        description: '',
-        buyPrice: unitCost,
-        sellPrice: unitPrice,
-        stock: 0,
-        image: '',
-        category: 'Backend',
-        quantity,
-        selectedVariant: line.variant || '',
-        selectedColor: line.color || '',
-      };
-    });
-    return {
-      id: String(tx.id || ''),
-      type: txType as Transaction['type'],
-      date: String(tx.transactionDate || new Date().toISOString()),
-      total: Number(tx.totals?.grandTotal || 0),
-      items,
-      customerId: tx.customerId || '',
-      customerName: tx.customerName || 'Walk-in Customer',
-      paymentMethod: tx.paymentMethod || 'Cash',
-      notes: tx.notes || '',
-    };
-  }), [backendShadowTransactions]);
-  const backendLoadedForRender = backendShadowFetched && !backendShadowError;
-  const baseRenderedTransactions = backendRenderEnabled && backendLoadedForRender ? backendRenderableTransactions : transactions;
   const virtualSupplierPaymentTransactions = useMemo<Transaction[]>(() => (supplierPayments || [])
     .filter((payment) => !payment.deletedAt)
     .map((payment) => {
@@ -273,8 +212,8 @@ export default function Transactions() {
     return [...groupedInitial, ...additionalRows];
   }), [upfrontOrders, customers]);
   const renderedTransactions = useMemo(
-    () => [...baseRenderedTransactions, ...virtualUpfrontOrderTransactions, ...virtualSupplierPaymentTransactions],
-    [baseRenderedTransactions, virtualUpfrontOrderTransactions, virtualSupplierPaymentTransactions]
+    () => [...transactions, ...virtualUpfrontOrderTransactions, ...virtualSupplierPaymentTransactions],
+    [transactions, virtualUpfrontOrderTransactions, virtualSupplierPaymentTransactions]
   );
 
   const formatRoleLabel = (role?: string) => {
@@ -302,7 +241,6 @@ export default function Transactions() {
         const deletedWindow = loadDeletedTransactionsPage({ limit: DELETED_WINDOW_BATCH_SIZE });
         const data = loadData();
         setTransactions(txWindow.rows);
-        setFirestoreShadowTransactions(data.transactions || []);
         setDeletedTransactions(deletedWindow.rows);
         setCustomers(data.customers);
         setProducts(data.products || []);
@@ -331,277 +269,7 @@ export default function Transactions() {
     };
   }, []);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (!shadowDiagnosticEnabled || firestoreShadowTransactions.length === 0) {
-      setBackendShadowFetched(false);
-      setBackendShadowTransactions([]);
-      setBackendShadowError(null);
-      return;
-    }
-    let cancelled = false;
 
-    const getBackendShadowBaseUrl = () => {
-      const raw = String(
-        ((import.meta as any)?.env?.VITE_BACKEND_BASE_URL)
-        || ((import.meta as any)?.env?.VITE_API_BASE_URL)
-        || ''
-      ).trim();
-      return raw.replace(/\/+$/, '');
-    };
-
-    const buildShadowDateWindow = () => {
-      const now = new Date();
-      now.setHours(0, 0, 0, 0);
-      const clone = (date: Date) => new Date(date.getTime());
-      const startEnd = (start: Date, end: Date) => ({
-        dateFrom: new Date(start.setHours(0, 0, 0, 0)).toISOString(),
-        dateTo: new Date(end.setHours(23, 59, 59, 999)).toISOString(),
-      });
-
-      switch (filterType) {
-        case 'today':
-          return startEnd(clone(now), clone(now));
-        case 'yesterday': {
-          const y = clone(now);
-          y.setDate(y.getDate() - 1);
-          return startEnd(y, y);
-        }
-        case '7days': {
-          const start = clone(now);
-          start.setDate(start.getDate() - 7);
-          return startEnd(start, clone(now));
-        }
-        case '15days': {
-          const start = clone(now);
-          start.setDate(start.getDate() - 15);
-          return startEnd(start, clone(now));
-        }
-        case '30days': {
-          const start = clone(now);
-          start.setDate(start.getDate() - 30);
-          return startEnd(start, clone(now));
-        }
-        case '6months': {
-          const start = clone(now);
-          start.setMonth(start.getMonth() - 6);
-          return startEnd(start, clone(now));
-        }
-        case '1year': {
-          const start = clone(now);
-          start.setFullYear(start.getFullYear() - 1);
-          return startEnd(start, clone(now));
-        }
-        case 'custom': {
-          if (!customStart) return null;
-          const start = new Date(customStart);
-          const end = customEnd ? new Date(customEnd) : clone(now);
-          return startEnd(start, end);
-        }
-        default:
-          return null;
-      }
-    };
-
-    const fetchBackendTransactionsShadow = async () => {
-      try {
-        const baseUrl = getBackendShadowBaseUrl();
-        const endpointBase = `${baseUrl || ''}/api/v1/transactions`;
-        const token = await auth?.currentUser?.getIdToken?.();
-        const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-        const pageSize = 200;
-        let page = 1;
-        const all: BackendShadowTransaction[] = [];
-        const dateWindow = buildShadowDateWindow();
-        const query = searchTerm.trim();
-        const typeFilter = 'all';
-        const unsupportedFilters: string[] = [];
-        if (typeFilter === 'all') unsupportedFilters.push('transactionType (no active Transactions type filter mapped)');
-
-        while (!cancelled) {
-          const params = new URLSearchParams({
-            page: String(page),
-            pageSize: String(pageSize),
-            sortBy: 'transactionDate',
-            sortOrder: 'desc',
-          });
-          if (dateWindow?.dateFrom) params.set('dateFrom', dateWindow.dateFrom);
-          if (dateWindow?.dateTo) params.set('dateTo', dateWindow.dateTo);
-          if (query) params.set('q', query);
-          if (typeFilter !== 'all') params.set('type', typeFilter);
-          const url = `${endpointBase}?${params.toString()}`;
-          const response = await fetch(url, { headers });
-          if (!response.ok) throw new Error(`backend shadow fetch failed (${response.status})`);
-          const payload = await response.json() as { items?: BackendShadowTransaction[] };
-          const rows = Array.isArray(payload?.items) ? payload.items : [];
-          all.push(...rows);
-          if (rows.length < pageSize) break;
-          page += 1;
-        }
-
-        if (cancelled) return;
-        setBackendShadowTransactions(all);
-        setBackendShadowFetched(true);
-        setBackendShadowError(null);
-      } catch (error) {
-        if (cancelled) return;
-        const message = error instanceof Error ? error.message : String(error);
-        setBackendShadowFetched(true);
-        setBackendShadowError(message);
-        setBackendShadowTransactions([]);
-        if (backendRenderEnabled) {
-        }
-      }
-    };
-
-    fetchBackendTransactionsShadow();
-    return () => { cancelled = true; };
-  }, [firestoreShadowTransactions, filterType, customStart, customEnd, searchTerm, shadowDiagnosticEnabled, backendRenderEnabled]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (!shadowDiagnosticEnabled || !backendShadowFetched) return;
-
-    const isSaleLikeFirestore = (tx: Transaction) => {
-      const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
-      return txType === 'sale' || txType === 'historical_reference';
-    };
-    const isSaleLikeBackend = (tx: BackendShadowTransaction) => String(tx.type || '').toLowerCase() === 'sale';
-
-    const customerPhoneById = new Map(customers.map(customer => [customer.id, customer.phone || '']));
-    const productsById = new Map<string, Product>(products.map(product => [product.id, product]));
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-    const firestoreDateScoped = transactions.filter((tx) => {
-      const txDate = new Date(tx.date);
-      txDate.setHours(0, 0, 0, 0);
-      switch (filterType) {
-        case 'today':
-          return txDate.getTime() === now.getTime();
-        case 'yesterday': {
-          const yest = new Date(now);
-          yest.setDate(yest.getDate() - 1);
-          return txDate.getTime() === yest.getTime();
-        }
-        case '7days': {
-          const week = new Date(now);
-          week.setDate(week.getDate() - 7);
-          return txDate >= week;
-        }
-        case '15days': {
-          const days15 = new Date(now);
-          days15.setDate(days15.getDate() - 15);
-          return txDate >= days15;
-        }
-        case '30days': {
-          const days30 = new Date(now);
-          days30.setDate(days30.getDate() - 30);
-          return txDate >= days30;
-        }
-        case '6months': {
-          const months6 = new Date(now);
-          months6.setMonth(months6.getMonth() - 6);
-          return txDate >= months6;
-        }
-        case '1year': {
-          const year1 = new Date(now);
-          year1.setFullYear(year1.getFullYear() - 1);
-          return txDate >= year1;
-        }
-        case 'custom': {
-          if (!customStart) return true;
-          const start = new Date(customStart);
-          start.setHours(0, 0, 0, 0);
-          if (txDate < start) return false;
-          if (customEnd) {
-            const end = new Date(customEnd);
-            end.setHours(23, 59, 59, 999);
-            if (txDate > end) return false;
-          }
-          return true;
-        }
-        default:
-          return true;
-      }
-    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-    const shadowQuery = searchTerm.trim().toLowerCase();
-    const firestoreFiltered = !shadowQuery ? firestoreDateScoped : firestoreDateScoped.filter((tx) => {
-      const customerPhone = tx.customerId ? (customerPhoneById.get(tx.customerId) || '') : '';
-      const baseHaystack = [tx.id, tx.customerName || '', customerPhone, tx.customerId || ''].join(' ').toLowerCase();
-      if (baseHaystack.includes(shadowQuery)) return true;
-      return (tx.items || []).some((item) => {
-        const product = productsById.get(item.id);
-        const itemHaystack = [item.id, product?.id || '', item.name || '', product?.name || '', product?.barcode || ''].join(' ').toLowerCase();
-        return itemHaystack.includes(shadowQuery);
-      });
-    });
-    const firestoreCount = firestoreFiltered.length;
-    const backendCount = backendShadowTransactions.length;
-    const firestoreRevenue = firestoreFiltered
-      .filter(isSaleLikeFirestore)
-      .reduce((sum, tx) => sum + Math.abs(Number(tx.total || 0)), 0);
-    const backendRevenue = backendShadowTransactions
-      .filter(isSaleLikeBackend)
-      .reduce((sum, tx) => sum + Math.abs(Number(tx.totals?.grandTotal || 0)), 0);
-
-    const firestoreGrossProfit = firestoreFiltered
-      .filter(isSaleLikeFirestore)
-      .reduce((sum, tx) => sum + (tx.items || []).reduce((lineSum, item) => {
-        const qty = Number(item.quantity || 0);
-        const sell = Number(item.sellPrice || 0);
-        const buy = Number(item.buyPrice || 0);
-        return lineSum + (qty * (sell - buy));
-      }, 0), 0);
-
-    const backendHasCostData = backendShadowTransactions.some(tx =>
-      (tx.lineItems || []).some(line => Number.isFinite(Number((line as any).unitCost ?? line.buyPrice)))
-    );
-    const backendGrossProfit = backendHasCostData
-      ? backendShadowTransactions
-        .filter(isSaleLikeBackend)
-        .reduce((sum, tx) => sum + (tx.lineItems || []).reduce((lineSum, line) => {
-          const qty = Number(line.quantity || 0);
-          const sell = Number(line.unitPrice || 0);
-          const buy = Number((line as any).unitCost ?? line.buyPrice ?? 0);
-          return lineSum + (qty * (sell - buy));
-        }, 0), 0)
-      : null;
-
-    const toRange = (dates: string[]) => {
-      const valid = dates
-        .map((iso) => new Date(iso).getTime())
-        .filter((value) => Number.isFinite(value))
-        .sort((a, b) => a - b);
-      if (!valid.length) return { from: null as string | null, to: null as string | null };
-      return { from: new Date(valid[0]).toISOString(), to: new Date(valid[valid.length - 1]).toISOString() };
-    };
-
-    const firestoreDateRange = toRange(firestoreFiltered.map(tx => tx.date));
-    const backendDateRange = toRange(backendShadowTransactions.map(tx => String(tx.transactionDate || '')));
-    const firestoreIds = new Set(firestoreFiltered.map((tx) => tx.id));
-    const backendIds = new Set(backendShadowTransactions.map((tx) => String(tx.id || '')));
-    const idsOnlyInFirestore = Array.from(firestoreIds).filter((id) => !backendIds.has(id)).slice(0, 10);
-    const idsOnlyInBackend = Array.from(backendIds).filter((id) => !firestoreIds.has(id)).slice(0, 10);
-
-    const countMismatch = firestoreCount !== backendCount;
-    const revenueMismatch = Math.abs(firestoreRevenue - backendRevenue) > 0.01;
-    const dateRangeMismatch = firestoreDateRange.from !== backendDateRange.from || firestoreDateRange.to !== backendDateRange.to;
-    const grossProfitMismatch = backendGrossProfit !== null && Math.abs(firestoreGrossProfit - backendGrossProfit) > 0.01;
-    const idMismatch = idsOnlyInFirestore.length > 0 || idsOnlyInBackend.length > 0;
-    const mismatchReasons = [
-      ...(countMismatch ? ['count_mismatch'] : []),
-      ...(revenueMismatch ? ['revenue_mismatch'] : []),
-      ...(dateRangeMismatch ? ['date_range_mismatch'] : []),
-      ...(grossProfitMismatch ? ['gross_profit_mismatch'] : []),
-      ...(idMismatch ? ['id_mismatch'] : []),
-    ];
-    const mismatch = countMismatch || revenueMismatch || dateRangeMismatch || grossProfitMismatch || idMismatch;
-
-  }, [backendShadowTransactions, backendShadowFetched, transactions, customers, products, filterType, customStart, customEnd, searchTerm, shadowDiagnosticEnabled]);
-
-  useEffect(() => {
-  }, [backendRenderEnabled, backendLoadedForRender, renderedTransactions.length]);
 
   const loadOlderTransactionsWindow = () => {
     if (!transactionsWindowCursor || !hasMoreTransactionsWindow) return;
@@ -757,7 +425,7 @@ export default function Transactions() {
       if (baseHaystack.includes(query)) return true;
       if ((tx.notes || '').toLowerCase().includes(query)) return true;
 
-      return (tx.items || []).some((item) => {
+      return normalizeTransactionItems(tx.items).some((item) => {
         const product = productsById.get(item.id);
         const itemHaystack = [
           item.id,
@@ -881,7 +549,7 @@ export default function Transactions() {
     const isSale = txTypeUi.isSale;
     const isReturn = txTypeUi.isReturn;
     const isPayment = txTypeUi.isPayment;
-    const itemCount = tx.items.reduce((acc, item) => acc + item.quantity, 0);
+    const itemCount = normalizeTransactionItems(tx.items).reduce((acc, item) => acc + item.quantity, 0);
     return {
       tx,
       isSale,
@@ -951,6 +619,13 @@ export default function Transactions() {
     return editingTx.type === 'return' ? -unsigned : unsigned;
   };
 
+  const resetProductPickerState = () => {
+    setIsProductPickerOpen(false);
+    setProductPickerSearch('');
+    setProductPickerQuantities({});
+    setRecentlyAddedProductId(null);
+  };
+
   const openTransactionEditor = (tx: Transaction) => {
     const settlement = getSaleSettlementBreakdown(tx);
     setEditingTx(tx);
@@ -959,12 +634,12 @@ export default function Transactions() {
     setEditingTxPaymentMethod((tx.paymentMethod || 'Cash') as 'Cash' | 'Credit' | 'Online');
     setEditingTxNotes(tx.notes || '');
     setEditingCustomerId(tx.customerId || '');
-    setEditingItems((tx.items || []).map(item => ({ ...item })));
+    setEditingItems(normalizeTransactionItems(tx.items).map(item => ({ ...item })));
     setEditingCashPaid(String(settlement.cashPaid || 0));
     setEditingOnlinePaid(String(settlement.onlinePaid || 0));
     setEditingCreditDue(String(settlement.creditDue || 0));
     setEditingReturnMode(tx.returnHandlingMode || 'refund_cash');
-    setNewSaleProductId('');
+    resetProductPickerState();
     setEditingError(null);
     setEditingSectionWarning(null);
   };
@@ -980,7 +655,7 @@ export default function Transactions() {
     setEditingCashPaid('');
     setEditingOnlinePaid('');
     setEditingCreditDue('');
-    setNewSaleProductId('');
+    resetProductPickerState();
     setEditingSectionWarning(null);
   };
 
@@ -1158,7 +833,7 @@ export default function Transactions() {
             }
           }
           const originalByReturnLinkedKey = new Map<string, CartItem>();
-          (editingTx.items || []).forEach(item => {
+          normalizeTransactionItems(editingTx.items).forEach(item => {
             const key = getLineCompositeKey(item);
             if (editingSaleLinkageInfo.returnedQtyByKey.has(key) && !originalByReturnLinkedKey.has(key)) {
               originalByReturnLinkedKey.set(key, item);
@@ -1209,7 +884,7 @@ export default function Transactions() {
           return;
         }
         const originalBySourceKey = new Map<string, CartItem>();
-        (editingTx.items || []).forEach(item => {
+        normalizeTransactionItems(editingTx.items).forEach(item => {
           if (!item.sourceTransactionId || !item.sourceLineCompositeKey) return;
           originalBySourceKey.set(`${item.sourceTransactionId}::${item.sourceLineCompositeKey}`, item);
         });
@@ -1226,7 +901,7 @@ export default function Transactions() {
             return;
           }
           const sourceSale = transactions.find(tx => tx.id === line.sourceTransactionId && tx.type === 'sale');
-          const originalSourceQty = (sourceSale?.items || [])
+          const originalSourceQty = normalizeTransactionItems(sourceSale?.items)
             .filter(item => getLineCompositeKey(item) === line.sourceLineCompositeKey)
             .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
           if (originalSourceQty <= 0) {
@@ -1236,7 +911,7 @@ export default function Transactions() {
           }
           const returnedExcludingCurrent = transactions
             .filter(tx => tx.type === 'return' && tx.id !== editingTx.id)
-            .reduce((sum, tx) => sum + (tx.items || [])
+            .reduce((sum, tx) => sum + normalizeTransactionItems(tx.items)
               .filter(item => item.sourceTransactionId === line.sourceTransactionId && item.sourceLineCompositeKey === line.sourceLineCompositeKey)
               .reduce((lineSum, item) => lineSum + (Number(item.quantity) || 0), 0), 0);
           const remainingQty = Math.max(0, originalSourceQty - returnedExcludingCurrent);
@@ -1318,7 +993,7 @@ export default function Transactions() {
     transactions
       .filter(tx => tx.type === 'return')
       .forEach(tx => {
-        (tx.items || []).forEach(item => {
+        normalizeTransactionItems(tx.items).forEach(item => {
           if (item.sourceTransactionId !== editingTx.id || !item.sourceLineCompositeKey) return;
           const next = (returnedQtyByKey.get(item.sourceLineCompositeKey) || 0) + (Number(item.quantity) || 0);
           returnedQtyByKey.set(item.sourceLineCompositeKey, next);
@@ -1467,14 +1142,14 @@ export default function Transactions() {
               totalRevenue += amount;
               totalDiscount += (tx.discount || 0);
               // Calculate Profit: (Sell - Buy) * Qty
-              tx.items.forEach(item => {
+              normalizeTransactionItems(tx.items).forEach(item => {
                   const profit = (item.sellPrice - resolveBuyPrice(item, tx.date)) * item.quantity;
                   grossProfit += profit;
               });
           } else if (tx.type === 'return') {
               totalReturns += amount;
               // Reverse Profit for returns
-              tx.items.forEach(item => {
+              normalizeTransactionItems(tx.items).forEach(item => {
                   const profit = (item.sellPrice - resolveBuyPrice(item, tx.date)) * item.quantity;
                   grossProfit -= profit;
               });
@@ -1965,14 +1640,14 @@ export default function Transactions() {
                                                 <div className="flex flex-col gap-0.5">
                                                     <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-tight">{itemCount} Items</span>
                                                     <div className="flex -space-x-2 overflow-hidden">
-                                                        {tx.items.slice(0, 3).map((item, i) => (
+                                                        {normalizeTransactionItems(tx.items).slice(0, 3).map((item, i) => (
                                                             <div key={i} className="inline-block h-5 w-5 rounded-full ring-2 ring-background bg-muted overflow-hidden border">
                                                                 {item.image ? <img src={item.image} className="h-full w-full object-cover" /> : <Package className="h-full w-full p-1 opacity-50" />}
                                                             </div>
                                                         ))}
-                                                        {tx.items.length > 3 && (
+                                                        {normalizeTransactionItems(tx.items).length > 3 && (
                                                             <div className="flex h-5 w-5 items-center justify-center rounded-full ring-2 ring-background bg-slate-100 text-[8px] font-bold">
-                                                                +{tx.items.length - 3}
+                                                                +{normalizeTransactionItems(tx.items).length - 3}
                                                             </div>
                                                         )}
                                                     </div>
@@ -2257,7 +1932,7 @@ export default function Transactions() {
                                   <Package className="w-4 h-4 text-primary" />
                                   Items Purchased
                               </p>
-                              {selectedTx.items.map((item, idx) => (
+                              {normalizeTransactionItems(selectedTx.items).map((item, idx) => (
                                   <div key={idx} className="flex gap-3 items-start p-2 rounded-lg hover:bg-muted/50 transition-colors">
                                       <div className="h-10 w-10 bg-white rounded border flex items-center justify-center shrink-0 overflow-hidden shadow-sm">
                                           {item.image ? (
@@ -2412,7 +2087,7 @@ export default function Transactions() {
                 </div>
               </div>
 
-              {(selectedDeletedTx.itemSnapshot || selectedDeletedTx.originalTransaction.items || []).length > 0 && (
+              {normalizeTransactionItems(selectedDeletedTx.itemSnapshot ?? selectedDeletedTx.originalTransaction.items).length > 0 && (
                 <div className="rounded-lg border p-3 space-y-2">
                   <p className="font-semibold text-sm">Item summary</p>
                   <div className="overflow-x-auto">
@@ -2428,7 +2103,7 @@ export default function Transactions() {
                         </tr>
                       </thead>
                       <tbody>
-                        {(selectedDeletedTx.itemSnapshot || selectedDeletedTx.originalTransaction.items || []).map((item, index) => {
+                        {normalizeTransactionItems(selectedDeletedTx.itemSnapshot ?? selectedDeletedTx.originalTransaction.items).map((item, index) => {
                           const subtotal = (item.sellPrice || 0) * (item.quantity || 0) - (item.discountAmount || 0);
                           return (
                             <tr key={`${item.id}-${index}`} className="border-t">

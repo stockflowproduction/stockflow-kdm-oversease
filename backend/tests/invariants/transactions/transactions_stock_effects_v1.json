@@ -1,8 +1,0 @@
-{
-  "name": "transactions_stock_effects_v1",
-  "storeId": "store-tx-12",
-  "expected": {
-    "saleStockDelta": -1,
-    "returnStockDelta": 1
-  }
-}

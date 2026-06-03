@@ -2,8 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { loadData, getSaleSettlementBreakdown, getCanonicalCustomerBalanceSnapshot, buildUpfrontOrderLedgerEffects, createManualCashbookEntry } from '../services/storage';
 import { CashAdjustment, Expense, ManualCashbookEntry, PurchaseOrder, Transaction, UpfrontOrder } from '../types';
-import { logReceivableReconciliationIfNeeded, reconcileReceivableSurfaces } from '../services/accountingReconciliation';
-import { buildErpLedgerFromLegacyData, compareLegacyVsLedger } from '../services/erpComparison';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 
 type LedgerType = 'sale' | 'payment' | 'purchase' | 'supplier_payment' | 'expense' | 'return' | 'adjustment' | 'credit' | 'deleted_sale' | 'deleted_refund' | 'custom_order_receivable' | 'custom_order_payment' | 'manual_cash_in' | 'manual_cash_out';
 type PayType = 'cash' | 'online' | 'credit' | 'mixed' | 'na';
@@ -50,7 +49,7 @@ const getLineProductName = (item: any): string => {
 };
 
 const getTransactionProductSummary = (txAny: any, maxItems = 2): string => {
-  const items = Array.isArray(txAny?.items) ? txAny.items : [];
+  const items = normalizeTransactionItems(txAny?.items);
   if (!items.length) return 'No product details';
   const names = Array.from(new Set(items.map((i: any) => getLineProductName(i))));
   const shown = names.slice(0, maxItems).join(', ');
@@ -164,7 +163,7 @@ const detectCashbookTransactionType = (txAny: any): 'sale' | 'payment' | 'return
   const hasRefundHint = toNum(txAny?.refundAmount || txAny?.returnTotal) > 0 || Array.isArray(txAny?.returnItems);
   if (hasRefundHint || String(txAny?.returnHandlingMode || '').toLowerCase().includes('refund')) return 'return';
   const method = getCashbookPaymentMethod(txAny);
-  const hasItems = Array.isArray(txAny?.items) && txAny.items.length > 0;
+  const hasItems = normalizeTransactionItems(txAny?.items).length > 0;
   const hasTotal = getCashbookMoney(txAny, ['total', 'amount', 'grandTotal']) > 0;
   if (method !== 'na' && !hasItems && hasTotal) return 'payment';
   if (hasItems || hasTotal) return 'sale';
@@ -239,7 +238,6 @@ export default function Cashbook() {
   const [manualAmount, setManualAmount] = useState('');
   const [manualDetails, setManualDetails] = useState('');
   const [manualError, setManualError] = useState<string | null>(null);
-  const [showErpCashbookCompare, setShowErpCashbookCompare] = useState(false);
 
   useEffect(() => {
     const handleReload = () => setReloadKey((k) => k + 1);
@@ -552,53 +550,8 @@ export default function Cashbook() {
 
     return { cash, bank, receivable: ledgerReceivableKpi, payable: ledgerPayableKpi };
   }, [currentWindowRows, safeCustomers, safeTransactions, safePurchaseOrders]);
-  const erpCompareInput = useMemo(() => ({
-    transactions: safeTransactions,
-    deletedTransactions: safeDeletedTransactions,
-    deleteCompensations: safeDeleteCompensations,
-    supplierPayments: safeSupplierPayments,
-    purchaseOrders: safePurchaseOrders,
-    manualCashbookEntries: safeManualCashbookEntries,
-    upfrontOrders: safeUpfrontOrders,
-    customers: safeCustomers,
-    products: asArray<any>((data as any).products),
-    cashSessions: asArray<any>((data as any).cashSessions),
-    expenses: safeExpenses,
-  }), [safeTransactions, safeDeletedTransactions, safeDeleteCompensations, safeSupplierPayments, safePurchaseOrders, safeManualCashbookEntries, safeUpfrontOrders, safeCustomers, data, safeExpenses]);
-  const erpLegacyVsLedger = useMemo(() => compareLegacyVsLedger(erpCompareInput), [erpCompareInput]);
-  const erpBuild = useMemo(() => buildErpLedgerFromLegacyData(erpCompareInput), [erpCompareInput]);
-  const legacyCashbookCashMovementTotal = useMemo(
-    () => currentWindowRows.reduce((sum, row) => sum + Number(row.cashIn || 0) - Number(row.cashOut || 0), 0),
-    [currentWindowRows]
-  );
-  const legacyCashbookBankMovementTotal = useMemo(
-    () => currentWindowRows.reduce((sum, row) => sum + Number(row.bankIn || 0) - Number(row.bankOut || 0), 0),
-    [currentWindowRows]
-  );
-  const erpWarningFlags = useMemo(() => {
-    const flags: string[] = [];
-    if (safeDeleteCompensations.some((c: any) => c?.isExplicitRefund || c?.refundConfirmed || c?.source === 'explicit_refund')) flags.push('deleted-sale explicit refund linkage');
-    if (safeTransactions.some((tx) => tx.type === 'return' && !tx.returnHandlingMode)) flags.push('return refund vs reduce-due ambiguity');
-    if (safeManualCashbookEntries.length > 0) flags.push('manual cash in/out');
-    if (safeSupplierPayments.some((sp: any) => String(sp?.method || '').toLowerCase() === 'cash')) flags.push('supplier cash out');
-    if (safeExpenses.length > 0) flags.push('expenses');
-    if (safeTransactions.some((tx) => tx.type === 'payment' && String(tx.paymentMethod || '').toLowerCase() === 'cash')) flags.push('customer payment cash in');
-    if (safeUpfrontOrders.some((order) => asArray<any>(order.paymentHistory).some((p) => String(p?.method || '').toLowerCase().includes('cash')))) flags.push('upfront/custom order cash in');
-    if (erpBuild.auditFindings.some((f) => f.code === 'MISSING_SALE_SETTLEMENT')) flags.push('fallback settlement usage');
-    if (erpBuild.auditFindings.some((f) => f.code === 'LEGACY_HISTORICAL_REFERENCE')) flags.push('historical_reference usage');
-    return flags;
-  }, [safeDeleteCompensations, safeTransactions, safeManualCashbookEntries, safeSupplierPayments, safeExpenses, safeUpfrontOrders, erpBuild.auditFindings]);
   const availableCashForManualOut = useMemo(() => Math.max(0, Number(kpi.cash || 0)), [kpi.cash]);
-  useEffect(() => {
-    const recon = reconcileReceivableSurfaces({
-      customers: safeCustomers as any,
-      transactions: safeTransactions,
-      upfrontOrders: safeUpfrontOrders,
-      cashbookReceivable: kpi.receivable,
-      sourceLabel: 'Cashbook',
-    });
-    logReceivableReconciliationIfNeeded(recon);
-  }, [safeCustomers, safeTransactions, safeUpfrontOrders, kpi.receivable]);
+
 
   useEffect(() => setVisibleRowCount(100), [from, to, payFilter, typeFilter, search, sort]);
   const visibleRows = useMemo(() => asArray<Row>(filteredDisplayRows).slice(0, visibleRowCount), [filteredDisplayRows, visibleRowCount]);
@@ -614,7 +567,7 @@ export default function Cashbook() {
         const hasCash = s.cashPaid > 0; const hasOnline = s.onlinePaid > 0; const hasCredit = s.creditDue > 0;
         const lanes = Number(hasCash) + Number(hasOnline) + Number(hasCredit);
         const payType = lanes > 1 ? 'Mixed' : hasCash ? 'Cash' : hasOnline ? 'Online' : hasCredit ? 'Credit' : '—';
-        (tx.items || []).forEach((item: any, idx: number) => {
+        normalizeTransactionItems(tx.items).forEach((item: any, idx: number) => {
           const qty = Math.max(0, Number(item.quantity || 0));
           const sp = Math.max(0, Number(item.sellPrice || 0));
           const lineDisc = Math.max(0, Number(item.discountAmount || 0));
@@ -654,7 +607,7 @@ export default function Cashbook() {
         const r = getCashbookReturnBreakdown(txAny);
         const mode = String(txAny?.returnHandlingMode || '').toLowerCase();
         const payType = mode === 'store_credit' ? 'Store Credit' : r.payment === 'cash' ? 'Cash' : r.payment === 'online' ? 'Online' : r.payment === 'credit' ? 'Credit' : 'Mixed';
-        (tx.items || []).forEach((item: any, idx: number) => {
+        normalizeTransactionItems(tx.items).forEach((item: any, idx: number) => {
           const qty = Math.max(0, Number(item.quantity || 0));
           const sp = Math.max(0, Number(item.sellPrice || 0));
           const lineTotal = qty * sp;
@@ -774,38 +727,7 @@ export default function Cashbook() {
       <div className="rounded border p-3 bg-orange-50"><div>Customer/Party Receivable</div><div className="text-xl font-bold text-orange-700">{fmt(kpi.receivable)}</div></div>
       <div className="rounded border p-3 bg-rose-50"><div>Customer/Party Payable</div><div className="text-xl font-bold text-rose-700">{fmt(kpi.payable)}</div></div>
     </div>
-    <div className="rounded border border-violet-200 bg-violet-50/50 p-3 space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="font-semibold">New ERP Cashbook Compare</div>
-        <button onClick={() => setShowErpCashbookCompare((prev) => !prev)} className="border rounded px-3 h-8 text-xs bg-white">
-          {showErpCashbookCompare ? 'Hide' : 'Show'}
-        </button>
-      </div>
-      <div className="text-xs text-violet-800">Read-only comparison — does not affect production cashbook rows.</div>
-      {showErpCashbookCompare && (
-        <div className="space-y-3 text-sm">
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
-            <div className="rounded border bg-white p-2"><div className="text-[11px] text-slate-500">Legacy cashbook cash movement total</div><div className="font-semibold">{fmt(legacyCashbookCashMovementTotal)}</div></div>
-            <div className="rounded border bg-white p-2"><div className="text-[11px] text-slate-500">Ledger-derived cash movement total</div><div className="font-semibold">{fmt(erpLegacyVsLedger.cash.ledgerValue)}</div></div>
-            <div className="rounded border bg-white p-2"><div className="text-[11px] text-slate-500">Bank/online ledger movement</div><div className="font-semibold">{fmt(erpLegacyVsLedger.bank.ledgerValue)}</div></div>
-            <div className="rounded border bg-white p-2"><div className="text-[11px] text-slate-500">Delta (ledger - legacy cash)</div><div className={`font-semibold ${Math.abs(erpLegacyVsLedger.cash.delta) < 0.01 ? 'text-emerald-700' : 'text-red-700'}`}>{fmt(erpLegacyVsLedger.cash.delta)}</div></div>
-          </div>
-          <div className="rounded border bg-white p-2 text-xs text-slate-700">
-            <div>Status: <span className="uppercase font-semibold">{erpLegacyVsLedger.cash.status}</span></div>
-            <div>Legacy bank movement total: {fmt(legacyCashbookBankMovementTotal)} • Ledger bank delta: {fmt(erpLegacyVsLedger.bank.delta)}</div>
-            <div>Reasons: {erpLegacyVsLedger.cash.reasons.length ? erpLegacyVsLedger.cash.reasons.join(' • ') : 'None'}</div>
-          </div>
-          <div className="rounded border bg-white p-2 text-xs">
-            <div className="font-medium mb-1">Warnings / Ambiguities</div>
-            {erpWarningFlags.length ? (
-              <ul className="list-disc pl-5 space-y-0.5 text-slate-700">
-                {erpWarningFlags.map((flag) => <li key={flag}>{flag}</li>)}
-              </ul>
-            ) : <div className="text-slate-500">No warnings emitted.</div>}
-          </div>
-        </div>
-      )}
-    </div>
+
     <div className="rounded border p-3 space-y-3">
       <div className="flex gap-2">
         <button onClick={() => setActiveTab('ledger')} className={`border rounded px-3 h-9 ${activeTab === 'ledger' ? 'bg-slate-900 text-white' : ''}`}>Cashbook Ledger</button>

@@ -1,5 +1,0 @@
-{
-  "name": "transactions_deleted_read_v1",
-  "scope": "read_only_placeholder",
-  "notes": "Deleted transaction read shape placeholder."
-}

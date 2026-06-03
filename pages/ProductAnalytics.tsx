@@ -3,6 +3,7 @@ import { BarChart3, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
 import { loadData } from '../services/storage';
 import { exportProductAnalyticsToExcel, exportSelectedProductAnalyticsToExcel } from '../services/excel';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 import type { Customer, Product, Transaction } from '../types';
 
 type DatePreset = 'today' | '7d' | '30d' | '90d' | '1y' | 'all' | 'custom';
@@ -195,7 +196,7 @@ export default function ProductAnalytics() {
       const txDate = tx.date;
       const txDateTs = new Date(txDate).getTime();
       const sign = txType === 'return' ? -1 : 1;
-      const txItems = Array.isArray(tx.items) ? tx.items : [];
+      const txItems = normalizeTransactionItems(tx.items);
       if (!txItems.length) continue;
 
       for (const item of txItems) {

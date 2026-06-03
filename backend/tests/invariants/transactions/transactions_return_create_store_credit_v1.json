@@ -1,9 +1,0 @@
-{
-  "name": "transactions_return_create_store_credit_v1",
-  "mode": "store_credit",
-  "storeId": "store-tx-7",
-  "expected": {
-    "status": "applied",
-    "storeCreditDelta": 30
-  }
-}

@@ -1,5 +1,0 @@
-{
-  "name": "auth_token_required_v1",
-  "purpose": "Ensure protected routes reject missing or malformed bearer tokens.",
-  "status": "placeholder"
-}

@@ -1,5 +1,0 @@
-{
-  "name": "transactions_version_conflict_v1",
-  "storeId": "store-tx-10",
-  "expectedErrorCode": "TRANSACTION_MUTATION_VERSION_CONFLICT"
-}

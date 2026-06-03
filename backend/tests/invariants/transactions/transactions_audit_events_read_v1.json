@@ -1,5 +1,0 @@
-{
-  "name": "transactions_audit_events_read_v1",
-  "scope": "read_only_placeholder",
-  "notes": "Transaction audit-event read shape placeholder."
-}

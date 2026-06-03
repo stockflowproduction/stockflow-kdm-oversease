@@ -17,6 +17,7 @@ import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole,
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { auth } from '../services/firebase';
 import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
+import { normalizeTransactionItems } from '../utils/transactionItems';
 
 const toMoneyCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromMoneyCents = (value: number) => value / 100;
@@ -515,7 +516,7 @@ export default function Sales() {
 
     transactions.forEach((tx) => {
       const txCustomerId = tx.customerId || '';
-      (tx.items || []).forEach((item) => {
+      normalizeTransactionItems(tx.items).forEach((item) => {
         const key = lineKey(item.id, item.selectedVariant, item.selectedColor);
         const qty = Number(item.quantity) || 0;
         if (!qty) return;
@@ -1275,7 +1276,7 @@ export default function Sales() {
         tx.id,
         tx.customerName || '',
         customer?.phone || '',
-        ...(tx.items || []).flatMap(item => [item.name || '', item.barcode || '']),
+        ...normalizeTransactionItems(tx.items).flatMap(item => [item.name || '', item.barcode || '']),
       ].join(' ').toLowerCase();
       return haystack.includes(query);
     });
@@ -1329,7 +1330,7 @@ export default function Sales() {
       selectedSubtotal: number;
     }>;
     const rows = new Map<string, { key: string; id: string; name: string; variant: string; color: string; originalQty: number; unitPrice: number }>();
-    (selectedReturnTx.items || []).forEach(item => {
+    normalizeTransactionItems(selectedReturnTx.items).forEach(item => {
       const variant = item.selectedVariant || NO_VARIANT;
       const color = item.selectedColor || NO_COLOR;
       const key = `${item.id}__${variant}__${color}__${item.sellPrice}`;
@@ -1374,7 +1375,7 @@ export default function Sales() {
     return selectedReturnLines
       .filter(line => line.selectedQty > 0)
       .map(line => {
-        const sourceLine = (selectedReturnTx.items || []).find(item =>
+        const sourceLine = normalizeTransactionItems(selectedReturnTx.items).find(item =>
           item.id === line.id
           && (item.selectedVariant || NO_VARIANT) === line.variant
           && (item.selectedColor || NO_COLOR) === line.color
@@ -1580,7 +1581,7 @@ export default function Sales() {
                   <div />
                 </div>
                 {paginatedReturnTransactions.map((tx) => {
-                  const totalQty = (tx.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+                  const totalQty = normalizeTransactionItems(tx.items).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
                   return (
                     <div key={tx.id} className="w-full rounded-lg border bg-card px-2.5 py-2 grid gap-2 md:grid-cols-[110px_160px_minmax(0,1fr)_90px_110px_110px] items-center box-border">
                       <div className="text-xs text-muted-foreground">{new Date(tx.date).toLocaleDateString()}</div>
