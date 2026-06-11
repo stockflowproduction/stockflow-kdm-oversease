@@ -526,6 +526,16 @@ export default function PurchasePanel() {
     if (!party) return;
     setPurchaseCreditApplyError(null);
 
+    const existingOrderBeingEdited = editingOrderId ? orders.find((o) => o.id === editingOrderId) : null;
+    const hasExistingPaymentOrCreditHistory = Boolean(existingOrderBeingEdited?.paymentHistory?.some((entry) => Math.max(0, Number(entry.amount || 0)) > 0));
+    if (editingOrderId && hasExistingPaymentOrCreditHistory) {
+      // Purchase edits that touch an order with payment or party-credit history need
+      // a full accounting reversal/replay. Until that flow exists, block the edit
+      // instead of silently erasing supplier payment allocations or credit usage.
+      setPurchaseCreditApplyError('This purchase already has payment or supplier-credit history. Editing is blocked to protect the supplier ledger; reverse/recreate or add a supported recalculation flow first.');
+      return;
+    }
+
     const lines: PurchaseOrderLine[] = activeLines.map((line, idx) => ({
       id: `${line.key}-${idx}-${uid()}`,
       sourceType: sourceMode,
@@ -954,16 +964,16 @@ export default function PurchasePanel() {
                   <div className="text-xs text-muted-foreground">Contact: {p.contactPerson || '—'}</div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
                     <SummaryCard label="Total Purchase" value={`₹${formatNumber(partyFinancials.get(p.id)?.totalPurchase || 0)}`} />
-                    <SummaryCard label="Actual Payments" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.actualPayments || 0)}`} />
+                    <SummaryCard label="Total Payments" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.actualPayments || 0)}`} />
                     <SummaryCard label="Payable Applied" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.payableApplied || 0)}`} />
                   </div>
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
                     <SummaryCard label="Credit Created" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.creditCreated || partyLedgers.get(p.id)?.summary.partyCreditCreated || 0)}`} />
-                    <SummaryCard label="Credit Used" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.creditUsed || partyLedgers.get(p.id)?.summary.partyCreditUsed || 0)}`} />
-                    <SummaryCard label="Gross Payable" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.grossPayable || partyLedgers.get(p.id)?.summary.remainingPayable || 0)}`} />
+                    <SummaryCard label="Credit Applied" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.creditUsed || partyLedgers.get(p.id)?.summary.partyCreditUsed || 0)}`} />
+                    <SummaryCard label="Current Payable" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.currentPayable || partyLedgers.get(p.id)?.summary.grossPayable || partyLedgers.get(p.id)?.summary.remainingPayable || 0)}`} />
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                    <SummaryCard label="Our Credit" value={`₹${formatNumber((partyLedgers.get(p.id)?.summary.ourCredit || 0))}`} />
+                    <SummaryCard label="Current Credit" value={`₹${formatNumber((partyLedgers.get(p.id)?.summary.currentCredit || partyLedgers.get(p.id)?.summary.ourCredit || 0))}`} />
                     <SummaryCard label="Net Payable" value={`₹${formatNumber(partyLedgers.get(p.id)?.summary.netPayable || 0)}`} />
                   </div>
                   <div className="mt-2">
@@ -992,23 +1002,22 @@ export default function PurchasePanel() {
                     <thead className="bg-slate-50">
                       <tr>
                         <th className="p-2 text-left">Date</th><th className="p-2 text-left">Type</th><th className="p-2 text-left">Reference</th><th className="p-2 text-left">Description</th>
-                        <th className="p-2 text-right">Purchase / Payable +</th><th className="p-2 text-right">Actual Payment</th><th className="p-2 text-right">Payable Applied</th><th className="p-2 text-right">Credit Created</th><th className="p-2 text-right">Credit Used</th><th className="p-2 text-right">Gross Payable</th><th className="p-2 text-right">Our Credit</th><th className="p-2 text-right">Net Payable</th>
+                        <th className="p-2 text-right">Purchase +</th><th className="p-2 text-right">Payment -</th><th className="p-2 text-right">Credit Applied</th><th className="p-2 text-right">Credit Created</th><th className="p-2 text-right">Running Payable</th><th className="p-2 text-right">Running Credit</th><th className="p-2 text-right">Net Payable</th>
                       </tr>
                     </thead>
                     <tbody>
                       {partyLedgerRows.map((row, idx) => (
                         <tr key={`${row.reference}-${idx}`} className="border-t">
                           <td className="p-2">{row.date ? new Date(row.date).toLocaleDateString('en-GB') : '—'}</td>
-                          <td className="p-2">{{ purchase: 'Purchase Created', supplier_payment: 'Supplier Payment', credit_used: 'Credit Used', legacy_payment: 'Legacy Payment', reversal: 'Reversal' }[row.type] || row.type || '—'}</td>
+                          <td className="p-2">{{ purchase: 'Purchase', supplier_payment: 'Payment', credit_used: 'Credit Applied', legacy_payment: 'Payment', edit_credit: 'Adjustment', reversal: 'Adjustment' }[row.type] || row.type || '—'}</td>
                           <td className="p-2">{row.reference || '—'}</td>
                           <td className="p-2">{row.description || '—'}</td>
-                          <td className="p-2 text-right">{row.payableIncrease ? `₹${formatNumber(row.payableIncrease)}` : '—'}</td>
-                          <td className="p-2 text-right">{row.actualPayment ? `₹${formatNumber(row.actualPayment)}` : '—'}</td>
-                          <td className="p-2 text-right">{row.payableApplied ? `₹${formatNumber(row.payableApplied)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.purchaseAmount ? `₹${formatNumber(row.purchaseAmount)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.paymentAmount ? `₹${formatNumber(row.paymentAmount)}` : '—'}</td>
+                          <td className="p-2 text-right">{row.creditApplied ? `₹${formatNumber(row.creditApplied)}` : '—'}</td>
                           <td className="p-2 text-right">{row.creditCreated ? `₹${formatNumber(row.creditCreated)}` : '—'}</td>
-                          <td className="p-2 text-right">{row.creditUsed ? `₹${formatNumber(row.creditUsed)}` : '—'}</td>
-                          <td className="p-2 text-right">₹{formatNumber((row.grossPayable ?? row.runningGrossPayable ?? row.runningPayable) || 0)}</td>
-                          <td className="p-2 text-right">₹{formatNumber((row.ourCredit ?? row.runningOurCredit ?? row.runningCredit) || 0)}</td>
+                          <td className="p-2 text-right">₹{formatNumber((row.runningPayable ?? row.grossPayable ?? row.runningGrossPayable) || 0)}</td>
+                          <td className="p-2 text-right">₹{formatNumber((row.runningCredit ?? row.ourCredit ?? row.runningOurCredit) || 0)}</td>
                           <td className="p-2 text-right font-semibold">₹{formatNumber((row.netPayable ?? row.runningNetPayable) || 0)}</td>
                         </tr>
                       ))}
@@ -1532,7 +1541,7 @@ export default function PurchasePanel() {
           <div className="text-sm">Party: <span className="font-semibold">{paymentTargetParty?.name || '—'}</span></div>
           <div className="grid grid-cols-3 gap-2">
             <SummaryCard label="Payable" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0)))}`} />
-            <SummaryCard label="Our Credit" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
+            <SummaryCard label="Current Credit" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
             <SummaryCard label="Net Payable" value={`₹${formatNumber(Math.max(0, Number(paymentTargetParty ? (partyFinancials.get(paymentTargetParty.id)?.remaining || 0) : 0) - Number(paymentTargetParty ? (partyCreditsByPartyId.get(paymentTargetParty.id) || 0) : 0)))}`} />
           </div>
           <div><Label>Amount</Label><Input type="number" value={partialPaymentAmount} onChange={e => setPartialPaymentAmount(e.target.value === '' ? '' : Number(e.target.value))} /></div>

@@ -4,7 +4,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Customer, Transaction, Product, UpfrontOrder } from '../types';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, getCustomerCompositeReceivableBreakdown, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction, auditCustomerPaymentAllocations, previewCustomerRepairedAllocationView } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalReturnAllocation, allocateCustomerPaymentAgainstCompositeReceivable, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData, processTransaction, deleteCustomer, addCustomer, addUpfrontOrder, updateUpfrontOrder, collectUpfrontPayment, updateCustomer, updateTransaction, auditCustomerPaymentAllocations, previewCustomerRepairedAllocationView, applyCustomerLedgerBalanceSnapshotPatch } from '../services/storage';
 import { generateAccountStatementPDF, generateReceiptPDF } from '../services/pdf';
 import { shareCustomerLedgerViaWhatsApp } from '../services/whatsappShare';
 import { appendWhatsAppLog } from '../services/whatsappLogs';
@@ -19,9 +19,12 @@ import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileT
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
 import { getPaymentStatusColorClass } from '../utils_paymentStatusStyles';
 import { normalizeTransactionItems } from '../utils/transactionItems';
+import { analyzeCustomerLedgerBalances, buildCorrectCustomerLedgerPreview, repairCustomerLedgerBalancesDryRun } from '../services/customerLedger';
 
 const normalizePhone = (v?: string) => String(v || '').replace(/\D/g, '');
 const normalizeName = (v?: string) => String(v || '').trim().toLowerCase();
+const roundCorrectPreviewMoney = (value: number) => Math.round(value * 100) / 100;
+const customerNetReceivable = (customer: Pick<Customer, 'totalDue' | 'storeCredit'>) => Math.max(0, Number(customer.totalDue || 0) - Math.max(0, Number(customer.storeCredit || 0)));
 const detectHistoricalTransactionType = (tx: Transaction): 'sale' | 'return' | 'payment' | 'customer_credit' | 'customer_cash_out' | 'unknown' => {
   const t = String((tx as any)?.type || '').toLowerCase();
   if (t === 'sale' || t === 'return' || t === 'payment' || t === 'customer_credit' || t === 'customer_cash_out') return t as any;
@@ -48,6 +51,9 @@ const getTransactionProductSummary = (tx: Transaction, maxItems = 2): string => 
   const shown = unique.slice(0, maxItems).join(', ');
   return unique.length > maxItems ? `${shown} +${unique.length - maxItems} more` : shown;
 };
+
+
+
 export default function Customers() {
   const CUSTOMERS_PAGE_SIZE = 15;
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -128,6 +134,11 @@ export default function Customers() {
   const [paymentAuditResult, setPaymentAuditResult] = useState<ReturnType<typeof auditCustomerPaymentAllocations> | null>(null);
   const [updatedViewOpen, setUpdatedViewOpen] = useState(false);
   const [updatedViewPreview, setUpdatedViewPreview] = useState<ReturnType<typeof previewCustomerRepairedAllocationView> | null>(null);
+  const [showCorrectLedgerView, setShowCorrectLedgerView] = useState(false);
+  const [expandedCorrectCustomerIds, setExpandedCorrectCustomerIds] = useState<string[]>([]);
+  const [selectedCustomerLedgerPatchIds, setSelectedCustomerLedgerPatchIds] = useState<string[]>([]);
+  const [customerLedgerApplyStatus, setCustomerLedgerApplyStatus] = useState<{ applied: number; skipped: number; failed: number } | null>(null);
+  const [customerLedgerApplyError, setCustomerLedgerApplyError] = useState<string | null>(null);
   const [customerActionType, setCustomerActionType] = useState<'payment' | 'customer_cash_out' | 'customer_credit'>('payment');
   const [customerActionDateTime, setCustomerActionDateTime] = useState('');
   const [customerActionAmount, setCustomerActionAmount] = useState('');
@@ -180,23 +191,7 @@ export default function Customers() {
     return sorted[index].totalSpend;
   }, [customers]);
 
-  const canonicalBalanceSnapshot = useMemo(() => {
-    const snapshot = getCanonicalCustomerBalanceSnapshot(customers, transactions);
-    return snapshot;
-  }, [customers, transactions]);
-
-  const canonicalCustomers = useMemo(() => (
-    (() => {
-      return customers.map((customer) => {
-        const composite = getCustomerCompositeReceivableBreakdown(customer.id, customers, transactions, upfrontOrders);
-        return {
-          ...customer,
-          totalDue: composite.totalDue,
-          storeCredit: composite.storeCredit,
-        };
-      });
-    })()
-  ), [customers, canonicalBalanceSnapshot, transactions, upfrontOrders]);
+  const canonicalCustomers = useMemo(() => customers, [customers]);
 
   const filteredData = useMemo(() => {
     let processed = [...canonicalCustomers];
@@ -210,7 +205,7 @@ export default function Customers() {
     }
     
     if (filterType === 'has_due') {
-        processed = processed.filter(c => c.totalDue > 0);
+        processed = processed.filter(c => customerNetReceivable(c) > 0);
     } else if (filterType === 'high_value') {
         processed = processed.filter(c => c.totalSpend >= highValueThreshold && c.totalSpend > 0);
     }
@@ -218,12 +213,12 @@ export default function Customers() {
     processed.sort((a, b) => {
         let valA, valB;
         if (sortBy === 'spend') { valA = a.totalSpend; valB = b.totalSpend; }
-        else if (sortBy === 'due') { valA = a.totalDue; valB = b.totalDue; }
+        else if (sortBy === 'due') { valA = customerNetReceivable(a); valB = customerNetReceivable(b); }
         else { valA = new Date(a.lastVisit).getTime(); valB = new Date(b.lastVisit).getTime(); }
         return sortOrder === 'asc' ? valA - valB : valB - valA;
     });
 
-    const totalDues = processed.reduce((acc, c) => acc + (c.totalDue || 0), 0);
+    const totalDues = processed.reduce((acc, c) => acc + customerNetReceivable(c), 0);
     return { displayCustomers: processed, totalDues, totalCount: processed.length };
   }, [canonicalCustomers, searchQuery, filterType, sortBy, sortOrder, highValueThreshold]);
   const customerTotalPages = Math.max(1, Math.ceil(filteredData.displayCustomers.length / CUSTOMERS_PAGE_SIZE));
@@ -231,6 +226,127 @@ export default function Customers() {
     () => filteredData.displayCustomers.slice((customerPage - 1) * CUSTOMERS_PAGE_SIZE, customerPage * CUSTOMERS_PAGE_SIZE),
     [filteredData.displayCustomers, customerPage]
   );
+
+  const correctCustomerLedgerPreviews = useMemo(() => {
+    return customers.map((customer) => buildCorrectCustomerLedgerPreview(customer, transactions, upfrontOrders));
+  }, [customers, transactions, upfrontOrders]);
+
+  const filteredCorrectCustomerLedgerPreviews = useMemo(() => {
+    const lowerQ = searchQuery.trim().toLowerCase();
+    return correctCustomerLedgerPreviews
+      .filter((preview) => {
+        const customer = preview.customer;
+        if (!lowerQ) return true;
+        return customer.name.toLowerCase().includes(lowerQ) || customer.phone.includes(lowerQ);
+      })
+      .sort((a, b) => Math.abs(b.summary.difference) - Math.abs(a.summary.difference) || b.warnings.length - a.warnings.length || a.customer.name.localeCompare(b.customer.name));
+  }, [correctCustomerLedgerPreviews, searchQuery]);
+
+  const correctLedgerViewSummary = useMemo(() => {
+    return filteredCorrectCustomerLedgerPreviews.reduce((summary, preview) => ({
+      totalStoredReceivable: roundCorrectPreviewMoney(summary.totalStoredReceivable + preview.summary.storedNetReceivable),
+      totalCorrectedReceivable: roundCorrectPreviewMoney(summary.totalCorrectedReceivable + preview.summary.correctedNetReceivable),
+      totalDifference: roundCorrectPreviewMoney(summary.totalDifference + preview.summary.difference),
+      customersWithDifferences: summary.customersWithDifferences + (Math.abs(preview.summary.difference) > 0.01 ? 1 : 0),
+      historicalPaymentsCorrected: summary.historicalPaymentsCorrected + preview.summary.historicalPaymentsCorrected,
+      warningsCount: summary.warningsCount + preview.warnings.length,
+    }), { totalStoredReceivable: 0, totalCorrectedReceivable: 0, totalDifference: 0, customersWithDifferences: 0, historicalPaymentsCorrected: 0, warningsCount: 0 });
+  }, [filteredCorrectCustomerLedgerPreviews]);
+
+  const customerLedgerBalanceAnalysis = useMemo(() => (
+    analyzeCustomerLedgerBalances({ customers, transactions, upfrontOrders })
+  ), [customers, transactions, upfrontOrders]);
+
+  const customerLedgerBalanceDryRun = useMemo(() => (
+    repairCustomerLedgerBalancesDryRun({ customers, transactions, upfrontOrders })
+  ), [customers, transactions, upfrontOrders]);
+
+  const downloadCustomerLedgerDryRunJson = () => {
+    const payload = JSON.stringify(customerLedgerBalanceDryRun, null, 2);
+    const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `customer-ledger-balance-dry-run-${new Date().toISOString().split('T')[0]}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
+  const safeCustomerLedgerPatches = useMemo(() => (
+    customerLedgerBalanceDryRun.patches.filter((patch) => patch.safeToApplySnapshot)
+  ), [customerLedgerBalanceDryRun]);
+
+  const customerLedgerPatchById = useMemo(() => (
+    new Map(customerLedgerBalanceDryRun.patches.map((patch) => [patch.id, patch]))
+  ), [customerLedgerBalanceDryRun]);
+
+  const downloadCustomerLedgerRollbackJson = (patchesToApply: typeof customerLedgerBalanceDryRun.patches) => {
+    const rollback = {
+      generatedAt: new Date().toISOString(),
+      note: 'Rollback snapshot before applying corrected customer balance snapshots. Transactions were not modified.',
+      customers: patchesToApply.map((patch) => ({
+        id: patch.id,
+        customerName: patch.customerName,
+        totalDue: patch.before.totalDue,
+        storeCredit: patch.before.storeCredit,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(rollback, null, 2)], { type: 'application/json;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `customer-ledger-rollback-${new Date().toISOString().split('T')[0]}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
+  const toggleCustomerLedgerPatchSelected = (customerId: string) => {
+    setSelectedCustomerLedgerPatchIds((prev) => prev.includes(customerId) ? prev.filter((id) => id !== customerId) : [...prev, customerId]);
+  };
+
+  const applyCustomerLedgerPatches = async (mode: 'selected' | 'all_safe') => {
+    const selectedSet = new Set(selectedCustomerLedgerPatchIds);
+    const candidates = mode === 'all_safe'
+      ? safeCustomerLedgerPatches
+      : safeCustomerLedgerPatches.filter((patch) => selectedSet.has(patch.id));
+
+    if (!candidates.length) {
+      setCustomerLedgerApplyError(mode === 'selected' ? 'Select at least one safe customer snapshot patch.' : 'No safe customer snapshot patches are available.');
+      return;
+    }
+
+    const confirmed = window.confirm(`This will update ${candidates.length} customer balance snapshots only. Transactions will not be changed.`);
+    if (!confirmed) return;
+
+    downloadCustomerLedgerRollbackJson(candidates);
+    setCustomerLedgerApplyError(null);
+    let applied = 0;
+    let failed = 0;
+
+    for (const patch of candidates) {
+      try {
+        await applyCustomerLedgerBalanceSnapshotPatch({
+          id: patch.id,
+          totalDue: patch.after.totalDue,
+          storeCredit: patch.after.storeCredit,
+          customerLedgerRecalculatedAt: new Date().toISOString(),
+          customerLedgerRecalculationVersion: patch.after.ledgerRecalculationVersion,
+          customerLedgerRecalculationSource: 'customer_balance_reconciliation_panel',
+        });
+        applied += 1;
+      } catch (error) {
+        failed += 1;
+        console.error('[customers.customerLedgerApply] Failed to apply customer snapshot patch', { customerId: patch.id, error });
+      }
+    }
+
+    const skipped = customerLedgerBalanceDryRun.patches.length - applied - failed;
+    setCustomerLedgerApplyStatus({ applied, skipped, failed });
+    setSelectedCustomerLedgerPatchIds((prev) => prev.filter((id) => !candidates.some((patch) => patch.id === id)));
+    refreshData();
+  };
+
+  const toggleCorrectCustomerExpanded = (customerId: string) => {
+    setExpandedCorrectCustomerIds((prev) => prev.includes(customerId) ? prev.filter((id) => id !== customerId) : [...prev, customerId]);
+  };
 
   useEffect(() => {
     setCustomerPage(1);
@@ -746,9 +862,16 @@ export default function Customers() {
       doc.setFillColor(15, 23, 42); doc.rect(0, 0, pageWidth, 40, 'F');
       doc.setFontSize(20); doc.setTextColor(255, 255, 255); doc.text("Customer Dues Report", 14, 20);
       doc.setFontSize(10); doc.setTextColor(203, 213, 225); doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 26);
-      const tableBody = filteredData.displayCustomers.map(c => [c.name, c.phone, `Rs.${formatMoneyWhole(c.totalSpend)}`, `Rs.${formatMoneyWhole(c.totalDue)}`]);
-      tableBody.push(['TOTAL', '', '', `Rs.${formatMoneyWhole(filteredData.totalDues)}`]);
-      autoTable(doc, { startY: 50, head: [['Name', 'Phone', 'Total Spend', 'Current Due']], body: tableBody, theme: 'striped', columnStyles: { 3: { halign: 'right', fontStyle: 'bold', textColor: [220, 38, 38] } } });
+      const tableBody = filteredData.displayCustomers.map(c => [
+        c.name,
+        c.phone,
+        `Rs.${formatMoneyWhole(c.totalSpend)}`,
+        `Rs.${formatMoneyWhole(c.totalDue)}`,
+        `Rs.${formatMoneyWhole(c.storeCredit || 0)}`,
+        `Rs.${formatMoneyWhole(customerNetReceivable(c))}`,
+      ]);
+      tableBody.push(['TOTAL', '', '', '', '', `Rs.${formatMoneyWhole(filteredData.totalDues)}`]);
+      autoTable(doc, { startY: 50, head: [['Name', 'Phone', 'Total Spend', 'Current Due', 'Store Credit', 'Net Receivable']], body: tableBody, theme: 'striped', columnStyles: { 5: { halign: 'right', fontStyle: 'bold', textColor: [220, 38, 38] } } });
       doc.save(`Customer_Dues_Report.pdf`);
   };
 
@@ -800,7 +923,7 @@ export default function Customers() {
           if (format === 'pdf') {
               generateAllCustomersPDF();
           } else {
-              exportCustomersToExcel(filteredData.displayCustomers);
+              exportCustomersToExcel(filteredData.displayCustomers.map((customer) => ({ ...customer, totalDue: customerNetReceivable(customer) })));
           }
       } else if (exportType === 'invoice' && txToExport) {
           if (format === 'pdf') {
@@ -814,7 +937,7 @@ export default function Customers() {
   return (
     <div className="space-y-6 pb-24 md:pb-0 relative">
       {waSendingStage && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div className="corrected inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="rounded-lg bg-background p-4 shadow-lg min-w-[280px]">
             <p className="text-sm font-medium mb-2">{waSendingStage}</p>
             <div className="h-2 w-full rounded bg-muted overflow-hidden"><div className="h-full w-2/3 animate-pulse bg-primary" /></div>
@@ -849,6 +972,14 @@ export default function Customers() {
                   <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={() => setIsImportModalOpen(true)}>Upload Existing File</Button>
                   <Button onClick={() => setIsAddModalOpen(true)} size="sm" className="h-8 md:h-9 bg-primary shadow-sm">
                       <Plus className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Add Customer</span>
+                  </Button>
+                  <Button
+                      onClick={() => setShowCorrectLedgerView((prev) => !prev)}
+                      variant={showCorrectLedgerView ? 'default' : 'outline'}
+                      size="sm"
+                      className="h-8 md:h-9 shadow-sm"
+                  >
+                      <Activity className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Correct Ledger View</span>
                   </Button>
                   <Button onClick={() => { setExportType('dues_report'); setIsExportModalOpen(true); }} variant="outline" size="sm" className="h-8 md:h-9 shadow-sm">
                       <FileText className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Dues Report</span>
@@ -891,6 +1022,212 @@ export default function Customers() {
 
 
 
+      {showCorrectLedgerView ? (
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-4 shadow-sm">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Activity className="h-5 w-5 text-blue-700" />
+                  <h2 className="text-lg font-black text-blue-950">Correct Ledger View</h2>
+                  <Badge className="bg-blue-100 text-blue-800">Read-only preview</Badge>
+                </div>
+                <p className="mt-1 text-xs text-blue-900/80">Uses referenceTransactionType for historical rows in a separate chronological receivable replay. It does not save, repair, migrate, or update customer data.</p>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3 xl:grid-cols-6">
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored Receivable</div><div className="font-black">₹{formatMoneyWhole(correctLedgerViewSummary.totalStoredReceivable)}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Corrected Receivable</div><div className="font-black text-blue-700">₹{formatMoneyWhole(correctLedgerViewSummary.totalCorrectedReceivable)}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Difference</div><div className={`font-black ${correctLedgerViewSummary.totalDifference === 0 ? 'text-slate-700' : correctLedgerViewSummary.totalDifference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(correctLedgerViewSummary.totalDifference)}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Customers Diff</div><div className="font-black text-amber-700">{correctLedgerViewSummary.customersWithDifferences}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Hist Payments</div><div className="font-black text-purple-700">{correctLedgerViewSummary.historicalPaymentsCorrected}</div></div>
+                <div className="rounded-xl border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Warnings</div><div className="font-black text-red-700">{correctLedgerViewSummary.warningsCount}</div></div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-amber-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <AlertCircle className="h-4 w-4 text-amber-700" />
+                  <h3 className="font-black text-slate-900">Customer Balance Reconciliation</h3>
+                  <Badge className="bg-amber-100 text-amber-800">Dry-run only</Badge>
+                </div>
+                <p className="mt-1 max-w-3xl text-xs text-slate-600">Compares stored customer.totalDue/storeCredit against the canonical replay. Apply actions update customer balance snapshot fields only; transactions are never changed.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={downloadCustomerLedgerDryRunJson} className="shrink-0">
+                  <Download className="mr-2 h-4 w-4" /> Download Dry-run JSON
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setSelectedCustomerLedgerPatchIds(safeCustomerLedgerPatches.map((patch) => patch.id))} className="shrink-0">
+                  Select Safe
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => applyCustomerLedgerPatches('selected')} className="shrink-0" disabled={selectedCustomerLedgerPatchIds.length === 0}>
+                  Apply Selected
+                </Button>
+                <Button size="sm" onClick={() => applyCustomerLedgerPatches('all_safe')} className="shrink-0" disabled={safeCustomerLedgerPatches.length === 0}>
+                  Apply All Safe
+                </Button>
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs md:grid-cols-4 xl:grid-cols-7">
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Customers</div><div className="font-black">{customerLedgerBalanceAnalysis.totalCustomers}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Affected</div><div className="font-black text-amber-700">{customerLedgerBalanceAnalysis.affectedCustomers}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored Due</div><div className="font-black">₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalStoredDue)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Corrected Due</div><div className="font-black text-blue-700">₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalCorrectedDue)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Difference</div><div className={`font-black ${customerLedgerBalanceAnalysis.totalDifference === 0 ? 'text-slate-700' : customerLedgerBalanceAnalysis.totalDifference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalDifference)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Warnings</div><div className="font-black text-red-700">{customerLedgerBalanceAnalysis.totalWarnings}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Dry-run Patches</div><div className="font-black text-purple-700">{customerLedgerBalanceDryRun.patches.length}</div></div>
+            </div>
+            {customerLedgerApplyStatus && (
+              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                Applied: <b>{customerLedgerApplyStatus.applied}</b> • Skipped: <b>{customerLedgerApplyStatus.skipped}</b> • Failed: <b>{customerLedgerApplyStatus.failed}</b>
+              </div>
+            )}
+            {customerLedgerApplyError && (
+              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800">{customerLedgerApplyError}</div>
+            )}
+            {customerLedgerBalanceDryRun.blocked.length > 0 && (
+              <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                {customerLedgerBalanceDryRun.blocked.length} customer(s) are blocked because they have unknown historical rows or unsafe warnings. They are skipped by Apply All Safe.
+              </div>
+            )}
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full min-w-[860px] text-xs">
+                <thead className="bg-slate-50 text-slate-600">
+                  <tr>
+                    <th className="p-2 text-left">Apply</th>
+                    <th className="p-2 text-left">Customer</th>
+                    <th className="p-2 text-right">Stored Due</th>
+                    <th className="p-2 text-right">Corrected Due</th>
+                    <th className="p-2 text-right">Difference</th>
+                    <th className="p-2 text-right">Stored Credit</th>
+                    <th className="p-2 text-right">Corrected Credit</th>
+                    <th className="p-2 text-right">Warnings</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {customerLedgerBalanceAnalysis.issues.slice(0, 12).map((issue) => {
+                    const patch = customerLedgerPatchById.get(issue.customerId);
+                    const canApply = Boolean(patch?.safeToApplySnapshot);
+                    return (
+                    <tr key={issue.customerId} className="border-t">
+                      <td className="p-2"><input type="checkbox" disabled={!canApply} checked={selectedCustomerLedgerPatchIds.includes(issue.customerId)} onChange={() => toggleCustomerLedgerPatchSelected(issue.customerId)} /></td>
+                      <td className="p-2 font-semibold">{issue.customerName}</td>
+                      <td className="p-2 text-right">₹{formatMoneyWhole(issue.storedDue)}</td>
+                      <td className="p-2 text-right text-blue-700">₹{formatMoneyWhole(issue.correctedDue)}</td>
+                      <td className={`p-2 text-right font-bold ${issue.difference === 0 ? 'text-slate-600' : issue.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(issue.difference)}</td>
+                      <td className="p-2 text-right">₹{formatMoneyWhole(issue.storedStoreCredit)}</td>
+                      <td className="p-2 text-right text-emerald-700">₹{formatMoneyWhole(issue.correctedStoreCredit)}</td>
+                      <td className="p-2 text-right">{issue.warningCount}</td>
+                    </tr>
+                    );
+                  })}
+                  {customerLedgerBalanceAnalysis.issues.length === 0 && (
+                    <tr><td colSpan={8} className="p-3 text-center text-muted-foreground">No stored-vs-corrected balance differences detected.</td></tr>
+                  )}
+                </tbody>
+              </table>
+              {customerLedgerBalanceAnalysis.issues.length > 12 && <div className="mt-2 text-xs text-muted-foreground">Showing first 12 issues. Download JSON for the full dry-run.</div>}
+            </div>
+          </div>
+
+          {filteredCorrectCustomerLedgerPreviews.length === 0 ? (
+            <div className="rounded-xl border bg-white p-6 text-center text-sm text-muted-foreground">No customers match the current search.</div>
+          ) : filteredCorrectCustomerLedgerPreviews.map((preview) => {
+            const expanded = expandedCorrectCustomerIds.includes(preview.customer.id);
+            return (
+              <Card key={preview.customer.id} className="overflow-hidden border-slate-200 shadow-sm">
+                <CardHeader className="bg-white pb-3">
+                  <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                    <div className="min-w-0">
+                      <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+                        <span>{preview.customer.name}</span>
+                        {preview.warnings.length > 0 && <Badge className="bg-amber-100 text-amber-800">{preview.warnings.length} warning{preview.warnings.length === 1 ? '' : 's'}</Badge>}
+                      </CardTitle>
+                      <div className="mt-1 text-xs text-muted-foreground">{preview.customer.phone || 'No phone'} • Difference: <span className={preview.summary.difference === 0 ? 'text-slate-700' : preview.summary.difference > 0 ? 'text-red-700 font-bold' : 'text-emerald-700 font-bold'}>₹{formatMoneyWhole(preview.summary.difference)}</span></div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4 xl:grid-cols-8">
+                      <div className="rounded-lg border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored Due</div><b>₹{formatMoneyWhole(preview.summary.storedCurrentDue)}</b></div>
+                      <div className="rounded-lg border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored SC</div><b>₹{formatMoneyWhole(preview.summary.storedStoreCredit)}</b></div>
+                      <div className="rounded-lg border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored Net</div><b>₹{formatMoneyWhole(preview.summary.storedNetReceivable)}</b></div>
+                      <div className="rounded-lg border bg-blue-50 p-2"><div className="text-[10px] uppercase text-blue-700">Corrected Due</div><b className="text-blue-800">₹{formatMoneyWhole(preview.summary.correctedCurrentDue)}</b></div>
+                      <div className="rounded-lg border bg-emerald-50 p-2"><div className="text-[10px] uppercase text-emerald-700">Corrected SC</div><b className="text-emerald-800">₹{formatMoneyWhole(preview.summary.correctedStoreCredit)}</b></div>
+                      <div className="rounded-lg border bg-indigo-50 p-2"><div className="text-[10px] uppercase text-indigo-700">Corrected Net</div><b className="text-indigo-800">₹{formatMoneyWhole(preview.summary.correctedNetReceivable)}</b></div>
+                      <div className="rounded-lg border bg-amber-50 p-2"><div className="text-[10px] uppercase text-amber-700">Warnings</div><b className="text-amber-800">{preview.warnings.length}</b></div>
+                      <Button size="sm" variant="outline" className="h-full min-h-12" onClick={() => toggleCorrectCustomerExpanded(preview.customer.id)}>{expanded ? 'Hide Ledger' : 'Show Ledger'}</Button>
+                    </div>
+                  </div>
+                  {preview.warnings.length > 0 && (
+                    <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                      <div className="font-black uppercase tracking-wide">Review notes</div>
+                      <ul className="mt-1 list-disc space-y-1 pl-4">
+                        {preview.warnings.slice(0, 4).map((warning, idx) => <li key={`${warning.code}-${warning.transactionId || idx}`}>{warning.message}</li>)}
+                        {preview.warnings.length > 4 && <li>{preview.warnings.length - 4} more warning(s) in expanded ledger.</li>}
+                      </ul>
+                    </div>
+                  )}
+                </CardHeader>
+                {expanded && (
+                  <CardContent className="border-t bg-slate-50/50 p-0">
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[1620px] text-xs">
+                        <thead className="bg-slate-100 text-slate-700">
+                          <tr>
+                            <th className="p-2 text-left">Date</th>
+                            <th className="p-2 text-left">Effective Type</th>
+                            <th className="p-2 text-left">Original Type</th>
+                            <th className="p-2 text-left">Reference Type</th>
+                            <th className="p-2 text-left">Ref</th>
+                            <th className="p-2 text-left">Description</th>
+                            <th className="p-2 text-right">Sale Total</th>
+                            <th className="p-2 text-right">Paid Now</th>
+                            <th className="p-2 text-right">Credit Due</th>
+                            <th className="p-2 text-right">Payment Received</th>
+                            <th className="p-2 text-right">Return</th>
+                            <th className="p-2 text-right">Store Credit Used</th>
+                            <th className="p-2 text-right">Store Credit Created</th>
+                            <th className="p-2 text-right">Receivable Impact</th>
+                            <th className="p-2 text-right">Running Due</th>
+                            <th className="p-2 text-right">Running Store Credit</th>
+                            <th className="p-2 text-right">Net Receivable</th>
+                            <th className="p-2 text-left">Warnings</th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white">
+                          {preview.rows.map((row) => (
+                            <tr key={row.id} className={`border-t align-top ${row.warnings.length ? 'bg-amber-50/50' : ''}`}>
+                              <td className="p-2 whitespace-nowrap">{new Date(row.date).toLocaleDateString()}</td>
+                              <td className="p-2 whitespace-nowrap"><Badge className="bg-slate-100 text-slate-700">{row.effectiveType}</Badge></td>
+                              <td className="p-2 whitespace-nowrap">{row.originalType || '—'}</td>
+                              <td className="p-2 whitespace-nowrap">{row.referenceType || '—'}</td>
+                              <td className="p-2 whitespace-nowrap">{row.ref}</td>
+                              <td className="p-2 min-w-[220px]">{row.description}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.saleTotal ? `₹${formatMoneyWhole(row.saleTotal)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.paidNow ? `₹${formatMoneyWhole(row.paidNow)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.creditDue ? `₹${formatMoneyWhole(row.creditDue)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.paymentReceived ? `₹${formatMoneyWhole(row.paymentReceived)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.returnAmount ? `₹${formatMoneyWhole(row.returnAmount)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.storeCreditUsed ? `₹${formatMoneyWhole(row.storeCreditUsed)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap">{row.storeCreditCreated ? `₹${formatMoneyWhole(row.storeCreditCreated)}` : '—'}</td>
+                              <td className={`p-2 text-right whitespace-nowrap font-bold ${row.receivableImpact < 0 ? 'text-emerald-700' : row.receivableImpact > 0 ? 'text-orange-700' : 'text-slate-500'}`}>{row.receivableImpact ? `₹${formatMoneyWhole(row.receivableImpact)}` : '—'}</td>
+                              <td className="p-2 text-right whitespace-nowrap font-semibold">₹{formatMoneyWhole(row.runningDue)}</td>
+                              <td className="p-2 text-right whitespace-nowrap font-semibold text-emerald-700">₹{formatMoneyWhole(row.runningStoreCredit)}</td>
+                              <td className="p-2 text-right whitespace-nowrap font-black text-blue-700">₹{formatMoneyWhole(row.netReceivable)}</td>
+                              <td className="p-2 min-w-[220px] text-amber-800">{row.warnings.length ? row.warnings.map((warning) => <div key={warning}>• {warning}</div>) : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </CardContent>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      ) : (
+        <>
       <div className="border rounded-xl overflow-x-auto bg-white">
         <table className="w-full text-sm">
           <thead className="bg-muted/40">
@@ -966,9 +1303,11 @@ export default function Customers() {
           <Button variant="outline" size="sm" onClick={() => setCustomerPage((prev) => Math.min(customerTotalPages, prev + 1))} disabled={customerPage === customerTotalPages}>Next</Button>
         </div>
       )}
+        </>
+      )}
 
       {isAddModalOpen && (
-          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <div className="corrected inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
               <Card className="w-full max-w-sm shadow-2xl animate-in zoom-in duration-300">
                   <CardHeader className="flex flex-row justify-between items-center border-b pb-4">
                       <CardTitle className="text-lg">New Customer</CardTitle>
@@ -1005,7 +1344,7 @@ export default function Customers() {
       )}
 
       {editingCustomer && (
-          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <div className="corrected inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
               <Card className="w-full max-w-sm shadow-2xl animate-in zoom-in duration-300">
                   <CardHeader className="flex flex-row justify-between items-center border-b pb-4">
                       <CardTitle className="text-lg">
@@ -1050,7 +1389,7 @@ export default function Customers() {
       )}
 
       {viewingCustomer && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center sm:p-4">
+          <div className="corrected inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center sm:p-4">
               <Card className="w-full h-[95vh] sm:h-[85vh] sm:max-w-lg flex flex-col rounded-t-2xl sm:rounded-xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-10">
                   <CardHeader className="border-b pb-4 bg-muted/5">
                       <div className="flex justify-between items-start">
@@ -1288,7 +1627,7 @@ export default function Customers() {
           </div>
       )}
       {editingCustomerTx && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 p-4">
+        <div className="corrected inset-0 z-[120] flex items-center justify-center bg-black/70 p-4">
           <Card className="w-full max-w-md">
             <CardHeader>
               <CardTitle>Edit Customer Payment</CardTitle>
@@ -1309,7 +1648,7 @@ export default function Customers() {
       )}
 
       {customerActionModalOpen && viewingCustomer && (
-        <div className="fixed inset-0 bg-black/80 z-[70] flex items-center justify-center p-4 backdrop-blur-sm">
+        <div className="corrected inset-0 bg-black/80 z-[70] flex items-center justify-center p-4 backdrop-blur-sm">
           <Card className="w-full max-w-md">
             <CardHeader><CardTitle>+ Transaction — {viewingCustomer.name}</CardTitle></CardHeader>
             <CardContent className="space-y-3">
@@ -1335,7 +1674,7 @@ export default function Customers() {
       )}
 
       {paymentAuditOpen && viewingCustomer && paymentAuditResult && (
-        <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-4">
+        <div className="corrected inset-0 bg-black/70 z-[80] flex items-center justify-center p-4">
           <Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
             <CardHeader className="border-b">
               <CardTitle>Customer Payment Allocation Audit</CardTitle>
@@ -1392,7 +1731,7 @@ export default function Customers() {
       )}
 
       {updatedViewOpen && viewingCustomer && updatedViewPreview && (
-        <div className="fixed inset-0 bg-black/70 z-[80] flex items-center justify-center p-4">
+        <div className="corrected inset-0 bg-black/70 z-[80] flex items-center justify-center p-4">
           <Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col">
             <CardHeader className="border-b">
               <CardTitle>Updated Customer Balance Preview</CardTitle>
@@ -1467,7 +1806,7 @@ export default function Customers() {
       )}
 
       {isDeleteModalOpen && viewingCustomer && (
-          <div className="fixed inset-0 bg-black/80 z-[70] flex items-center justify-center p-4">
+          <div className="corrected inset-0 bg-black/80 z-[70] flex items-center justify-center p-4">
               <Card className="w-full max-w-sm border-t-4 border-t-destructive shadow-2xl animate-in zoom-in">
                   <CardHeader><CardTitle className="text-destructive flex items-center gap-2"><Trash2 className="w-5 h-5" /> Delete Profile?</CardTitle></CardHeader>
                   <CardContent className="space-y-4 pt-2">
@@ -1488,7 +1827,7 @@ export default function Customers() {
       )}
 
       {selectedTx && (
-          <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-[70] backdrop-blur-sm">
+          <div className="corrected inset-0 bg-black/70 flex items-center justify-center p-4 z-[70] backdrop-blur-sm">
               <Card className="w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl animate-in zoom-in">
                   <CardHeader className="border-b bg-slate-50/50 flex flex-row justify-between items-center py-4 px-6">
                       <CardTitle className="text-lg font-black">Order Review #{selectedTx.id.slice(-6)}</CardTitle>
@@ -1574,7 +1913,7 @@ export default function Customers() {
 
       {/* Upfront Order Modal */}
       {isUpfrontOrderModalOpen && orderCustomer && (
-          <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="corrected inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
               <Card className="w-full max-w-md shadow-2xl animate-in zoom-in border-t-4 border-t-primary overflow-hidden">
                   <CardHeader className="flex flex-row justify-between items-center border-b pb-4">
                       <CardTitle className="text-lg">{orderStage === 'picker' ? `Create Order • ${orderCustomer.name}` : `Order Form • ${selectedOrderProduct?.name || ''}`}</CardTitle>
@@ -1709,7 +2048,7 @@ export default function Customers() {
 
       {/* Collect Payment Modal */}
       {isCollectPaymentModalOpen && selectedUpfrontOrder && (
-          <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="corrected inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
               <Card className="w-full max-w-xs shadow-2xl animate-in zoom-in border-t-4 border-t-emerald-600 overflow-hidden">
                   <CardHeader className="text-center bg-emerald-50/30 pb-4">
                       <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-emerald-200">

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, saveData, processTransaction, getSaleSettlementBreakdown } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, safeFinancePersistState, processTransaction, getSaleSettlementBreakdown, saveExpenseToSubcollection, saveExpenseActivityToSubcollection, deleteExpenseFromSubcollection, isExpenseStoredInSubcollection } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
 import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, ManualCashbookEntry, PurchaseOrder, Transaction, UpdatedTransactionRecord, UpfrontOrder } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
@@ -10,6 +10,7 @@ import { getCurrentUser } from '../services/auth';
 import { formatINRPrecise, formatINRWhole } from '../services/numberFormat';
 import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
 import { normalizeTransactionItems } from '../utils/transactionItems';
+import { getFriendlyErrorMessage } from '../services/errorMessages';
 
 type Expense = {
   id: string;
@@ -832,8 +833,9 @@ export default function Finance() {
   const expenseCategories: string[] = useMemo(() => {
     const defaults = ['General'];
     const existing = Array.isArray(data.expenseCategories) ? data.expenseCategories : [];
-    return Array.from(new Set([...defaults, ...existing]));
-  }, [data]);
+    const usedByExpenses = expenses.map(expense => expense.category).filter(Boolean);
+    return Array.from(new Set([...defaults, ...existing, ...usedByExpenses]));
+  }, [data.expenseCategories, expenses]);
   const productsById = useMemo(() => new Map(data.products.map(product => [product.id, product])), [data.products]);
   const resolveBuyPriceForFinanceItem = (item: CartItem, txDate: string) => {
     const direct = Number.isFinite(item.buyPrice) ? Number(item.buyPrice) : 0;
@@ -1933,13 +1935,14 @@ export default function Finance() {
     XLSX.writeFile(workbook, `Cashbook_Export_${new Date().toISOString().split('T')[0]}.${ext}`);
   };
 
-  const persistState = async (newState: AppState) => {
+  const persistState = async (newState: Partial<AppState>) => {
     try {
-      await saveData(newState, { throwOnError: true, reason: 'finance.persistState' });
+      await safeFinancePersistState(newState, { reason: 'finance.persistState' });
       refreshData();
       setErrors(null);
     } catch (error) {
-      setErrors('Unable to save finance data. Please try again.');
+      console.error('[finance.persistState] Unable to save finance data', error);
+      setErrors(getFriendlyErrorMessage(error, 'finance.persistState'));
     }
   };
 
@@ -2000,7 +2003,7 @@ export default function Finance() {
     });
     const session: CashSession = { id: buildCashSessionId(freshCashSessions), startTime: new Date().toISOString(), openingBalance: value, status: 'open' };
     financeLog.shift('START', { openingCash: value });
-    await persistState({ ...fresh, cashSessions: [session, ...freshCashSessions] });
+    await persistState({ cashSessions: [session, ...freshCashSessions] });
     setOpeningBalance('');
     setOpeningBalanceAutoFilled(false);
   };
@@ -2050,7 +2053,7 @@ export default function Finance() {
       status: 'closed' as const
     } : session);
 
-    await persistState({ ...fresh, cashSessions: updated });
+    await persistState({ cashSessions: updated });
     setClosingBalance('');
     resetClosingCounts();
     setOpeningUnlocked(false);
@@ -2081,7 +2084,7 @@ export default function Finance() {
         closingEditNote: editingClosingNote.trim() || undefined,
       };
     });
-    await persistState({ ...fresh, cashSessions: updatedSessions });
+    await persistState({ cashSessions: updatedSessions });
     setEditingClosingSessionId(null);
     setEditingClosingAmount('');
     setEditingClosingNote('');
@@ -2119,7 +2122,7 @@ export default function Finance() {
       sessionEndTime: target.endTime ?? null,
       reason: deleteSessionReason.trim() || null,
     });
-    await persistState({ ...fresh, cashSessions: updatedSessions });
+    await persistState({ cashSessions: updatedSessions });
     if (activeHistoryDetailSessionId === target.id) setActiveHistoryDetailSessionId(null);
     if (editingClosingSessionId === target.id) {
       setEditingClosingSessionId(null);
@@ -2187,15 +2190,19 @@ export default function Finance() {
     });
 
     const updated = freshCashSessions.map(session => session.id === freshOpenSession.id ? { ...session, openingBalance: value } : session);
-    await persistState({ ...fresh, cashSessions: updated });
+    await persistState({ cashSessions: updated });
     setEditingOpeningBalance(false);
     setOpeningBalanceEditValue('');
     setOpeningUnlocked(false);
   };
 
-  const appendExpenseActivity = (items: ExpenseActivity[], action: ExpenseActivity['action'], message: string) => {
-    return [{ id: `${Date.now()}-${Math.floor(Math.random() * 100000)}`, action, message, createdAt: new Date().toISOString() }, ...items].slice(0, 500);
-  };
+  const createExpenseActivity = (action: ExpenseActivity['action'], message: string): ExpenseActivity => ({
+    id: `${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    action,
+    message,
+    createdAt: new Date().toISOString(),
+  });
+
 
   const addExpense = async () => {
     const amount = Number(expenseAmount);
@@ -2212,17 +2219,26 @@ export default function Finance() {
     financeLog.expense('CREATE', { amount, category: expense.category, affectsCash: true });
     financeLog.cash('OUTFLOW', { txId: expense.id, amount, reason: expense.title, paymentMode: 'Cash', source: 'expense' });
 
-    const categories = Array.from(new Set([...(data.expenseCategories || []), expense.category]));
-    await persistState({
+    const activity = createExpenseActivity('add_expense', `Added ${expense.title} (${formatINR(expense.amount)}) in ${expense.category}`);
+    const optimisticState = {
       ...data,
       expenses: [expense, ...expenses],
-      expenseCategories: categories,
-      expenseActivities: appendExpenseActivity(expenseActivities, 'add_expense', `Added ${expense.title} (${formatINR(expense.amount)}) in ${expense.category}`)
-    });
+      expenseActivities: [activity, ...expenseActivities].slice(0, 500),
+    };
+    setData(optimisticState);
 
-    setExpenseTitle('');
-    setExpenseAmount('');
-    setExpenseNote('');
+    try {
+      await saveExpenseToSubcollection(expense);
+      await saveExpenseActivityToSubcollection(activity);
+      setExpenseTitle('');
+      setExpenseAmount('');
+      setExpenseNote('');
+      setErrors(null);
+    } catch (error) {
+      setData(data);
+      console.error('[finance.addExpense] Failed to save expense subcollection docs', error);
+      setErrors(getFriendlyErrorMessage(error, 'finance.add_expense'));
+    }
   };
 
   const addCashAdjustment = async (type: 'cash_addition' | 'cash_withdrawal') => {
@@ -2247,28 +2263,45 @@ export default function Finance() {
       paymentMode: 'Cash',
       source: 'manual_cash_adjustment',
     });
-    await persistState({
-      ...data,
-      cashAdjustments: [entry, ...(data.cashAdjustments || [])],
-      expenseActivities: appendExpenseActivity(
-        expenseActivities,
-        type,
-        `${type === 'cash_addition' ? 'Cash Added' : 'Cash Withdrawn'} (${formatINR(entry.amount)})${entry.note ? ` • ${entry.note}` : ''}`
-      ),
-    });
+    const activity = createExpenseActivity(
+      type,
+      `${type === 'cash_addition' ? 'Cash Added' : 'Cash Withdrawn'} (${formatINR(entry.amount)})${entry.note ? ` • ${entry.note}` : ''}`
+    );
+    await persistState({ cashAdjustments: [entry, ...(data.cashAdjustments || [])] });
+    try {
+      await saveExpenseActivityToSubcollection(activity);
+    } catch (error) {
+      console.error('[finance.cashAdjustment] Failed to save activity subcollection doc', error);
+    }
     if (type === 'cash_addition') { setCashAddAmount(''); setCashAddNote(''); }
     else { setCashWithdrawAmount(''); setCashWithdrawNote(''); }
   };
 
   const removeExpense = async (id: string) => {
     const item = expenses.find(e => e.id === id);
-    await persistState({
+    if (!item) return;
+    if (!isExpenseStoredInSubcollection(id)) {
+      setErrors('Old expense needs migration before it can be deleted.');
+      return;
+    }
+
+    const activity = createExpenseActivity('delete_expense', `Deleted ${item.title} (${formatINR(item.amount)})`);
+    const optimisticState = {
       ...data,
       expenses: expenses.filter(e => e.id !== id),
-      expenseActivities: item
-        ? appendExpenseActivity(expenseActivities, 'delete_expense', `Deleted ${item.title} (${formatINR(item.amount)})`)
-        : expenseActivities
-    });
+      expenseActivities: [activity, ...expenseActivities].slice(0, 500),
+    };
+    setData(optimisticState);
+
+    try {
+      await deleteExpenseFromSubcollection(item);
+      await saveExpenseActivityToSubcollection(activity);
+      setErrors(null);
+    } catch (error) {
+      setData(data);
+      console.error('[finance.removeExpense] Failed to delete expense subcollection doc', error);
+      setErrors(getFriendlyErrorMessage(error, 'finance.delete_expense'));
+    }
   };
 
   const addExpenseCategory = async () => {
@@ -2276,7 +2309,13 @@ export default function Finance() {
     if (!name) return;
 
     const categories = Array.from(new Set([...(data.expenseCategories || []), name]));
-    await persistState({ ...data, expenseCategories: categories, expenseActivities: appendExpenseActivity(expenseActivities, 'add_category', `Added category ${name}`) });
+    const activity = createExpenseActivity('add_category', `Added category ${name}`);
+    await persistState({ expenseCategories: categories });
+    try {
+      await saveExpenseActivityToSubcollection(activity);
+    } catch (error) {
+      console.error('[finance.addExpenseCategory] Failed to save activity subcollection doc', error);
+    }
     setNewCategory('');
   };
 
@@ -2284,7 +2323,13 @@ export default function Finance() {
     const isUsed = expenses.some(e => e.category === name);
     if (isUsed) return setErrors('Cannot delete category that is used by expenses.');
 
-    await persistState({ ...data, expenseCategories: expenseCategories.filter(c => c !== name), expenseActivities: appendExpenseActivity(expenseActivities, 'delete_category', `Removed category ${name}`) });
+    const activity = createExpenseActivity('delete_category', `Removed category ${name}`);
+    await persistState({ expenseCategories: expenseCategories.filter(c => c !== name) });
+    try {
+      await saveExpenseActivityToSubcollection(activity);
+    } catch (error) {
+      console.error('[finance.deleteExpenseCategory] Failed to save activity subcollection doc', error);
+    }
   };
 
   const exportExpensePDF = () => {
@@ -2374,7 +2419,7 @@ export default function Finance() {
     const changed = corrected.some((session, idx) => session !== (data.cashSessions || [])[idx]);
     if (!changed) return;
 
-    persistState({ ...data, cashSessions: corrected });
+    persistState({ cashSessions: corrected });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.transactions, data.expenses, data.cashSessions]);
 
