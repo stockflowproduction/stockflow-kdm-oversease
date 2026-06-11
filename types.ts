@@ -67,6 +67,9 @@ export interface Customer {
   totalSpend: number;
   totalDue: number;
   storeCredit?: number;
+  customerLedgerRecalculatedAt?: string;
+  customerLedgerRecalculationVersion?: string;
+  customerLedgerRecalculationSource?: string;
   lastVisit: string;
   visitCount: number;
 }
@@ -90,6 +93,7 @@ export interface Transaction {
   };
   date: string;
   type: 'sale' | 'return' | 'payment' | 'historical_reference' | 'customer_credit' | 'customer_cash_out';
+  referenceTransactionType?: string;
   customerId?: string;
   customerName?: string;
   customerPhone?: string;
