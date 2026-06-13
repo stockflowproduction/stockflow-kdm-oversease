@@ -14,6 +14,7 @@ import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView
 import { shareCustomerLedgerViaWhatsApp } from '../services/whatsappShare';
 import { appendWhatsAppLog } from '../services/whatsappLogs';
 import { auth } from '../services/firebase';
+import { can } from '../src/auth/simplePermissions';
 
 type CustomerReceivableRow = Customer & { receivable: number };
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[]; partyCredit?: number };
@@ -387,6 +388,16 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const payablePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable > 0), [allPartyDashboardRows]);
   const creditPartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) > 0), [allPartyDashboardRows]);
   const zeroDuePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) <= 0), [allPartyDashboardRows]);
+
+  const operatorRevenueBreakdown = useMemo(() => transactions.filter((tx) => tx.type === 'sale').reduce((acc, tx) => {
+    const settlement = getSaleSettlementBreakdown(tx);
+    acc.cash += Math.max(0, Number(settlement.cashPaid || 0));
+    acc.online += Math.max(0, Number(settlement.onlinePaid || 0));
+    acc.credit += Math.max(0, Number(settlement.creditDue || 0));
+    return acc;
+  }, { cash: 0, online: 0, credit: 0 }), [transactions]);
+  const operatorTotalSettledRevenue = operatorRevenueBreakdown.cash + operatorRevenueBreakdown.online + operatorRevenueBreakdown.credit;
+
   const totalReceivable = useMemo(() => customerReceivables.reduce((sum, customer) => sum + customer.receivable, 0), [customerReceivables]);
   const totalPayable = useMemo(() => payablePartyRows.reduce((sum, party) => sum + party.payable, 0), [payablePartyRows]);
   const isPayableTraceEnabled = useMemo(() => {
@@ -1055,13 +1066,24 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   };
 
   return (
-    <div className="h-[calc(100vh-9rem)] min-h-0 flex flex-col gap-4 overflow-hidden">
-      <div className="shrink-0 space-y-3">
+    <div className="min-h-0 space-y-4 pb-20 md:pb-0">
+      <div className="space-y-3">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="text-sm text-muted-foreground">Receivable and payable overview.</p>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        {!can('reports') && (
+          <Card className="min-h-[92px] border-emerald-100 bg-emerald-50/50">
+            <CardHeader className="pb-2"><CardTitle className="text-xs text-emerald-700">Revenue Breakdown</CardTitle></CardHeader>
+            <CardContent className="grid grid-cols-2 gap-2 text-sm">
+              <div><div className="text-[11px] text-muted-foreground">Cash</div><div className="font-bold text-emerald-800">{formatINRPrecise(operatorRevenueBreakdown.cash)}</div></div>
+              <div><div className="text-[11px] text-muted-foreground">Online</div><div className="font-bold text-emerald-800">{formatINRPrecise(operatorRevenueBreakdown.online)}</div></div>
+              <div><div className="text-[11px] text-muted-foreground">Credit</div><div className="font-bold text-emerald-800">{formatINRPrecise(operatorRevenueBreakdown.credit)}</div></div>
+              <div><div className="text-[11px] text-muted-foreground">Total settled/revenue</div><div className="font-bold text-emerald-900">{formatINRPrecise(operatorTotalSettledRevenue)}</div></div>
+            </CardContent>
+          </Card>
+        )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Card className="min-h-[92px]">
             <CardHeader className="pb-2"><CardTitle className="text-xs text-blue-700">Total Receivable</CardTitle></CardHeader>
             <CardContent><div className="text-xl font-bold text-blue-700">{formatINRPrecise(totalReceivable)}</div></CardContent>
@@ -1079,10 +1101,10 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
         </div>
       )}
 
-      <div className="min-h-0 flex-1 grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card className="min-h-0 flex flex-col">
-          <CardHeader className="shrink-0"><CardTitle>Customer Receivables</CardTitle></CardHeader>
-          <CardContent className="min-h-0 flex-1 overflow-y-auto space-y-3">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        <Card className="flex flex-col">
+          <CardHeader><CardTitle>Customer Receivables</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
             <div className="flex gap-2 flex-wrap">
               <Button size="sm" variant={customerDashboardTab === 'receivable' ? 'default' : 'outline'} onClick={() => setCustomerDashboardTab('receivable')}>Receivables ({receivableCustomerRows.length})</Button>
               <Button size="sm" variant={customerDashboardTab === 'storeCredit' ? 'default' : 'outline'} onClick={() => setCustomerDashboardTab('storeCredit')}>Parties with Store Credit ({storeCreditCustomerRows.length})</Button>
@@ -1114,9 +1136,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
           </CardContent>
         </Card>
 
-        <Card className="min-h-0 flex flex-col">
-          <CardHeader className="shrink-0"><CardTitle>Party/Supplier Payables</CardTitle></CardHeader>
-          <CardContent className="min-h-0 flex-1 overflow-y-auto space-y-3">
+        <Card className="flex flex-col">
+          <CardHeader><CardTitle>Party/Supplier Payables</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
             <div className="flex gap-2 flex-wrap">
               <Button size="sm" variant={supplierDashboardTab === 'payable' ? 'default' : 'outline'} onClick={() => setSupplierDashboardTab('payable')}>Payables ({payablePartyRows.length})</Button>
               <Button size="sm" variant={supplierDashboardTab === 'credit' ? 'default' : 'outline'} onClick={() => setSupplierDashboardTab('credit')}>Parties with Credit ({creditPartyRows.length})</Button>

@@ -8,6 +8,7 @@ import {
   sendPasswordResetEmail
 } from 'firebase/auth';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
+import { clearAccessSession } from '../src/auth/simplePermissions';
 
 const GENERIC_AUTH_ERROR = 'Unable to complete the request. Please check your credentials and try again.';
 const GENERIC_RESET_RESPONSE = 'If the email exists, a password reset link has been sent.';
@@ -117,6 +118,7 @@ export const resendVerificationEmail = async (email: string, password: string): 
 };
 
 export const logout = async () => {
+  clearAccessSession();
   if (auth) {
     await signOut(auth);
   }

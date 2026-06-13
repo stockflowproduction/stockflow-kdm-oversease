@@ -47,6 +47,10 @@ export default function Admin() {
   const [sortOption, setSortOption] = useState('name-asc');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [inventoryPage, setInventoryPage] = useState(1);
+  const OPERATOR_INVENTORY_PAGE_SIZE = 20;
+  const [operatorInventoryPage, setOperatorInventoryPage] = useState(1);
+  const [operatorSortOption, setOperatorSortOption] = useState<'name' | 'stock-desc' | 'stock-asc' | 'sell-desc' | 'sell-asc' | 'category'>('name');
+  const [operatorStockFilter, setOperatorStockFilter] = useState<'all' | 'low' | 'in' | 'out'>('all');
 
   // Low Stock Modal Filters
   const [lowStockCategoryFilter, setLowStockCategoryFilter] = useState('all');
@@ -72,7 +76,7 @@ export default function Admin() {
 
   // Form State
   const emptyProductForm = {
-    name: '', barcode: '', buyPrice: '', sellPrice: '', stock: '', totalPurchase: '', totalSold: '', description: '', category: '', hsn: '',
+    name: '', barcode: '', buyPrice: '', sellPrice: '', stock: '', totalPurchase: '', totalSold: '', description: '', category: '', hsn: '', locationZone: '', locationRow: '', locationRack: '', locationShelf: '',
     variants: [] as string[],
     colors: [] as string[],
     stockByVariantColor: [] as Array<{ variant: string; color: string; stock: number; buyPrice?: number | ''; sellPrice?: number | ''; totalPurchase?: number | ''; totalSold?: number | '' }>,
@@ -130,6 +134,8 @@ export default function Admin() {
 
   const [inventoryViewTab, setInventoryViewTab] = useState<'inventory' | 'lost-damage'>('inventory');
   const [openActionMenuProductId, setOpenActionMenuProductId] = useState<string | null>(null);
+  const [editingLocationProductId, setEditingLocationProductId] = useState<string | null>(null);
+  const [locationDraft, setLocationDraft] = useState({ locationZone: '', locationRow: '', locationRack: '', locationShelf: '' });
 
   const getProductImageUrl = (product?: any): string => {
     if (!product) return '';
@@ -143,6 +149,39 @@ export default function Admin() {
       || imageObj?.url
       || ''
     ).trim();
+  };
+
+
+  const getProductLocationFields = (product?: Partial<Product>) => ({
+    locationZone: String((product as any)?.locationZone || ''),
+    locationRow: String((product as any)?.locationRow || ''),
+    locationRack: String((product as any)?.locationRack || ''),
+    locationShelf: String((product as any)?.locationShelf || ''),
+  });
+  const startInlineLocationEdit = (product: Product) => {
+    if (!can('inventoryBuyPrice')) return;
+    setEditingLocationProductId(product.id);
+    setLocationDraft(getProductLocationFields(product));
+  };
+  const cancelInlineLocationEdit = () => {
+    setEditingLocationProductId(null);
+    setLocationDraft({ locationZone: '', locationRow: '', locationRack: '', locationShelf: '' });
+  };
+  const saveInlineLocationEdit = async (product: Product) => {
+    const updated = await updateProduct({
+      ...product,
+      locationZone: locationDraft.locationZone.trim(),
+      locationRow: locationDraft.locationRow.trim(),
+      locationRack: locationDraft.locationRack.trim(),
+      locationShelf: locationDraft.locationShelf.trim(),
+    });
+    setProducts(updated);
+    cancelInlineLocationEdit();
+  };
+  const renderLocationDisplay = (product: Product) => {
+    const location = getProductLocationFields(product);
+    if (!Object.values(location).some((value) => value.trim())) return <span className="text-xs text-muted-foreground">Not set</span>;
+    return <div className="space-y-0.5 text-xs">{location.locationZone && <div><span className="font-semibold">Zone:</span> {location.locationZone}</div>}{location.locationRow && <div><span className="font-semibold">Row:</span> {location.locationRow}</div>}{location.locationRack && <div><span className="font-semibold">Rack:</span> {location.locationRack}</div>}{location.locationShelf && <div><span className="font-semibold">Shelf:</span> {location.locationShelf}</div>}</div>;
   };
 
   const openProductPhotoModal = (product: Product) => {
@@ -624,6 +663,10 @@ export default function Admin() {
       ...(cleanOptionalText(formData.barcode) ? { barcode: cleanOptionalText(formData.barcode)! } : {}),
       ...(cleanOptionalText(formData.description) ? { description: cleanOptionalText(formData.description)! } : {}),
       category: cleanOptionalText(formData.category) || 'not set yet',
+      locationZone: cleanOptionalText(formData.locationZone) || '',
+      locationRow: cleanOptionalText(formData.locationRow) || '',
+      locationRack: cleanOptionalText(formData.locationRack) || '',
+      locationShelf: cleanOptionalText(formData.locationShelf) || '',
       ...(cleanOptionalText(formData.hsn) ? { hsn: cleanOptionalText(formData.hsn)! } : {}),
       buyPrice: hasCombos ? cleanOptionalNumber(editingProduct?.buyPrice, 0) : cleanOptionalNumber(formData.buyPrice, 0),
       sellPrice: hasCombos ? cleanOptionalNumber(editingProduct?.sellPrice, 0) : cleanOptionalNumber(formData.sellPrice, 0),
@@ -1485,7 +1528,7 @@ export default function Admin() {
       return ['all', ...[...categories].sort()];
   }, [categories]);
 
-  const getProductSearchTextForAdmin = (p: Product) => [p.name, p.barcode, p.category, (p as any).hsn, (p as any).description].map((value) => safeText(value)).filter(Boolean).join(' ');
+  const getProductSearchTextForAdmin = (p: Product) => [p.name, p.barcode, p.category, (p as any).locationZone, (p as any).locationRow, (p as any).locationRack, (p as any).locationShelf, (p as any).hsn, (p as any).description].map((value) => safeText(value)).filter(Boolean).join(' ');
 
   const filteredProducts = useMemo(() => {
     let result = products.filter(p => 
@@ -1510,6 +1553,39 @@ export default function Admin() {
     () => filteredProducts.slice((inventoryPage - 1) * INVENTORY_PAGE_SIZE, inventoryPage * INVENTORY_PAGE_SIZE),
     [filteredProducts, inventoryPage]
   );
+
+  const operatorFilteredProducts = useMemo(() => {
+    const term = safeLower(searchTerm);
+    const result = products.filter((product) => {
+      const matchesSearch = !term || safeLower([getProductName(product), getProductCategory(product), getProductBarcode(product), (product as any).locationZone, (product as any).locationRow, (product as any).locationRack, (product as any).locationShelf].join(' ')).includes(term);
+      const stock = Math.max(0, Number(product.stock || 0));
+      const matchesFilter = operatorStockFilter === 'all'
+        || (operatorStockFilter === 'low' && stock > 0 && stock <= 10)
+        || (operatorStockFilter === 'in' && stock > 0)
+        || (operatorStockFilter === 'out' && stock <= 0);
+      return matchesSearch && matchesFilter;
+    });
+
+    result.sort((a, b) => {
+      switch (operatorSortOption) {
+        case 'stock-desc': return Math.max(0, Number(b.stock || 0)) - Math.max(0, Number(a.stock || 0));
+        case 'stock-asc': return Math.max(0, Number(a.stock || 0)) - Math.max(0, Number(b.stock || 0));
+        case 'sell-desc': return Math.max(0, Number(b.sellPrice || 0)) - Math.max(0, Number(a.sellPrice || 0));
+        case 'sell-asc': return Math.max(0, Number(a.sellPrice || 0)) - Math.max(0, Number(b.sellPrice || 0));
+        case 'category': return getProductCategory(a).localeCompare(getProductCategory(b)) || getProductName(a).localeCompare(getProductName(b));
+        case 'name':
+        default: return getProductName(a).localeCompare(getProductName(b));
+      }
+    });
+
+    return result;
+  }, [products, searchTerm, operatorSortOption, operatorStockFilter]);
+  const operatorInventoryTotalPages = Math.max(1, Math.ceil(operatorFilteredProducts.length / OPERATOR_INVENTORY_PAGE_SIZE));
+  const operatorPaginatedProducts = useMemo(
+    () => operatorFilteredProducts.slice((operatorInventoryPage - 1) * OPERATOR_INVENTORY_PAGE_SIZE, operatorInventoryPage * OPERATOR_INVENTORY_PAGE_SIZE),
+    [operatorFilteredProducts, operatorInventoryPage]
+  );
+
   const allFilteredProductsSelected = filteredProducts.length > 0 && filteredProducts.every(product => selectedProductIds.includes(product.id));
   const lostDamageProducts = useMemo(() => products.filter(p => Math.max(0, Number(p.lostDamageQty || 0)) > 0), [products]);
   const lostDamageStats = useMemo(() => {
@@ -1524,8 +1600,16 @@ export default function Admin() {
   }, [searchTerm, categoryFilter, sortOption]);
 
   useEffect(() => {
+    setOperatorInventoryPage(1);
+  }, [searchTerm, operatorSortOption, operatorStockFilter]);
+
+  useEffect(() => {
     setInventoryPage((prev) => Math.min(prev, inventoryTotalPages));
   }, [inventoryTotalPages]);
+
+  useEffect(() => {
+    setOperatorInventoryPage((prev) => Math.min(prev, operatorInventoryTotalPages));
+  }, [operatorInventoryTotalPages]);
 
   // Calculate Dashboard Stats
   const stats = useMemo(() => {
@@ -1710,24 +1794,54 @@ export default function Admin() {
   if (!can('inventoryBuyPrice')) {
     return (
       <div className="space-y-6 max-w-[1200px] mx-auto pb-20 md:pb-0">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div><h1 className="text-3xl font-bold tracking-tight">Inventory</h1><p className="text-muted-foreground">Operator view: stock and sell price only. Buy price, valuation, purchase controls, and margin analytics are hidden.</p></div>
-          <Input className="max-w-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search products" />
+        <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_180px_180px]">
+          <Input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search products" />
+          <Select value={operatorSortOption} onChange={(e) => setOperatorSortOption(e.target.value as any)}>
+            <option value="name">Product Name</option>
+            <option value="stock-desc">Stock High → Low</option>
+            <option value="stock-asc">Stock Low → High</option>
+            <option value="sell-desc">Sell Price High → Low</option>
+            <option value="sell-asc">Sell Price Low → High</option>
+            <option value="category">Category</option>
+          </Select>
+          <Select value={operatorStockFilter} onChange={(e) => setOperatorStockFilter(e.target.value as any)}>
+            <option value="all">All</option>
+            <option value="low">Low Stock</option>
+            <option value="in">In Stock</option>
+            <option value="out">Out of Stock</option>
+          </Select>
         </div>
+        <div><h1 className="text-3xl font-bold tracking-tight">Inventory</h1><p className="text-muted-foreground">Operator view: stock and sell price only. Buy price, valuation, purchase controls, and margin analytics are hidden.</p></div>
+        <Card className="bg-amber-50/50 border-amber-100 cursor-pointer hover:bg-amber-100/50 transition-colors" onClick={() => setIsLowStockModalOpen(true)}>
+          <CardContent className="p-4 flex items-center justify-between">
+            <div><p className="text-xs font-bold text-amber-600 uppercase tracking-widest">Low Stock Alerts</p><p className="text-2xl font-bold text-amber-900">{stats.lowStockCount}</p></div>
+            {stats.outOfStockCount > 0 && <Badge variant="destructive">{stats.outOfStockCount} Out</Badge>}
+          </CardContent>
+        </Card>
         <Card>
           <CardContent className="p-0">
-            <div className="grid grid-cols-[minmax(0,1fr)_100px_110px_110px] gap-2 border-b bg-slate-50 p-3 text-xs font-black uppercase tracking-wider text-slate-500"><div>Product</div><div>Category</div><div className="text-right">Stock</div><div className="text-right">Sell Price</div></div>
-            {paginatedProducts.map((product) => (
-              <div key={product.id} className="grid grid-cols-[minmax(0,1fr)_100px_110px_110px] gap-2 border-b p-3 text-sm">
+            <div className="grid grid-cols-[64px_minmax(0,1fr)_100px_110px_110px] gap-2 border-b bg-slate-50 p-3 text-xs font-black uppercase tracking-wider text-slate-500"><div>Image</div><div>Product</div><div>Location</div><div className="text-right">Stock</div><div className="text-right">Sell Price</div></div>
+            {operatorPaginatedProducts.map((product) => (
+              <div key={product.id} className="grid grid-cols-[64px_minmax(0,1fr)_100px_110px_110px] items-center gap-2 border-b p-3 text-sm">
+                <div className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{getProductImageUrl(product) ? <img src={getProductImageUrl(product)} alt={getProductName(product)} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div>
                 <div className="min-w-0"><div className="truncate font-semibold">{getProductName(product)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(product)}</div></div>
-                <div className="truncate text-xs text-muted-foreground">{getProductCategory(product) || '—'}</div>
+                <div>{renderLocationDisplay(product)}</div>
                 <div className="text-right font-bold">{product.stock}</div>
                 <div className="text-right font-bold">₹{product.sellPrice}</div>
               </div>
             ))}
-            {paginatedProducts.length === 0 && <div className="p-10 text-center text-sm text-muted-foreground">No products found.</div>}
+            {operatorPaginatedProducts.length === 0 && <div className="p-10 text-center text-sm text-muted-foreground">No products found.</div>}
+            {operatorFilteredProducts.length > OPERATOR_INVENTORY_PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-2 p-3 text-sm">
+                <Button variant="outline" size="sm" onClick={() => setOperatorInventoryPage((prev) => Math.max(1, prev - 1))} disabled={operatorInventoryPage === 1}>Previous</Button>
+                <span className="text-xs text-muted-foreground">Showing {operatorPaginatedProducts.length} of {operatorFilteredProducts.length} products · Page {operatorInventoryPage} of {operatorInventoryTotalPages}</span>
+                <Button variant="outline" size="sm" onClick={() => setOperatorInventoryPage((prev) => Math.min(operatorInventoryTotalPages, prev + 1))} disabled={operatorInventoryPage === operatorInventoryTotalPages}>Next</Button>
+              </div>
+            )}
           </CardContent>
         </Card>
+        {isLowStockModalOpen && <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"><Card className="w-full max-w-4xl max-h-[85vh] overflow-y-auto"><CardHeader className="flex flex-row items-center justify-between"><CardTitle>Low Stock Inventory</CardTitle><Button variant="ghost" onClick={() => setIsLowStockModalOpen(false)}>Close</Button></CardHeader><CardContent><div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">{lowStockProducts.map((p) => <div key={p.id} className="flex flex-col border rounded-xl bg-card overflow-hidden"><div className="aspect-square w-full bg-white flex items-center justify-center overflow-hidden border-b">{getProductImageUrl(p) ? <img src={getProductImageUrl(p)} alt={getProductName(p)} className="w-full h-full object-contain" /> : <Package className="w-8 h-8 opacity-20" />}</div><div className="p-3 min-w-0"><h4 className="font-bold text-xs truncate" title={getProductName(p)}>{getProductName(p)}</h4><p className="text-[10px] text-muted-foreground truncate">{getProductCategory(p) || '—'}</p><div className="flex items-center justify-between mt-2"><span className="text-xs font-bold">₹{p.sellPrice}</span><Badge variant={p.stock === 0 ? 'destructive' : 'secondary'} className="h-5 px-1.5 text-[10px]">Stock: {p.stock}</Badge></div></div></div>)}</div>{lowStockProducts.length === 0 && <p className="text-sm text-muted-foreground">No low stock items match your filters.</p>}</CardContent></Card></div>}
+
       </div>
     );
   }
@@ -1890,7 +2004,7 @@ export default function Admin() {
                   className="h-4 w-4 rounded border-slate-300"
                 />
               </th>
-              <th className="text-left p-3">Image</th><th className="text-left p-3">Product</th><th className="text-left p-3">Category</th><th className="text-left p-3">Purchase/Sold</th><th className="text-left p-3">Stock</th><th className="text-left p-3">Buy/Sell</th><th className="text-left p-3">Actions</th>
+              <th className="text-left p-3">Image</th><th className="text-left p-3">Product</th><th className="text-left p-3">Location</th><th className="text-left p-3">Purchase/Sold</th><th className="text-left p-3">Stock</th><th className="text-left p-3">Buy/Sell</th><th className="text-left p-3">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1945,7 +2059,21 @@ export default function Admin() {
                     )}
                   </div>
                 </td>
-                <td className="p-3">{displayProductText(product.category)}</td>
+                <td className="p-3">
+                  {editingLocationProductId === product.id ? (
+                    <div className="grid min-w-[220px] gap-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <Input className="h-8 text-xs" value={locationDraft.locationZone} onChange={(e) => setLocationDraft((prev) => ({ ...prev, locationZone: e.target.value }))} placeholder="Zone" />
+                        <Input className="h-8 text-xs" value={locationDraft.locationRow} onChange={(e) => setLocationDraft((prev) => ({ ...prev, locationRow: e.target.value }))} placeholder="Row" />
+                        <Input className="h-8 text-xs" value={locationDraft.locationRack} onChange={(e) => setLocationDraft((prev) => ({ ...prev, locationRack: e.target.value }))} placeholder="Rack" />
+                        <Input className="h-8 text-xs" value={locationDraft.locationShelf} onChange={(e) => setLocationDraft((prev) => ({ ...prev, locationShelf: e.target.value }))} placeholder="Shelf" />
+                      </div>
+                      <div className="flex gap-2"><Button size="sm" onClick={() => void saveInlineLocationEdit(product)}>Save</Button><Button size="sm" variant="outline" onClick={cancelInlineLocationEdit}>Cancel</Button></div>
+                    </div>
+                  ) : (
+                    <button type="button" className="text-left hover:text-primary" onClick={() => startInlineLocationEdit(product)} title="Edit location">{renderLocationDisplay(product)}</button>
+                  )}
+                </td>
                 <td className="p-3">{toNonNegativeNumber(metrics.totalPurchase)} / {toNonNegativeNumber(metrics.totalSold)}</td>
                 <td className="p-3 font-semibold">{product.stock}</td>
                 <td className="p-3">₹{metrics.combinedAvgBuyPrice.toFixed(2)} / ₹{metrics.combinedAvgSellPrice.toFixed(2)}</td>
@@ -2087,6 +2215,16 @@ export default function Admin() {
                         {[...categories].sort().map(c => <option key={c} value={c}>{c}</option>)}
                       </Select>
                       {showAddCategoryInline && <div className="flex gap-2"><Input value={newInlineCategory} onChange={e => setNewInlineCategory(e.target.value)} placeholder="New category" /><Button type="button" variant="outline" onClick={() => { const c = newInlineCategory.trim(); if (!c) return; const next = addCategory(c); setCategories(next); setFormData({ ...formData, category: c }); setNewInlineCategory(''); setShowAddCategoryInline(false); }}>Save</Button></div>}
+                    </div>
+
+                    <div className="space-y-3 rounded-md border p-3 md:col-span-2">
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Location</h4>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="space-y-2"><Label>Zone</Label><Input value={formData.locationZone || ''} onChange={e => setFormData({ ...formData, locationZone: e.target.value })} placeholder="A, Front, B-2" /></div>
+                        <div className="space-y-2"><Label>Row</Label><Input value={formData.locationRow || ''} onChange={e => setFormData({ ...formData, locationRow: e.target.value })} placeholder="03" /></div>
+                        <div className="space-y-2"><Label>Rack</Label><Input value={formData.locationRack || ''} onChange={e => setFormData({ ...formData, locationRack: e.target.value })} placeholder="05" /></div>
+                        <div className="space-y-2"><Label>Shelf</Label><Input value={formData.locationShelf || ''} onChange={e => setFormData({ ...formData, locationShelf: e.target.value })} placeholder="02 / Top" /></div>
+                      </div>
                     </div>
 
                     <div className="space-y-2">

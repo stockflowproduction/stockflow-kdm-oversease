@@ -968,21 +968,21 @@ export default function Customers() {
                   <Button onClick={() => setIsAddModalOpen(true)} size="sm" className="h-8 md:h-9 bg-primary shadow-sm">
                       <Plus className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Add Customer</span>
                   </Button>
-                  <Button
+                  {can('analytics') && <Button
                       onClick={() => setShowCorrectLedgerView((prev) => !prev)}
                       variant={showCorrectLedgerView ? 'default' : 'outline'}
                       size="sm"
                       className="h-8 md:h-9 shadow-sm"
                   >
                       <Activity className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Correct Ledger View</span>
-                  </Button>
+                  </Button>}
                   <Button onClick={() => { setExportType('dues_report'); setIsExportModalOpen(true); }} variant="outline" size="sm" className="h-8 md:h-9 shadow-sm">
                       <FileText className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Dues Report</span>
                   </Button>
               </div>
           </div>
           
-          {filteredData.totalDues > 0 && (
+          {can('analytics') && filteredData.totalDues > 0 && (
              <div className="bg-red-50 border border-red-200 rounded-xl p-3 flex justify-between items-center animate-in slide-in-from-top-2">
                  <div className="flex items-center gap-2 text-red-700">
                      <AlertCircle className="w-5 h-5" />
@@ -1017,7 +1017,7 @@ export default function Customers() {
 
 
 
-      {showCorrectLedgerView ? (
+      {can('analytics') && showCorrectLedgerView ? (
         <div className="space-y-4">
           <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-4 shadow-sm">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">

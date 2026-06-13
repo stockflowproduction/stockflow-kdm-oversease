@@ -140,6 +140,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
             <div className="flex flex-1 flex-col p-3">
                 <div className="mb-2">
                     <h3 className="font-semibold text-xs sm:text-sm leading-tight line-clamp-2" title={getProductName(product)}>{getProductName(product)}</h3>
+                    <p className="mt-1 text-[10px] text-muted-foreground truncate" title={getProductCategory(product) || 'Uncategorized'}>{getProductCategory(product) || 'Uncategorized'}</p>
                 </div>
                 <div className="mt-auto flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <Button variant="outline" size="icon" className="h-7 w-7 rounded-lg shrink-0" onClick={handleMinus} disabled={isDisabled}><Minus className="w-3 h-3" /></Button>

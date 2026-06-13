@@ -7,13 +7,13 @@ import { auth } from './services/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { emitFinanceSnapshot } from './utils/financeDebugLogger';
-import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3 } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3, Lock } from 'lucide-react';
 import { Button } from './components/ui';
+import RoleLoginModal from './components/auth/RoleLoginModal';
 import { RoleSessionProvider, useRoleSession } from './src/auth/roleSession';
-import { can as simpleCan, getCurrentRole, installRoleTestHelpers, SimplePermission } from './src/auth/simplePermissions';
+import { can as simpleCan, clearAccessSession, getCurrentOperatorName, getCurrentRole, installRoleTestHelpers, isAccessUnlocked, lockAccess, setAccessSession, SimplePermission } from './src/auth/simplePermissions';
 import { RestrictedPage } from './components/auth/PermissionGuard';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
-import { NewUiPreviewBanner } from './components/NewUiPreviewBanner';
 import Settings from './pages/Settings';
 const WhatsAppLogs = lazy(() => import('./pages/WhatsAppLogs'));
 
@@ -49,18 +49,6 @@ const NavItem = ({ to, icon: Icon, label, labelClassName = '' }: { to: string, i
   );
 };
 
-const QuickLink = ({ to, icon: Icon, label }: { to: string, icon: any, label: string }) => {
-    return (
-      <Link 
-        to={to} 
-        className="flex items-center gap-3 px-4 py-2 text-sm font-medium rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-      >
-        <Icon className="w-4 h-4" />
-        {label}
-      </Link>
-    );
-  };
-
 const MenuController = ({ setIsMenuOpen }: { setIsMenuOpen: (open: boolean) => void }) => {
     const location = useLocation();
     useEffect(() => {
@@ -90,7 +78,8 @@ function AppContent() {
   const [cloudStatus, setCloudStatus] = useState<{ status: string; message?: string }>({ status: navigator.onLine ? 'loading' : 'offline' });
   const [opStatus, setOpStatus] = useState<{ phase: 'start' | 'success' | 'error'; message: string; op?: string } | null>(null);
   const [salesCartCount, setSalesCartCount] = useState(0);
-  const { logoutRole } = useRoleSession();
+  const { logoutRole, setSession } = useRoleSession();
+  const [accessUnlocked, setAccessUnlocked] = useState(() => isAccessUnlocked());
 
   useEffect(() => {
     installRoleTestHelpers();
@@ -106,6 +95,8 @@ function AppContent() {
 
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (!user) {
+        clearAccessSession();
+        setAccessUnlocked(false);
         setCurrentEmail(null);
         setAuthStatus('unauthenticated');
         return;
@@ -116,6 +107,18 @@ function AppContent() {
     });
 
     return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const refreshAccess = () => setAccessUnlocked(isAccessUnlocked());
+    window.addEventListener('storage', refreshAccess);
+    window.addEventListener('stockflow-access-lock', refreshAccess);
+    window.addEventListener('stockflow-role-change', refreshAccess);
+    return () => {
+      window.removeEventListener('storage', refreshAccess);
+      window.removeEventListener('stockflow-access-lock', refreshAccess);
+      window.removeEventListener('stockflow-role-change', refreshAccess);
+    };
   }, []);
 
 
@@ -205,8 +208,22 @@ function AppContent() {
     '/purchase-panel': 'purchases',
   };
   const showNav = (path: string) => !routePermissions[path] || simpleCan(routePermissions[path]);
+  const handleAccessLogin = (session: Parameters<typeof setSession>[0]) => {
+    if (!session) return;
+    setSession(session);
+    setAccessSession({ role: session.role, operatorId: session.operatorId, operatorName: session.operatorName });
+    setAccessUnlocked(true);
+  };
+
+  const handleLockAccess = () => {
+    logoutRole();
+    lockAccess();
+    setAccessUnlocked(false);
+  };
+
   const handleFullLogout = () => {
     logoutRole();
+    clearAccessSession();
     logout();
   };
 
@@ -221,6 +238,12 @@ function AppContent() {
   if (authStatus === 'unverified') {
       return <VerificationRequired email={currentEmail || undefined} />;
   }
+
+  if (authStatus === 'authenticated' && !accessUnlocked) {
+    return <RoleLoginModal onLogin={handleAccessLogin} />;
+  }
+
+  const operatorName = getCurrentOperatorName();
 
   return (
     <Router>
@@ -299,17 +322,15 @@ function AppContent() {
             {showNav('/freight-booking') && <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />}
             {showNav('/purchase-panel') && <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Parties" />}
 
-            <div className="pt-6">
-                <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Quick Actions</p>
-                <QuickLink to="/sales?mode=sale" icon={ShoppingCart} label="Quick Sale" />
-                <QuickLink to="/sales?mode=return" icon={ArrowRightLeft} label="Quick Return" />
-            </div>
           </nav>
           
           <div className="p-4 border-t flex flex-col gap-2">
              <div className="text-xs text-muted-foreground mt-2">
-                <p>User: {currentEmail}</p><p>Access: {getCurrentRole() === 'operator' ? 'Operator' : 'Admin'}</p>
+                <p>User: {currentEmail}</p><p>Access: {getCurrentRole() === 'operator' ? `Operator${operatorName ? ` (${operatorName})` : ''}` : 'Admin'}</p>
              </div>
+             <Button variant="ghost" size="sm" onClick={handleLockAccess} className="w-full text-muted-foreground hover:text-foreground justify-start px-2">
+                <Lock className="w-4 h-4 mr-2" /> Lock Access
+             </Button>
              <Button variant="ghost" size="sm" onClick={handleFullLogout} className="w-full text-muted-foreground hover:text-destructive justify-start px-2">
                 <LogOut className="w-4 h-4 mr-2" /> Logout
              </Button>
@@ -408,8 +429,7 @@ function AppContent() {
 
         {/* Main Content */}
         <main className="flex-1 overflow-auto bg-background">
-          <div className="h-full p-4 md:p-8 pb-20 md:pb-8 max-w-7xl mx-auto">
-            <NewUiPreviewBanner />
+          <div className="min-h-full p-4 md:p-8 pb-20 md:pb-8 max-w-7xl mx-auto">
             <Suspense fallback={<div className="h-full flex items-center justify-center text-sm text-muted-foreground">Loading page…</div>}>
               <Routes>
                 <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />
