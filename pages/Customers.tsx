@@ -1513,92 +1513,99 @@ export default function Customers() {
 
       {viewingCustomer && (
           <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center sm:p-4">
-              <Card className="w-full h-[100dvh] sm:h-[90vh] sm:max-w-6xl flex flex-col rounded-none sm:rounded-[24px] shadow-2xl overflow-hidden animate-in slide-in-from-bottom-10 bg-white">
+              <Card className="w-full h-[100dvh] sm:h-[90vh] sm:max-w-7xl flex flex-col rounded-none sm:rounded-[20px] shadow-2xl overflow-hidden animate-in slide-in-from-bottom-10 bg-white">
                   <CardHeader className="sticky top-0 z-20 border-b bg-white/95 p-3 sm:p-4 backdrop-blur">
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                           <div className="min-w-0">
-                              <CardTitle className="truncate text-xl font-black tracking-tight text-slate-950">{viewingCustomer.name}</CardTitle>
+                              <CardTitle className="truncate text-xl font-bold tracking-tight text-slate-950">{viewingCustomer.name}</CardTitle>
                               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
                                   <span className="inline-flex items-center gap-1"><Phone className="h-3.5 w-3.5" /> {viewingCustomer.phone}</span>
                                   <span>GST Name: <b className="text-slate-700">{viewingCustomer.gstName || 'Not added'}</b></span>
                                   <span>GST No: <b className="text-slate-700">{viewingCustomer.gstNumber || 'Not added'}</b></span>
                               </div>
                           </div>
-                          <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
-                              <Button size="sm" className="bg-emerald-700 text-white shadow-sm hover:bg-emerald-800" onClick={() => handleRecordPayment()}><Coins className="mr-1.5 h-4 w-4" /> Receive Payment</Button>
+                          <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end [&_button]:h-9 [&_button]:rounded-lg [&_button]:px-3 [&_button]:text-sm [&_button]:font-semibold">
+                              <Button size="sm" className="bg-emerald-700 text-white shadow-none hover:bg-emerald-800" onClick={() => handleRecordPayment()}><Coins className="mr-1.5 h-4 w-4" /> Receive Payment</Button>
                               <Button size="sm" variant="outline" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}><FileText className="mr-1.5 h-4 w-4" /> Statement</Button>
                               <Button size="sm" variant="outline" className="border-emerald-200 text-emerald-700" onClick={() => { if (viewingCustomer) void handleShareCustomerLedger(viewingCustomer); }}>WhatsApp Ledger</Button>
                               <Button size="sm" variant="outline" onClick={() => openCustomerActionModal('payment')}><Plus className="mr-1.5 h-4 w-4" /> Transaction</Button>
-                              {can('analytics') && <Button size="sm" variant="ghost" className="text-xs text-blue-700" onClick={() => { if (!viewingCustomer) return; setUpdatedViewPreview(previewCustomerRepairedAllocationView(viewingCustomer.id)); setUpdatedViewOpen(true); }}>Updated View</Button>}
+                              {can('analytics') && <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px] text-slate-500 hover:text-blue-700" onClick={() => { if (!viewingCustomer) return; setUpdatedViewPreview(previewCustomerRepairedAllocationView(viewingCustomer.id)); setUpdatedViewOpen(true); }}>Updated View</Button>}
                               {can('analytics') && customerLedgerDebugEnabled && (
-                                  <Button size="sm" variant="ghost" className="text-xs text-amber-700" onClick={() => { if (!viewingCustomer) return; setPaymentAuditResult(auditCustomerPaymentAllocations(viewingCustomer.id)); setPaymentAuditOpen(true); }}>Audit</Button>
+                                  <Button size="sm" variant="ghost" className="h-7 px-2 text-[11px] text-slate-500 hover:text-amber-700" onClick={() => { if (!viewingCustomer) return; setPaymentAuditResult(auditCustomerPaymentAllocations(viewingCustomer.id)); setPaymentAuditOpen(true); }}>Audit</Button>
                               )}
                               {can('analytics') && <Button size="sm" variant="outline" className="border-red-200 text-red-700 hover:bg-red-50" onClick={() => setIsDeleteModalOpen(true)}><Trash2 className="mr-1.5 h-4 w-4" /> Delete</Button>}
                               <span className="mx-1 hidden h-6 w-px bg-slate-200 lg:inline-block" />
-                              <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full border bg-white" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab('ledger'); setViewingCustomer(null); }}><X className="h-4 w-4" /></Button>
+                              <Button variant="ghost" size="icon" className="h-9 w-9 rounded-lg border bg-white px-0" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab('ledger'); setViewingCustomer(null); }}><X className="h-4 w-4" /></Button>
                           </div>
                       </div>
                       <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                          <div className="rounded-xl border border-orange-100 bg-orange-50/70 px-3 py-2 shadow-sm">
-                              <div className="text-[10px] font-black uppercase tracking-widest text-orange-700">Current Due</div>
-                              <div className="mt-0.5 text-xl font-black text-slate-950">₹{formatMoneyWhole(viewingCustomerTotalDue)}</div>
+                          <div className="rounded-xl border border-orange-100 bg-orange-50/40 px-4 py-3">
+                              <div className="text-[11px] font-bold uppercase tracking-[0.04em] text-orange-700">Current Due</div>
+                              <div className="mt-0.5 text-2xl font-bold text-slate-950">₹{formatMoneyWhole(viewingCustomerTotalDue)}</div>
                           </div>
-                          <div className="rounded-xl border border-emerald-100 bg-emerald-50/80 px-3 py-2 shadow-sm">
-                              <div className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Store Credit</div>
-                              <div className="mt-0.5 text-xl font-black text-emerald-700">₹{formatMoneyWhole(viewingCustomerStoreCredit)}</div>
+                          <div className="rounded-xl border border-blue-100 bg-blue-50/40 px-4 py-3">
+                              <div className="text-[11px] font-bold uppercase tracking-[0.04em] text-blue-700">Store Credit</div>
+                              <div className="mt-0.5 text-2xl font-bold text-blue-700">₹{formatMoneyWhole(viewingCustomerStoreCredit)}</div>
                           </div>
-                          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 shadow-sm">
-                              <div className="text-[10px] font-black uppercase tracking-widest text-slate-600">Net Receivable</div>
-                              <div className="mt-0.5 text-xl font-black text-slate-950">₹{formatMoneyWhole(viewingCustomerNetReceivable)}</div>
+                          <div className="rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-3">
+                              <div className="text-[11px] font-bold uppercase tracking-[0.04em] text-slate-500">Net Receivable</div>
+                              <div className="mt-0.5 text-2xl font-bold text-slate-950">₹{formatMoneyWhole(viewingCustomerNetReceivable)}</div>
                           </div>
                       </div>
-                      <div className="mt-3 flex gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1">
+                      <div className="mt-3 flex flex-wrap gap-1 border-b border-slate-200">
                           {([
                             ['ledger', 'Ledger'],
                             ['store_credit', 'Store Credit'],
                             ['custom_orders', 'Custom Orders'],
                             ['notes', 'Notes / Audit'],
                           ] as const).map(([tab, label]) => (
-                            <button key={tab} type="button" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab(tab); }} className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-black transition ${customerDetailTab === tab ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>
+                            <button key={tab} type="button" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab(tab); }} className={`whitespace-nowrap border-b-2 px-3 py-2 text-[13px] font-semibold transition ${customerDetailTab === tab ? 'border-slate-900 text-slate-950' : 'border-transparent text-slate-500 hover:text-slate-800'}`}>{label}</button>
                           ))}
                       </div>
                   </CardHeader>
-                  <CardContent className="flex-1 overflow-y-auto bg-slate-50/70 p-4 sm:p-6">
+                  <CardContent className="flex-1 overflow-y-auto bg-slate-50/70 p-3 sm:p-4">
                       {customerDetailTab === 'ledger' && (
-                        <div className="grid min-h-[520px] gap-3 lg:grid-cols-2">
-                          <section className="flex min-h-[360px] flex-col overflow-hidden rounded-xl border bg-white">
+                        <div className="grid min-h-[520px] gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+                          <section className="flex min-h-[360px] min-w-0 flex-col overflow-hidden rounded-xl border bg-white">
                             <div className="sticky top-0 z-10 border-b bg-slate-50/95 px-3 py-2 backdrop-blur">
-                              <div className="text-xs font-black uppercase tracking-wider text-slate-700">Business Transactions</div>
+                              <div className="text-[11px] font-bold uppercase tracking-[0.04em] text-slate-700">Business Transactions</div>
                               <div className="text-[11px] text-slate-500">Operational product history only</div>
                             </div>
-                            <div className="max-h-[520px] overflow-auto">
-                              <table className="w-full min-w-[560px] border-collapse text-xs">
-                                <thead className="sticky top-0 z-10 bg-white text-[10px] uppercase tracking-wider text-slate-500 shadow-[0_1px_0_0_rgba(148,163,184,0.35)]">
+                            <div className="max-h-[520px] overflow-y-auto overflow-x-hidden">
+                              <table className="w-full table-fixed border-collapse text-[13px]">
+                                <colgroup>
+                                  <col className="w-[82px]" />
+                                  <col className="w-[92px]" />
+                                  <col />
+                                  <col className="w-[96px]" />
+                                </colgroup>
+                                <thead className="sticky top-0 z-10 bg-white text-[11px] uppercase tracking-[0.04em] text-slate-500 shadow-[0_1px_0_0_rgba(148,163,184,0.35)]">
                                   <tr>
-                                    <th className="px-3 py-2 text-left font-black">Date</th>
-                                    <th className="px-3 py-2 text-left font-black">Type</th>
-                                    <th className="px-3 py-2 text-left font-black">Image</th>
-                                    <th className="px-3 py-2 text-left font-black">Product Name</th>
-                                    <th className="px-3 py-2 text-right font-black">Amount</th>
+                                    <th className="px-2.5 py-2 text-left font-bold">Date</th>
+                                    <th className="px-2.5 py-2 text-left font-bold">Type</th>
+                                    <th className="px-2.5 py-2 text-left font-bold">Product</th>
+                                    <th className="px-2.5 py-2 text-right font-bold">Amount</th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                   {businessTransactionRows.length === 0 ? (
-                                    <tr><td colSpan={5} className="px-3 py-8 text-center text-xs text-slate-400">No business transactions yet.</td></tr>
+                                    <tr><td colSpan={4} className="px-3 py-8 text-center text-xs text-slate-400">No business transactions yet.</td></tr>
                                   ) : businessTransactionRows.map((row, idx) => (
-                                    <tr key={`business-${row.sourceKind}-${row.id}`} className={`h-10 hover:bg-blue-50/40 ${idx % 2 ? 'bg-slate-50/35' : 'bg-white'}`}>
-                                      <td className="whitespace-nowrap px-3 py-2 font-semibold text-slate-700">{formatCompactDate(row.date)}</td>
-                                      <td className="px-3 py-2"><Badge variant="outline" className="whitespace-nowrap px-1.5 py-0 text-[10px] font-black uppercase">{compactTypeLabel(row.type, row.originalType, row.referenceType)}</Badge></td>
-                                      <td className="px-3 py-1.5">
-                                        <div className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-md bg-slate-100">
-                                          {row.image ? <img src={row.image} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : <Package className="h-3.5 w-3.5 text-slate-300" />}
+                                    <tr key={`business-${row.sourceKind}-${row.id}`} className={`h-12 hover:bg-blue-50/40 ${idx % 2 ? 'bg-slate-50/35' : 'bg-white'}`}>
+                                      <td className="whitespace-nowrap px-2.5 py-2 text-[13px] font-semibold text-slate-700">{formatCompactDate(row.date)}</td>
+                                      <td className="px-2.5 py-2"><Badge variant="outline" className="max-w-full truncate rounded-full bg-slate-50 px-2 py-0.5 text-[11px] font-bold uppercase leading-4 text-slate-600">{compactTypeLabel(row.type, row.originalType, row.referenceType)}</Badge></td>
+                                      <td className="min-w-0 px-2.5 py-2">
+                                        <div className="flex min-w-0 items-center gap-2">
+                                          <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md border border-slate-100 bg-slate-50">
+                                            {row.image ? <img src={row.image} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : <Package className="h-3.5 w-3.5 text-slate-300" />}
+                                          </div>
+                                          <div className="min-w-0">
+                                            <div className="truncate font-semibold text-slate-800" title={row.productName}>{row.productName}</div>
+                                            {row.extraProductCount > 0 && <div className="text-[10px] font-semibold text-slate-400">+{row.extraProductCount} more</div>}
+                                          </div>
                                         </div>
                                       </td>
-                                      <td className="max-w-[240px] px-3 py-2">
-                                        <div className="truncate font-semibold text-slate-800" title={row.productName}>{row.productName}</div>
-                                        {row.extraProductCount > 0 && <div className="text-[10px] font-semibold text-slate-400">+{row.extraProductCount} more</div>}
-                                      </td>
-                                      <td className="whitespace-nowrap px-3 py-2 text-right font-black text-slate-800">₹{formatMoneyWhole(row.amount)}</td>
+                                      <td className="whitespace-nowrap px-2.5 py-2 text-right text-sm font-bold text-slate-800">₹{formatMoneyWhole(row.amount)}</td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -1606,20 +1613,27 @@ export default function Customers() {
                             </div>
                           </section>
 
-                          <section className="flex min-h-[360px] flex-col overflow-hidden rounded-xl border bg-white">
+                          <section className="flex min-h-[360px] min-w-0 flex-col overflow-hidden rounded-xl border bg-white">
                             <div className="sticky top-0 z-10 border-b bg-slate-50/95 px-3 py-2 backdrop-blur">
-                              <div className="text-xs font-black uppercase tracking-wider text-slate-700">Money / Balance Ledger</div>
+                              <div className="text-[11px] font-bold uppercase tracking-[0.04em] text-slate-700">Money / Balance Ledger</div>
                               <div className="text-[11px] text-slate-500">Positive means customer owes store; negative means store owes customer</div>
                             </div>
-                            <div className="max-h-[520px] overflow-auto">
-                              <table className="w-full min-w-[620px] border-collapse text-xs">
-                                <thead className="sticky top-0 z-10 bg-white text-[10px] uppercase tracking-wider text-slate-500 shadow-[0_1px_0_0_rgba(148,163,184,0.35)]">
+                            <div className="max-h-[520px] overflow-y-auto overflow-x-hidden">
+                              <table className="w-full table-fixed border-collapse text-[13px]">
+                                <colgroup>
+                                  <col className="w-[78px]" />
+                                  <col className="w-[88px]" />
+                                  <col />
+                                  <col className="w-[102px]" />
+                                  <col className="w-[112px]" />
+                                </colgroup>
+                                <thead className="sticky top-0 z-10 bg-white text-[11px] uppercase tracking-[0.04em] text-slate-500 shadow-[0_1px_0_0_rgba(148,163,184,0.35)]">
                                   <tr>
-                                    <th className="px-3 py-2 text-left font-black">Date</th>
-                                    <th className="px-3 py-2 text-left font-black">Type</th>
-                                    <th className="px-3 py-2 text-left font-black">Reference</th>
-                                    <th className="px-3 py-2 text-right font-black">Amount Movement</th>
-                                    <th className="px-3 py-2 text-right font-black">Running Balance</th>
+                                    <th className="px-2.5 py-2 text-left font-bold">Date</th>
+                                    <th className="px-2.5 py-2 text-left font-bold">Type</th>
+                                    <th className="px-2.5 py-2 text-left font-bold">Reference</th>
+                                    <th className="px-2.5 py-2 text-right font-bold">Movement</th>
+                                    <th className="px-2.5 py-2 text-right font-bold">Balance</th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
@@ -1629,15 +1643,17 @@ export default function Customers() {
                                     const movement = getMovementDisplay(row);
                                     const running = getRunningBalanceDisplay(row.runningBalance);
                                     return (
-                                      <tr key={`money-${row.sourceKind}-${row.id}`} className={`h-10 hover:bg-blue-50/40 ${idx % 2 ? 'bg-slate-50/35' : 'bg-white'}`}>
-                                        <td className="whitespace-nowrap px-3 py-2 font-semibold text-slate-700">{formatCompactDate(row.date)}</td>
-                                        <td className="px-3 py-2"><Badge variant="outline" className="whitespace-nowrap px-1.5 py-0 text-[10px] font-black uppercase">{compactTypeLabel(row.type, row.originalType, row.referenceType)}</Badge></td>
-                                        <td className="max-w-[180px] px-3 py-2">
-                                          <div className="truncate font-mono text-[11px] text-slate-600" title={row.reference}>#{row.reference}</div>
-                                          {row.warning && <div className="truncate text-[10px] text-amber-600" title={row.warning}>Review</div>}
+                                      <tr key={`money-${row.sourceKind}-${row.id}`} className={`h-12 hover:bg-blue-50/40 ${idx % 2 ? 'bg-slate-50/35' : 'bg-white'}`}>
+                                        <td className="whitespace-nowrap px-2.5 py-2 text-[13px] font-semibold text-slate-700">{formatCompactDate(row.date)}</td>
+                                        <td className="px-2.5 py-2"><Badge variant="outline" className="max-w-full truncate rounded-full bg-slate-50 px-2 py-0.5 text-[11px] font-bold uppercase leading-4 text-slate-600">{compactTypeLabel(row.type, row.originalType, row.referenceType)}</Badge></td>
+                                        <td className="min-w-0 px-2.5 py-2">
+                                          <div className="flex min-w-0 items-center gap-1.5">
+                                            <span className="truncate font-mono text-[11px] text-slate-600" title={row.reference}>#{row.reference}</span>
+                                            {row.warning && <span className="shrink-0 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold leading-none text-amber-700" title={row.warning}>Review</span>}
+                                          </div>
                                         </td>
-                                        <td className={`whitespace-nowrap px-3 py-2 text-right font-black ${movement.className}`}>{movement.label}</td>
-                                        <td className={`whitespace-nowrap px-3 py-2 text-right font-black ${running.className}`}>{running.label}</td>
+                                        <td className={`whitespace-nowrap px-2.5 py-2 text-right text-sm font-bold ${movement.className}`}>{movement.label}</td>
+                                        <td className={`whitespace-nowrap px-2.5 py-2 text-right text-sm font-bold ${running.className}`}>{running.label}</td>
                                       </tr>
                                     );
                                   })}
