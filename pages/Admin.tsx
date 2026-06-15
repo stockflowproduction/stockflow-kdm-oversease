@@ -1823,7 +1823,7 @@ export default function Admin() {
             <div className="grid grid-cols-[64px_minmax(0,1fr)_100px_110px_110px] gap-2 border-b bg-slate-50 p-3 text-xs font-black uppercase tracking-wider text-slate-500"><div>Image</div><div>Product</div><div>Location</div><div className="text-right">Stock</div><div className="text-right">Sell Price</div></div>
             {operatorPaginatedProducts.map((product) => (
               <div key={product.id} className="grid grid-cols-[64px_minmax(0,1fr)_100px_110px_110px] items-center gap-2 border-b p-3 text-sm">
-                <div className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{getProductImageUrl(product) ? <img src={getProductImageUrl(product)} alt={getProductName(product)} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div>
+                <div className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{getProductImageUrl(product) ? <img src={getProductImageUrl(product)} alt={getProductName(product)} className="h-full w-full object-cover"  loading="lazy"  decoding="async" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div>
                 <div className="min-w-0"><div className="truncate font-semibold">{getProductName(product)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(product)}</div></div>
                 <div>{renderLocationDisplay(product)}</div>
                 <div className="text-right font-bold">{product.stock}</div>
@@ -1840,7 +1840,7 @@ export default function Admin() {
             )}
           </CardContent>
         </Card>
-        {isLowStockModalOpen && <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"><Card className="w-full max-w-4xl max-h-[85vh] overflow-y-auto"><CardHeader className="flex flex-row items-center justify-between"><CardTitle>Low Stock Inventory</CardTitle><Button variant="ghost" onClick={() => setIsLowStockModalOpen(false)}>Close</Button></CardHeader><CardContent><div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">{lowStockProducts.map((p) => <div key={p.id} className="flex flex-col border rounded-xl bg-card overflow-hidden"><div className="aspect-square w-full bg-white flex items-center justify-center overflow-hidden border-b">{getProductImageUrl(p) ? <img src={getProductImageUrl(p)} alt={getProductName(p)} className="w-full h-full object-contain" /> : <Package className="w-8 h-8 opacity-20" />}</div><div className="p-3 min-w-0"><h4 className="font-bold text-xs truncate" title={getProductName(p)}>{getProductName(p)}</h4><p className="text-[10px] text-muted-foreground truncate">{getProductCategory(p) || '—'}</p><div className="flex items-center justify-between mt-2"><span className="text-xs font-bold">₹{p.sellPrice}</span><Badge variant={p.stock === 0 ? 'destructive' : 'secondary'} className="h-5 px-1.5 text-[10px]">Stock: {p.stock}</Badge></div></div></div>)}</div>{lowStockProducts.length === 0 && <p className="text-sm text-muted-foreground">No low stock items match your filters.</p>}</CardContent></Card></div>}
+        {isLowStockModalOpen && <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"><Card className="w-full max-w-4xl max-h-[85vh] overflow-y-auto"><CardHeader className="flex flex-row items-center justify-between"><CardTitle>Low Stock Inventory</CardTitle><Button variant="ghost" onClick={() => setIsLowStockModalOpen(false)}>Close</Button></CardHeader><CardContent><div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">{lowStockProducts.map((p) => <div key={p.id} className="flex flex-col border rounded-xl bg-card overflow-hidden"><div className="aspect-square w-full bg-white flex items-center justify-center overflow-hidden border-b">{getProductImageUrl(p) ? <img src={getProductImageUrl(p)} alt={getProductName(p)} className="w-full h-full object-contain"  loading="lazy"  decoding="async" /> : <Package className="w-8 h-8 opacity-20" />}</div><div className="p-3 min-w-0"><h4 className="font-bold text-xs truncate" title={getProductName(p)}>{getProductName(p)}</h4><p className="text-[10px] text-muted-foreground truncate">{getProductCategory(p) || '—'}</p><div className="flex items-center justify-between mt-2"><span className="text-xs font-bold">₹{p.sellPrice}</span><Badge variant={p.stock === 0 ? 'destructive' : 'secondary'} className="h-5 px-1.5 text-[10px]">Stock: {p.stock}</Badge></div></div></div>)}</div>{lowStockProducts.length === 0 && <p className="text-sm text-muted-foreground">No low stock items match your filters.</p>}</CardContent></Card></div>}
 
       </div>
     );
@@ -2028,7 +2028,7 @@ export default function Admin() {
                     className="h-12 w-12 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center"
                     onClick={(e) => { e.stopPropagation(); openProductPhotoModal(product); }}
                   >
-                    {getProductImageUrl(product) ? <img src={getProductImageUrl(product)} alt={displayProductText(product.name)} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}
+                    {getProductImageUrl(product) ? <img src={getProductImageUrl(product)} alt={displayProductText(product.name)} className="h-full w-full object-cover"  loading="lazy"  decoding="async" /> : <Package className="w-4 h-4 text-muted-foreground" />}
                   </button>
                 </td>
                 <td className="p-3 min-w-[260px]">
@@ -2040,7 +2040,7 @@ export default function Admin() {
                         <div className="mt-1 text-[11px] text-primary">Hover to view variants</div>
                         <div className="pointer-events-none absolute z-20 hidden group-hover:block top-full left-0 mt-2 w-[360px] rounded-xl border bg-white p-3 shadow-xl">
                           <div className="mb-2 flex items-center gap-2">
-                            <div className="h-10 w-10 rounded overflow-hidden border bg-muted/30 flex items-center justify-center">{product.image ? <img src={product.image} alt={displayProductText(product.name)} className="h-full w-full object-cover" /> : <Package className="w-3 h-3 text-muted-foreground" />}</div>
+                            <div className="h-10 w-10 rounded overflow-hidden border bg-muted/30 flex items-center justify-center">{product.image ? <img src={product.image} alt={displayProductText(product.name)} className="h-full w-full object-cover"  loading="lazy"  decoding="async" /> : <Package className="w-3 h-3 text-muted-foreground" />}</div>
                             <div>
                               <div className="text-xs font-semibold">{displayProductText(product.name)}</div>
                               <div className="text-[10px] text-muted-foreground">{displayProductText(product.category)}</div>
@@ -2141,7 +2141,7 @@ export default function Admin() {
                   const unit = Math.max(0, Number(p.lostDamageUnitCost || p.buyPrice || 0));
                   return (
                     <tr key={p.id} className="border-t">
-                      <td className="p-3"><div className="flex items-center gap-2"><div className="h-10 w-10 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{p.image ? <img src={p.image} alt={getProductName(p)} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div><div><div className="font-medium">{getProductName(p)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(p)}</div></div></div></td><td className="p-3">{getProductBarcode(p)}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">₹{unit.toFixed(2)}</td><td className="p-3">₹{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
+                      <td className="p-3"><div className="flex items-center gap-2"><div className="h-10 w-10 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{p.image ? <img src={p.image} alt={getProductName(p)} className="h-full w-full object-cover"  loading="lazy"  decoding="async" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div><div><div className="font-medium">{getProductName(p)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(p)}</div></div></div></td><td className="p-3">{getProductBarcode(p)}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">₹{unit.toFixed(2)}</td><td className="p-3">₹{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
                       <td className="p-3"><Button size="sm" variant="outline" onClick={() => openLostDamageModal(p)}>Edit</Button></td>
                     </tr>
                   );
@@ -2180,7 +2180,7 @@ export default function Admin() {
                       <div className="flex items-center gap-4 p-3 border rounded-lg border-dashed hover:bg-muted/10 transition-colors">
                         <div className="h-16 w-16 bg-white rounded-md overflow-hidden border flex items-center justify-center shadow-sm">
                           {formData.image ? (
-                            <img src={formData.image} alt="Preview" className="h-full w-full object-contain" />
+                            <img src={formData.image} alt="Preview" className="h-full w-full object-contain"  loading="lazy"  decoding="async" />
                           ) : (
                             <span className="text-[10px] text-muted-foreground">No Image</span>
                           )}
@@ -2450,7 +2450,7 @@ export default function Admin() {
               <div className="rounded-xl border bg-muted/20 p-4">
                 <div className="flex items-center gap-3">
                   <div className="h-16 w-16 rounded-md border overflow-hidden bg-white flex items-center justify-center">
-                    {purchaseTarget.image ? <img src={purchaseTarget.image} alt={purchaseTarget.name} className="h-full w-full object-cover" /> : <Package className="w-4 h-4 text-muted-foreground" />}
+                    {purchaseTarget.image ? <img src={purchaseTarget.image} alt={purchaseTarget.name} className="h-full w-full object-cover"  loading="lazy"  decoding="async" /> : <Package className="w-4 h-4 text-muted-foreground" />}
                   </div>
                   <div>
                     <div className="font-semibold text-base">{purchaseTarget.name}</div>
@@ -2611,7 +2611,7 @@ export default function Admin() {
               <div className="text-sm font-medium">{selectedPhotoProduct.name}</div>
               <div className="rounded-lg border bg-slate-900/80 p-3 min-h-[280px] flex items-center justify-center">
                 {getProductImageUrl(selectedPhotoProduct) ? (
-                  <img src={getProductImageUrl(selectedPhotoProduct)} alt={selectedPhotoProduct.name} className="max-h-[420px] w-full object-contain rounded" />
+                  <img src={getProductImageUrl(selectedPhotoProduct)} alt={selectedPhotoProduct.name} className="max-h-[420px] w-full object-contain rounded"  loading="lazy"  decoding="async" />
                 ) : (
                   <div className="text-center text-slate-200">
                     <Package className="w-10 h-10 mx-auto mb-2 opacity-80" />
@@ -2912,7 +2912,7 @@ export default function Admin() {
                                   <div key={p.id} className="flex flex-col border rounded-xl bg-card hover:border-primary/30 transition-all group overflow-hidden">
                                       <div className="aspect-square w-full bg-white flex items-center justify-center overflow-hidden border-b">
                                           {p.image ? (
-                                              <img src={p.image} className="w-full h-full object-contain" />
+                                              <img src={p.image} className="w-full h-full object-contain"  loading="lazy"  decoding="async" />
                                           ) : (
                                               <div className="w-full h-full flex items-center justify-center opacity-20">
                                                   <Package className="w-8 h-8" />
@@ -3058,6 +3058,8 @@ export default function Admin() {
                     src={previewImage} 
                     alt="Preview" 
                     className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl pointer-events-auto"
+                    loading="lazy"
+                    decoding="async"
                     onClick={(e) => e.stopPropagation()}
                 />
             </div>

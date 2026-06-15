@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { loadData, getSaleSettlementBreakdown, getCanonicalCustomerBalanceSnapshot, buildUpfrontOrderLedgerEffects, createManualCashbookEntry } from '../services/storage';
+import { loadData, getSaleSettlementBreakdown, getCanonicalCustomerBalanceSnapshot, buildUpfrontOrderLedgerEffects, createManualCashbookEntry, refreshDeletedTransactionsFromCloud } from '../services/storage';
 import { CashAdjustment, Expense, ManualCashbookEntry, PurchaseOrder, Transaction, UpfrontOrder } from '../types';
 import { normalizeTransactionItems } from '../utils/transactionItems';
 
@@ -239,7 +239,16 @@ export default function Cashbook() {
   const [manualDetails, setManualDetails] = useState('');
   const [manualError, setManualError] = useState<string | null>(null);
 
+  const refreshCashbookData = async () => {
+    try {
+      await refreshDeletedTransactionsFromCloud();
+    } finally {
+      setReloadKey((k) => k + 1);
+    }
+  };
+
   useEffect(() => {
+    void refreshCashbookData();
     const handleReload = () => setReloadKey((k) => k + 1);
     window.addEventListener('local-storage-update', handleReload);
     window.addEventListener('storage', handleReload);
@@ -719,6 +728,7 @@ export default function Cashbook() {
       <div className="flex items-center gap-2">
         <button className="border rounded px-3 h-9 bg-emerald-600 text-white border-emerald-700" onClick={() => openManualCashModal('cash_in')}>Cash In</button>
         <button className="border rounded px-3 h-9 bg-rose-50 text-rose-700 border-rose-300" onClick={() => openManualCashModal('cash_out')}>Cash Out</button>
+        <button className="border rounded px-3 h-9" onClick={() => void refreshCashbookData()}>Refresh cashbook</button>
       </div>
     </div>
     <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">

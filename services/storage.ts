@@ -460,6 +460,20 @@ const readDeletedTransactionsFromSubcollection = async (uid: string): Promise<De
   return deleted.sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
 };
 
+const readPurchaseReceiptPostingsFromSubcollection = async (uid: string): Promise<PurchaseReceiptPosting[]> => {
+  if (!db) return [];
+  const snap = await getDocs(getPurchaseReceiptPostingsCollectionRef(uid));
+  return sortPurchaseReceiptPostingsDesc(snap.docs.map(d => ({ ...(d.data() as PurchaseReceiptPosting), id: d.id })));
+};
+
+const readExpenseActivitiesFromSubcollection = async (uid: string): Promise<Array<ExpenseActivity & { isDeleted?: boolean; deletedAt?: string }>> => {
+  if (!db) return [];
+  const snap = await getDocs(getExpenseActivitiesCollectionRef(uid));
+  return sortExpenseActivitiesDesc(snap.docs
+    .map(d => ({ ...(d.data() as ExpenseActivity), id: d.id }))
+    .filter(activity => !isSoftDeletedRow(activity))).slice(0, 500);
+};
+
 const upsertProductInSubcollection = async (product: Product, reason: string) => {
   const user = await assertCloudWriteReady(reason);
   await setDoc(doc(db!, 'stores', user.uid, 'products', product.id), sanitizeData(product), { merge: true });
@@ -2424,14 +2438,11 @@ let unsubscribeSnapshot: any = null;
 let unsubscribeProductsSnapshot: any = null;
 let unsubscribeCustomersSnapshot: any = null;
 let unsubscribeTransactionsSnapshot: any = null;
-let unsubscribeDeletedTransactionsSnapshot: any = null;
 let unsubscribePurchaseOrdersSnapshot: any = null;
 let unsubscribePurchasePartiesSnapshot: any = null;
 let unsubscribeSupplierPaymentsSnapshot: any = null;
 let unsubscribePartyCreditLedgerSnapshot: any = null;
-let unsubscribePurchaseReceiptPostingsSnapshot: any = null;
 let unsubscribeExpensesSnapshot: any = null;
-let unsubscribeExpenseActivitiesSnapshot: any = null;
 
 
 const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
@@ -2452,10 +2463,6 @@ const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
     unsubscribeTransactionsSnapshot();
     unsubscribeTransactionsSnapshot = null;
   }
-  if (unsubscribeDeletedTransactionsSnapshot) {
-    unsubscribeDeletedTransactionsSnapshot();
-    unsubscribeDeletedTransactionsSnapshot = null;
-  }
   if (unsubscribePurchaseOrdersSnapshot) {
     unsubscribePurchaseOrdersSnapshot();
     unsubscribePurchaseOrdersSnapshot = null;
@@ -2472,17 +2479,9 @@ const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
     unsubscribePartyCreditLedgerSnapshot();
     unsubscribePartyCreditLedgerSnapshot = null;
   }
-  if (unsubscribePurchaseReceiptPostingsSnapshot) {
-    unsubscribePurchaseReceiptPostingsSnapshot();
-    unsubscribePurchaseReceiptPostingsSnapshot = null;
-  }
   if (unsubscribeExpensesSnapshot) {
     unsubscribeExpensesSnapshot();
     unsubscribeExpensesSnapshot = null;
-  }
-  if (unsubscribeExpenseActivitiesSnapshot) {
-    unsubscribeExpenseActivitiesSnapshot();
-    unsubscribeExpenseActivitiesSnapshot = null;
   }
 };
 
@@ -2651,16 +2650,7 @@ const syncFromCloud = async (): Promise<void> => {
         }, (error) => {
             logStockFlowError('transactions.listener_error', error, { uid: user.uid });
         });
-        unsubscribeDeletedTransactionsSnapshot = onSnapshot(getDeletedTransactionsCollectionRef(user.uid), (deletedSnap) => {
-            const deletedTransactions = deletedSnap.docs
-              .map(docItem => ({ ...(docItem.data() as DeletedTransactionRecord), id: docItem.id }))
-              .sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
-            memoryState = { ...memoryState, deletedTransactions };
-            financeLog.load('BIN_LOAD', { source: 'listener', count: deletedTransactions.length });
-            emitLocalStorageUpdate();
-        }, (error) => {
-            logStockFlowError('deletedTransactions.listener_error', error, { uid: user.uid });
-        });
+        // deletedTransactions are non-critical and are fetched on Transactions/Bin open or manual refresh.
         unsubscribePurchaseOrdersSnapshot = onSnapshot(getPurchaseOrdersCollectionRef(user.uid), (purchaseOrdersSnap) => {
             subcollectionPurchaseOrdersCache = purchaseOrdersSnap.docs
               .map(docItem => ({ ...(docItem.data() as PurchaseOrder), id: docItem.id }));
@@ -2689,13 +2679,7 @@ const syncFromCloud = async (): Promise<void> => {
         }, (error) => {
             logStockFlowError('partyCreditLedger.listener_error', error, { uid: user.uid });
         });
-        unsubscribePurchaseReceiptPostingsSnapshot = onSnapshot(getPurchaseReceiptPostingsCollectionRef(user.uid), (purchaseReceiptPostingsSnap) => {
-            subcollectionPurchaseReceiptPostingsCache = purchaseReceiptPostingsSnap.docs
-              .map(docItem => ({ ...(docItem.data() as PurchaseReceiptPosting), id: docItem.id }));
-            applyMergedPurchaseHydrationToMemory(user.uid, 'purchaseReceiptPostings_subcollection_listener');
-        }, (error) => {
-            logStockFlowError('purchaseReceiptPostings.listener_error', error, { uid: user.uid });
-        });
+        // purchaseReceiptPostings are non-critical and are fetched on Purchase Panel open or manual refresh.
         unsubscribeExpensesSnapshot = onSnapshot(getExpensesCollectionRef(user.uid), (expensesSnap) => {
             subcollectionExpensesCache = expensesSnap.docs
               .map(docItem => ({ ...(docItem.data() as Expense), id: docItem.id }));
@@ -2703,13 +2687,7 @@ const syncFromCloud = async (): Promise<void> => {
         }, (error) => {
             logStockFlowError('expenses.listener_error', error, { uid: user.uid });
         });
-        unsubscribeExpenseActivitiesSnapshot = onSnapshot(getExpenseActivitiesCollectionRef(user.uid), (activitiesSnap) => {
-            subcollectionExpenseActivitiesCache = activitiesSnap.docs
-              .map(docItem => ({ ...(docItem.data() as ExpenseActivity), id: docItem.id }));
-            applyMergedExpenseHydrationToMemory();
-        }, (error) => {
-            logStockFlowError('expenseActivities.listener_error', error, { uid: user.uid });
-        });
+        // expenseActivities are non-critical and are fetched on Finance open or manual refresh.
         unsubscribeSnapshot = onSnapshot(docRef, async (docSnap) => {
             if (docSnap.exists()) {
                 storeDocumentExists = true;
@@ -3569,6 +3547,30 @@ export const loadDeletedTransactionsPage = (options?: TransactionPageOptions): T
     hasMore: startIndex + rows.length < all.length,
     totalAvailable: all.length,
   };
+};
+
+export const refreshDeletedTransactionsFromCloud = async (): Promise<DeletedTransactionRecord[]> => {
+  const uid = auth?.currentUser?.uid;
+  if (!uid || !db) return loadData().deletedTransactions || [];
+  const deletedTransactions = await readDeletedTransactionsFromSubcollection(uid);
+  memoryState = { ...memoryState, deletedTransactions };
+  financeLog.load('BIN_LOAD', { source: 'manual_refresh', count: deletedTransactions.length });
+  emitLocalStorageUpdate();
+  return deletedTransactions;
+};
+
+export const refreshPurchaseReceiptPostingsFromCloud = async (): Promise<PurchaseReceiptPosting[]> => {
+  const uid = auth?.currentUser?.uid;
+  if (!uid || !db) return loadData().purchaseReceiptPostings || [];
+  subcollectionPurchaseReceiptPostingsCache = await readPurchaseReceiptPostingsFromSubcollection(uid);
+  return applyMergedPurchaseHydrationToMemory(uid, 'purchaseReceiptPostings_manual_refresh').purchaseReceiptPostings;
+};
+
+export const refreshExpenseActivitiesFromCloud = async (): Promise<ExpenseActivity[]> => {
+  const uid = auth?.currentUser?.uid;
+  if (!uid || !db) return loadData().expenseActivities || [];
+  subcollectionExpenseActivitiesCache = await readExpenseActivitiesFromSubcollection(uid);
+  return applyMergedExpenseHydrationToMemory().expenseActivities;
 };
 
 export const getNextBarcode = (category: string): string => {

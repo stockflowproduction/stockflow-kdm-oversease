@@ -14,7 +14,7 @@ import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadCustomersData, downloadCustomersTemplate, importCustomersFromFile } from '../services/importExcel';
-import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label } from '../components/ui';
+import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label, LightweightLoader } from '../components/ui';
 import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
 import { formatINRPrecise, formatINRWhole, formatMoneyPrecise, formatMoneyWhole } from '../services/numberFormat';
@@ -53,6 +53,54 @@ const getTransactionProductSummary = (tx: Transaction, maxItems = 2): string => 
   const unique = Array.from(new Set(labels));
   const shown = unique.slice(0, maxItems).join(', ');
   return unique.length > maxItems ? `${shown} +${unique.length - maxItems} more` : shown;
+};
+
+const formatCompactDate = (date: string): string => {
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  return parsed.toLocaleDateString([], { day: '2-digit', month: 'short' });
+};
+
+const compactTypeLabel = (type: unknown, originalType?: string, referenceType?: string): string => {
+  const normalized = String(type || '').replace(/_/g, ' ').trim();
+  if (originalType === 'historical_reference' && referenceType) return `historical ${String(referenceType).replace(/_/g, ' ').trim()}`;
+  if (normalized === 'custom order') return 'custom order';
+  return normalized || 'entry';
+};
+
+const getMovementDisplay = (row: {
+  type: string;
+  amountMovement: number;
+  creditDue?: number;
+  paymentReceived?: number;
+  returnAmount?: number;
+  storeCreditCreated?: number;
+  storeCreditUsed?: number;
+  receivableImpact?: number;
+}): { label: string; className: string } => {
+  const movement = Number(row.amountMovement || 0);
+  const absMovement = Math.abs(movement);
+  if (Math.abs(movement) < 0.005) return { label: 'No movement', className: 'text-slate-500' };
+  if (row.storeCreditCreated && row.storeCreditCreated > 0 && movement < 0) {
+    return { label: `Store Credit +₹${formatMoneyWhole(row.storeCreditCreated)}`, className: 'text-emerald-700' };
+  }
+  if (row.storeCreditUsed && row.storeCreditUsed > 0 && movement > 0 && row.type !== 'sale') {
+    return { label: `Store Credit Used -₹${formatMoneyWhole(row.storeCreditUsed)}`, className: 'text-blue-700' };
+  }
+  if (row.type === 'payment') {
+    return { label: `-₹${formatMoneyWhole(absMovement)}`, className: 'text-emerald-700' };
+  }
+  if (row.type === 'return') {
+    return { label: `-₹${formatMoneyWhole(absMovement)}`, className: 'text-purple-700' };
+  }
+  if (movement > 0) return { label: `+₹${formatMoneyWhole(absMovement)}`, className: 'text-orange-700' };
+  return { label: `-₹${formatMoneyWhole(absMovement)}`, className: 'text-emerald-700' };
+};
+
+const getRunningBalanceDisplay = (runningBalance: number): { label: string; className: string } => {
+  if (runningBalance > 0.005) return { label: `₹${formatMoneyWhole(runningBalance)} Due`, className: 'text-orange-700' };
+  if (runningBalance < -0.005) return { label: `Store owes ₹${formatMoneyWhole(Math.abs(runningBalance))}`, className: 'text-emerald-700' };
+  return { label: 'Settled', className: 'text-slate-500' };
 };
 
 
@@ -234,8 +282,9 @@ export default function Customers() {
   );
 
   const correctCustomerLedgerPreviews = useMemo(() => {
+    if (!showCorrectLedgerView) return [];
     return customers.map((customer) => buildCorrectCustomerLedgerPreview(customer, transactions, upfrontOrders));
-  }, [customers, transactions, upfrontOrders]);
+  }, [showCorrectLedgerView, customers, transactions, upfrontOrders]);
 
   const filteredCorrectCustomerLedgerPreviews = useMemo(() => {
     const lowerQ = searchQuery.trim().toLowerCase();
@@ -260,14 +309,19 @@ export default function Customers() {
   }, [filteredCorrectCustomerLedgerPreviews]);
 
   const customerLedgerBalanceAnalysis = useMemo(() => (
-    analyzeCustomerLedgerBalances({ customers, transactions, upfrontOrders })
-  ), [customers, transactions, upfrontOrders]);
+    showCorrectLedgerView
+      ? analyzeCustomerLedgerBalances({ customers, transactions, upfrontOrders })
+      : null
+  ), [showCorrectLedgerView, customers, transactions, upfrontOrders]);
 
   const customerLedgerBalanceDryRun = useMemo(() => (
-    repairCustomerLedgerBalancesDryRun({ customers, transactions, upfrontOrders })
-  ), [customers, transactions, upfrontOrders]);
+    showCorrectLedgerView
+      ? repairCustomerLedgerBalancesDryRun({ customers, transactions, upfrontOrders })
+      : null
+  ), [showCorrectLedgerView, customers, transactions, upfrontOrders]);
 
   const downloadCustomerLedgerDryRunJson = () => {
+    if (!customerLedgerBalanceDryRun) return;
     const payload = JSON.stringify(customerLedgerBalanceDryRun, null, 2);
     const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
     const link = document.createElement('a');
@@ -278,14 +332,14 @@ export default function Customers() {
   };
 
   const safeCustomerLedgerPatches = useMemo(() => (
-    customerLedgerBalanceDryRun.patches.filter((patch) => patch.safeToApplySnapshot)
+    customerLedgerBalanceDryRun?.patches.filter((patch) => patch.safeToApplySnapshot) || []
   ), [customerLedgerBalanceDryRun]);
 
   const customerLedgerPatchById = useMemo(() => (
-    new Map(customerLedgerBalanceDryRun.patches.map((patch) => [patch.id, patch]))
+    new Map((customerLedgerBalanceDryRun?.patches || []).map((patch) => [patch.id, patch]))
   ), [customerLedgerBalanceDryRun]);
 
-  const downloadCustomerLedgerRollbackJson = (patchesToApply: typeof customerLedgerBalanceDryRun.patches) => {
+  const downloadCustomerLedgerRollbackJson = (patchesToApply: NonNullable<typeof customerLedgerBalanceDryRun>['patches']) => {
     const rollback = {
       generatedAt: new Date().toISOString(),
       note: 'Rollback snapshot before applying corrected customer balance snapshots. Transactions were not modified.',
@@ -349,7 +403,7 @@ export default function Customers() {
       }
     }
 
-    const skipped = customerLedgerBalanceDryRun.patches.length - applied - failed;
+    const skipped = (customerLedgerBalanceDryRun?.patches.length || 0) - applied - failed;
     setCustomerLedgerApplyStatus({ applied, skipped, failed });
     setSelectedCustomerLedgerPatchIds((prev) => prev.filter((id) => !candidates.some((patch) => patch.id === id)));
     refreshData();
@@ -388,6 +442,86 @@ export default function Customers() {
       return { ...row, displayStoreCreditUsed: Math.max(row.storeCreditUsed, requestedStoreCreditUsed) };
     }).filter((row) => row.storeCreditCreated > 0.0001 || row.displayStoreCreditUsed > 0.0001 || row.warnings.some((warning) => warning.toLowerCase().includes('store credit')));
   }, [viewingCustomerCorrectLedger, transactions]);
+
+  const businessTransactionRows = useMemo(() => {
+    if (!viewingCustomerCanonical) return [];
+    const txRows = transactions
+      .filter((tx) => tx.customerId === viewingCustomerCanonical.id)
+      .map((tx) => {
+        const items = normalizeTransactionItems<any>(tx.items);
+        const primaryItem = items[0];
+        const primaryProductName = primaryItem ? formatItemNameWithVariant(getLineProductName(primaryItem), primaryItem?.selectedVariant, primaryItem?.selectedColor) : getTransactionProductSummary(tx);
+        return {
+          id: tx.id,
+          date: tx.date,
+          type: getEffectiveTransactionType(tx),
+          originalType: tx.type,
+          referenceType: (tx as any).referenceTransactionType || '',
+          image: primaryItem?.image || '',
+          productName: primaryProductName,
+          extraProductCount: Math.max(0, items.length - 1),
+          amount: Math.abs(Number(tx.total || 0)),
+          ref: tx.invoiceNo || tx.receiptNo || tx.creditNoteNo || tx.id.slice(-6),
+          sourceKind: 'transaction' as const,
+        };
+      });
+    const customOrderRows = upfrontOrders
+      .filter((order) => order.customerId === viewingCustomerCanonical.id)
+      .map((order) => ({
+        id: order.id,
+        date: order.date,
+        type: 'custom_order' as const,
+        originalType: 'upfront_order',
+        referenceType: 'custom_order',
+        image: order.productImage || '',
+        productName: formatItemNameWithVariant(order.productName, order.selectedVariant, order.selectedColor),
+        extraProductCount: 0,
+        amount: Math.max(0, Number(order.finalTotal ?? order.totalCost ?? (((order.orderTotalCustomer || 0) + (order.expenseAmount || 0)) || 0))),
+        ref: order.id.slice(-6),
+        sourceKind: 'upfront_order' as const,
+      }));
+    return [...txRows, ...customOrderRows].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime() || a.id.localeCompare(b.id));
+  }, [transactions, upfrontOrders, viewingCustomerCanonical]);
+
+  const moneyBalanceLedgerRows = useMemo(() => {
+    const orderByEffectId = new Map<string, UpfrontOrder>();
+    upfrontOrders.forEach((order) => {
+      orderByEffectId.set(`upfront-ledger-${order.id}-legacy`, order);
+      orderByEffectId.set(`upfront-ledger-${order.id}-receivable`, order);
+      (order.paymentHistory || []).forEach((payment, idx) => {
+        orderByEffectId.set(`upfront-ledger-${order.id}-payment-${payment.id || idx}`, order);
+      });
+    });
+    let previousRunningBalance = 0;
+    return (viewingCustomerCorrectLedger?.rows || []).map((row) => {
+      const sourceTx = transactions.find((tx) => tx.id === row.id);
+      const sourceOrder = orderByEffectId.get(row.id);
+      const primaryItem = sourceTx ? normalizeTransactionItems<any>(sourceTx.items)[0] : null;
+      const runningBalance = row.runningDue - row.runningStoreCredit;
+      const amountMovement = runningBalance - previousRunningBalance;
+      previousRunningBalance = runningBalance;
+      return {
+        id: row.id,
+        date: row.date,
+        type: row.effectiveType,
+        originalType: row.originalType,
+        referenceType: row.referenceType,
+        image: primaryItem?.image || sourceOrder?.productImage || '',
+        reference: row.ref || sourceTx?.invoiceNo || sourceTx?.receiptNo || sourceTx?.creditNoteNo || sourceOrder?.id.slice(-6) || row.id.slice(-6),
+        amountMovement,
+        runningBalance,
+        runningLabel: runningBalance > 0 ? 'customer owes store' : runningBalance < 0 ? 'store owes customer' : 'settled',
+        sourceKind: row.originalType === 'upfront_order' ? 'upfront_order' as const : 'canonical_replay' as const,
+        creditDue: row.creditDue,
+        paymentReceived: row.paymentReceived,
+        returnAmount: row.returnAmount,
+        storeCreditCreated: row.storeCreditCreated,
+        storeCreditUsed: row.storeCreditUsed,
+        receivableImpact: row.receivableImpact,
+        warning: row.warnings[0],
+      };
+    });
+  }, [transactions, upfrontOrders, viewingCustomerCorrectLedger]);
   const customerLedgerDebugEnabled = useMemo(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -939,13 +1073,7 @@ export default function Customers() {
           </div>
         </div>
       )}
-      {isInitialLoading && (
-        <div className="space-y-3 p-1">
-          <div className="h-8 w-56 animate-pulse rounded bg-muted" />
-          <div className="h-20 animate-pulse rounded-xl bg-muted" />
-          <div className="h-20 animate-pulse rounded-xl bg-muted" />
-        </div>
-      )}
+      {isInitialLoading && <LightweightLoader label="Loading data…" />}
       {loadError && (
         <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{loadError}</div>
       )}
@@ -961,7 +1089,7 @@ export default function Customers() {
                     <>
                       <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={() => downloadCustomersData(selectedCustomers)}>Download Selected</Button>
                       <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={handleBatchEditCustomers}>Batch Edit ({selectedCustomerIds.length})</Button>
-                      <Button variant="destructive" size="sm" className="h-8 md:h-9" onClick={handleBatchDeleteCustomers}>Batch Delete</Button>
+                      {can('analytics') && <Button variant="destructive" size="sm" className="h-8 md:h-9" onClick={handleBatchDeleteCustomers}>Batch Delete</Button>}
                     </>
                   )}
                   <Button variant="outline" size="sm" className="h-8 md:h-9" onClick={() => setIsImportModalOpen(true)}>Upload Existing File</Button>
@@ -1066,13 +1194,13 @@ export default function Customers() {
               </div>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs md:grid-cols-4 xl:grid-cols-7">
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Customers</div><div className="font-black">{customerLedgerBalanceAnalysis.totalCustomers}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Affected</div><div className="font-black text-amber-700">{customerLedgerBalanceAnalysis.affectedCustomers}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored Due</div><div className="font-black">₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalStoredDue)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Corrected Due</div><div className="font-black text-blue-700">₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalCorrectedDue)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Difference</div><div className={`font-black ${customerLedgerBalanceAnalysis.totalDifference === 0 ? 'text-slate-700' : customerLedgerBalanceAnalysis.totalDifference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(customerLedgerBalanceAnalysis.totalDifference)}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Warnings</div><div className="font-black text-red-700">{customerLedgerBalanceAnalysis.totalWarnings}</div></div>
-              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Dry-run Patches</div><div className="font-black text-purple-700">{customerLedgerBalanceDryRun.patches.length}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Customers</div><div className="font-black">{customerLedgerBalanceAnalysis?.totalCustomers || 0}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Affected</div><div className="font-black text-amber-700">{customerLedgerBalanceAnalysis?.affectedCustomers || 0}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Stored Due</div><div className="font-black">₹{formatMoneyWhole(customerLedgerBalanceAnalysis?.totalStoredDue || 0)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Corrected Due</div><div className="font-black text-blue-700">₹{formatMoneyWhole(customerLedgerBalanceAnalysis?.totalCorrectedDue || 0)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Difference</div><div className={`font-black ${(customerLedgerBalanceAnalysis?.totalDifference || 0) === 0 ? 'text-slate-700' : (customerLedgerBalanceAnalysis?.totalDifference || 0) > 0 ? 'text-red-700' : 'text-emerald-700'}`}>₹{formatMoneyWhole(customerLedgerBalanceAnalysis?.totalDifference || 0)}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Warnings</div><div className="font-black text-red-700">{customerLedgerBalanceAnalysis?.totalWarnings || 0}</div></div>
+              <div className="rounded-xl border bg-slate-50 p-2"><div className="text-[10px] uppercase text-muted-foreground">Dry-run Patches</div><div className="font-black text-purple-700">{customerLedgerBalanceDryRun?.patches.length || 0}</div></div>
             </div>
             {customerLedgerApplyStatus && (
               <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
@@ -1082,9 +1210,9 @@ export default function Customers() {
             {customerLedgerApplyError && (
               <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800">{customerLedgerApplyError}</div>
             )}
-            {customerLedgerBalanceDryRun.blocked.length > 0 && (
+            {(customerLedgerBalanceDryRun?.blocked.length || 0) > 0 && (
               <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                {customerLedgerBalanceDryRun.blocked.length} customer(s) are blocked because they have unknown historical rows or unsafe warnings. They are skipped by Apply All Safe.
+                {(customerLedgerBalanceDryRun?.blocked.length || 0)} customer(s) are blocked because they have unknown historical rows or unsafe warnings. They are skipped by Apply All Safe.
               </div>
             )}
             <div className="mt-3 overflow-x-auto">
@@ -1102,7 +1230,7 @@ export default function Customers() {
                   </tr>
                 </thead>
                 <tbody>
-                  {customerLedgerBalanceAnalysis.issues.slice(0, 12).map((issue) => {
+                  {(customerLedgerBalanceAnalysis?.issues || []).slice(0, 12).map((issue) => {
                     const patch = customerLedgerPatchById.get(issue.customerId);
                     const canApply = Boolean(patch?.safeToApplySnapshot);
                     return (
@@ -1118,12 +1246,12 @@ export default function Customers() {
                     </tr>
                     );
                   })}
-                  {customerLedgerBalanceAnalysis.issues.length === 0 && (
+                  {(customerLedgerBalanceAnalysis?.issues.length || 0) === 0 && (
                     <tr><td colSpan={8} className="p-3 text-center text-muted-foreground">No stored-vs-corrected balance differences detected.</td></tr>
                   )}
                 </tbody>
               </table>
-              {customerLedgerBalanceAnalysis.issues.length > 12 && <div className="mt-2 text-xs text-muted-foreground">Showing first 12 issues. Download JSON for the full dry-run.</div>}
+              {(customerLedgerBalanceAnalysis?.issues.length || 0) > 12 && <div className="mt-2 text-xs text-muted-foreground">Showing first 12 issues. Download JSON for the full dry-run.</div>}
             </div>
           </div>
 
@@ -1275,14 +1403,14 @@ export default function Customers() {
                     <Button size="sm" variant="outline" onClick={() => void handleShareCustomerLedger(customer)}>WhatsApp Ledger</Button>
                     <Button size="sm" variant="outline" onClick={() => openCreateOrderForCustomer(customer)}>+ Create Order</Button>
                     <Button size="sm" variant="outline" onClick={() => openCustomerEditor(customer)}>Edit</Button>
-                    <Button size="sm" variant="destructive" onClick={() => {
+                    {can('analytics') && <Button size="sm" variant="destructive" onClick={() => {
                       if (window.confirm(`Delete ${customer.name}?`)) {
                         const nextCustomers = deleteCustomer(customer.id);
                         setCustomers(nextCustomers);
                         setSelectedCustomerIds(prev => prev.filter(id => id !== customer.id));
                         if (viewingCustomer?.id === customer.id) setViewingCustomer(null);
                       }
-                    }}>Delete</Button>
+                    }}>Delete</Button>}
                   </div>
                 </td>
               </tr>
@@ -1386,22 +1514,14 @@ export default function Customers() {
       {viewingCustomer && (
           <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center sm:p-4">
               <Card className="w-full h-[100dvh] sm:h-[90vh] sm:max-w-6xl flex flex-col rounded-none sm:rounded-[24px] shadow-2xl overflow-hidden animate-in slide-in-from-bottom-10 bg-white">
-                  <CardHeader className="sticky top-0 z-20 border-b bg-white/95 p-4 sm:p-6 backdrop-blur">
-                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                          <div className="flex min-w-0 items-start gap-3">
-                              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-xl font-black text-white shadow-lg">
-                                  {viewingCustomer.name.charAt(0).toUpperCase()}
-                              </div>
-                              <div className="min-w-0">
-                                  <div className="flex flex-wrap items-center gap-2">
-                                      <CardTitle className="truncate text-2xl font-black tracking-tight text-slate-950">{viewingCustomer.name}</CardTitle>
-                                      {viewingCustomer.totalSpend >= highValueThreshold && <Badge className="bg-amber-100 text-amber-800 border-amber-200">VIP</Badge>}
-                                  </div>
-                                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
-                                      <span className="inline-flex items-center gap-1"><Phone className="h-3.5 w-3.5" /> {viewingCustomer.phone}</span>
-                                      <span>GST Name: <b className="text-slate-700">{viewingCustomer.gstName || 'Not added'}</b></span>
-                                      <span>GST No: <b className="text-slate-700">{viewingCustomer.gstNumber || 'Not added'}</b></span>
-                                  </div>
+                  <CardHeader className="sticky top-0 z-20 border-b bg-white/95 p-3 sm:p-4 backdrop-blur">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="min-w-0">
+                              <CardTitle className="truncate text-xl font-black tracking-tight text-slate-950">{viewingCustomer.name}</CardTitle>
+                              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                                  <span className="inline-flex items-center gap-1"><Phone className="h-3.5 w-3.5" /> {viewingCustomer.phone}</span>
+                                  <span>GST Name: <b className="text-slate-700">{viewingCustomer.gstName || 'Not added'}</b></span>
+                                  <span>GST No: <b className="text-slate-700">{viewingCustomer.gstNumber || 'Not added'}</b></span>
                               </div>
                           </div>
                           <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
@@ -1409,94 +1529,122 @@ export default function Customers() {
                               <Button size="sm" variant="outline" onClick={() => { setExportType('statement'); setIsExportModalOpen(true); }}><FileText className="mr-1.5 h-4 w-4" /> Statement</Button>
                               <Button size="sm" variant="outline" className="border-emerald-200 text-emerald-700" onClick={() => { if (viewingCustomer) void handleShareCustomerLedger(viewingCustomer); }}>WhatsApp Ledger</Button>
                               <Button size="sm" variant="outline" onClick={() => openCustomerActionModal('payment')}><Plus className="mr-1.5 h-4 w-4" /> Transaction</Button>
-                              <Button size="sm" variant="ghost" className="text-xs text-blue-700" onClick={() => { if (!viewingCustomer) return; setUpdatedViewPreview(previewCustomerRepairedAllocationView(viewingCustomer.id)); setUpdatedViewOpen(true); }}>Updated View</Button>
-                              {customerLedgerDebugEnabled && (
+                              {can('analytics') && <Button size="sm" variant="ghost" className="text-xs text-blue-700" onClick={() => { if (!viewingCustomer) return; setUpdatedViewPreview(previewCustomerRepairedAllocationView(viewingCustomer.id)); setUpdatedViewOpen(true); }}>Updated View</Button>}
+                              {can('analytics') && customerLedgerDebugEnabled && (
                                   <Button size="sm" variant="ghost" className="text-xs text-amber-700" onClick={() => { if (!viewingCustomer) return; setPaymentAuditResult(auditCustomerPaymentAllocations(viewingCustomer.id)); setPaymentAuditOpen(true); }}>Audit</Button>
                               )}
-                              <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => setIsDeleteModalOpen(true)}><Trash2 className="h-4 w-4" /></Button>
-                              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab('ledger'); setViewingCustomer(null); }}><X className="h-4 w-4" /></Button>
+                              {can('analytics') && <Button size="sm" variant="outline" className="border-red-200 text-red-700 hover:bg-red-50" onClick={() => setIsDeleteModalOpen(true)}><Trash2 className="mr-1.5 h-4 w-4" /> Delete</Button>}
+                              <span className="mx-1 hidden h-6 w-px bg-slate-200 lg:inline-block" />
+                              <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full border bg-white" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab('ledger'); setViewingCustomer(null); }}><X className="h-4 w-4" /></Button>
                           </div>
                       </div>
-                      <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                          <div className="rounded-2xl border border-orange-100 bg-orange-50/70 p-4 shadow-sm">
+                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                          <div className="rounded-xl border border-orange-100 bg-orange-50/70 px-3 py-2 shadow-sm">
                               <div className="text-[10px] font-black uppercase tracking-widest text-orange-700">Current Due</div>
-                              <div className="mt-1 text-2xl font-black text-slate-950">₹{formatMoneyWhole(viewingCustomerTotalDue)}</div>
-                              <div className="mt-1 text-[11px] text-slate-500">Amount currently receivable from the customer.</div>
+                              <div className="mt-0.5 text-xl font-black text-slate-950">₹{formatMoneyWhole(viewingCustomerTotalDue)}</div>
                           </div>
-                          <div className="rounded-2xl border border-emerald-100 bg-emerald-50/80 p-4 shadow-sm">
+                          <div className="rounded-xl border border-emerald-100 bg-emerald-50/80 px-3 py-2 shadow-sm">
                               <div className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Store Credit</div>
-                              <div className="mt-1 text-2xl font-black text-emerald-700">₹{formatMoneyWhole(viewingCustomerStoreCredit)}</div>
-                              <div className="mt-1 text-[11px] text-slate-500">Advance available to use later.</div>
+                              <div className="mt-0.5 text-xl font-black text-emerald-700">₹{formatMoneyWhole(viewingCustomerStoreCredit)}</div>
                           </div>
-                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-sm">
+                          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 shadow-sm">
                               <div className="text-[10px] font-black uppercase tracking-widest text-slate-600">Net Receivable</div>
-                              <div className="mt-1 text-2xl font-black text-slate-950">₹{formatMoneyWhole(viewingCustomerNetReceivable)}</div>
-                              <div className="mt-1 text-[11px] text-slate-500">Current due minus available store credit.</div>
+                              <div className="mt-0.5 text-xl font-black text-slate-950">₹{formatMoneyWhole(viewingCustomerNetReceivable)}</div>
                           </div>
                       </div>
-                      <div className="mt-4 flex gap-2 overflow-x-auto rounded-2xl bg-slate-100 p-1">
+                      <div className="mt-3 flex gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1">
                           {([
                             ['ledger', 'Ledger'],
                             ['store_credit', 'Store Credit'],
                             ['custom_orders', 'Custom Orders'],
                             ['notes', 'Notes / Audit'],
                           ] as const).map(([tab, label]) => (
-                            <button key={tab} type="button" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab(tab); }} className={`whitespace-nowrap rounded-xl px-4 py-2 text-xs font-black transition ${customerDetailTab === tab ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>
+                            <button key={tab} type="button" onClick={() => { setExpandedCustomerHistoryId(null); setCustomerDetailTab(tab); }} className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-black transition ${customerDetailTab === tab ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>
                           ))}
                       </div>
                   </CardHeader>
                   <CardContent className="flex-1 overflow-y-auto bg-slate-50/70 p-4 sm:p-6">
                       {customerDetailTab === 'ledger' && (
-                        <div className="space-y-3">
-                          <div className="hidden grid-cols-[96px_110px_105px_minmax(220px,1fr)_100px_110px_105px_115px_120px_90px] gap-2 rounded-2xl border bg-white px-3 py-2 text-[10px] font-black uppercase tracking-wider text-slate-500 shadow-sm xl:grid">
-                            <div>Date</div><div>Ref</div><div>Type</div><div>Description</div><div className="text-right">Sale Total</div><div className="text-right">Paid / Payment</div><div className="text-right">Credit Due</div><div className="text-right">Credit Created</div><div className="text-right">Balance Impact</div><div className="text-right">Actions</div>
-                          </div>
-                          {customerHistory.filter((item) => item.historyType === 'transaction').length === 0 ? (
-                            <div className="rounded-3xl border bg-white p-12 text-center text-sm text-slate-400">No ledger transactions yet.</div>
-                          ) : customerHistory.filter((item) => item.historyType === 'transaction').map((item) => {
-                            const tx = item as Transaction;
-                            const saleSettlement = getSaleSettlementView(tx);
-                            const ledgerRow = ledgerRowByTxId.get(tx.id);
-                            const expanded = expandedCustomerHistoryId === tx.id;
-                            const effectiveType = getEffectiveTransactionType(tx);
-                            const items = normalizeTransactionItems(tx.items);
-                            const paymentAmount = effectiveType === 'payment' ? Math.abs(Number(tx.total || 0)) : 0;
-                            const paymentApplied = Math.max(0, Number((tx as any).paymentAppliedToReceivable || ledgerRow?.credit || 0));
-                            const storeCreditCreated = Math.max(0, Number((tx as any).storeCreditCreated || Math.max(0, paymentAmount - paymentApplied)));
-                            const returnAllocation = effectiveType === 'return' ? getCanonicalReturnAllocation(tx, transactions.filter((candidate) => candidate.customerId === tx.customerId && new Date(candidate.date).getTime() < new Date(tx.date).getTime()), Math.max(0, ledgerRow?.netAfter || 0)) : null;
-                            const ref = tx.invoiceNo || tx.receiptNo || tx.creditNoteNo || tx.id.slice(-6);
-                            const saleTotal = saleSettlement ? Math.abs(Number(tx.total || 0)) : 0;
-                            const paidNow = saleSettlement ? saleSettlement.paidNow : paymentAmount;
-                            const creditDue = saleSettlement ? saleSettlement.creditDue : 0;
-                            const creditCreated = storeCreditCreated || returnAllocation?.storeCreditIncrease || Number((tx as any).storeCreditCreated || 0);
-                            const balanceImpact = saleSettlement ? creditDue : effectiveType === 'payment' ? -paymentApplied : returnAllocation ? -returnAllocation.dueReduction : (ledgerRow?.debit || 0) - (ledgerRow?.credit || 0);
-                            return (
-                              <div key={tx.id} className="overflow-hidden rounded-2xl border bg-white shadow-sm">
-                                <button type="button" className="grid w-full gap-2 px-3 py-3 text-left transition hover:bg-slate-50 xl:grid-cols-[96px_110px_105px_minmax(220px,1fr)_100px_110px_105px_115px_120px_90px] xl:items-center" onClick={() => setExpandedCustomerHistoryId(expanded ? null : tx.id)}>
-                                  <div className="text-xs font-bold text-slate-700">{new Date(tx.date).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</div>
-                                  <div className="font-mono text-[11px] text-slate-500">#{ref}</div>
-                                  <div><Badge variant="outline" className={`text-[10px] font-black uppercase ${effectiveType === 'payment' ? 'border-blue-200 bg-blue-50 text-blue-700' : effectiveType === 'return' ? 'border-purple-200 bg-purple-50 text-purple-700' : tx.type === 'historical_reference' ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>{tx.type === 'historical_reference' ? `Historical ${effectiveType}` : effectiveType.replace(/_/g, ' ')}</Badge></div>
-                                  <div className="min-w-0 text-xs text-slate-600"><div className="truncate font-semibold text-slate-800">{ledgerRow?.listDescription || tx.notes || getTransactionProductSummary(tx)}</div>{tx.notes && <div className="truncate text-[11px] text-slate-400">{tx.notes}</div>}</div>
-                                  <div className="text-right text-xs font-bold text-slate-700">{saleTotal ? `₹${formatMoneyWhole(saleTotal)}` : '—'}</div>
-                                  <div className="text-right text-xs font-bold text-blue-700">{paidNow ? `₹${formatMoneyWhole(paidNow)}` : '—'}</div>
-                                  <div className="text-right text-xs font-bold text-orange-700">{creditDue ? `₹${formatMoneyWhole(creditDue)}` : '—'}</div>
-                                  <div className="text-right text-xs font-bold text-emerald-700">{creditCreated ? `₹${formatMoneyWhole(creditCreated)}` : '—'}</div>
-                                  <div className={`text-right text-xs font-black ${balanceImpact > 0 ? 'text-orange-700' : balanceImpact < 0 ? 'text-emerald-700' : 'text-slate-500'}`}>{balanceImpact ? `${balanceImpact < 0 ? '-' : ''}₹${formatMoneyWhole(Math.abs(balanceImpact))}` : '—'}</div>
-                                  <div className="flex items-center justify-end gap-1 text-[10px] font-black text-slate-400"><span>{expanded ? 'Hide' : 'View'}</span><ChevronRight className={`h-4 w-4 transition ${expanded ? 'rotate-90' : ''}`} /></div>
-                                </button>
-                                {expanded && (
-                                  <div className="border-t bg-slate-50 p-4">
-                                    <div className="grid gap-3 lg:grid-cols-3">
-                                      <div className="rounded-2xl border bg-white p-4"><div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Transaction Summary</div><div className="mt-3 space-y-1.5 text-xs"><div className="flex justify-between"><span>Original Type</span><b>{tx.type}</b></div>{tx.type === 'historical_reference' && <div className="flex justify-between"><span>Reference Type</span><b>{(tx as any).referenceTransactionType || '—'}</b></div>}<div className="flex justify-between"><span>Effective Type</span><b>{effectiveType}</b></div><div className="flex justify-between"><span>Payment Method</span><b>{tx.paymentMethod || '—'}</b></div><div className="flex justify-between"><span>Running Net Balance</span><b>₹{formatMoneyWhole(ledgerRow?.netAfter || 0)}</b></div></div></div>
-                                      <div className="rounded-2xl border bg-white p-4"><div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Payment / Settlement</div><div className="mt-3 space-y-1.5 text-xs">{saleSettlement && <><div className="flex justify-between"><span>Sale Total</span><b>₹{formatMoneyWhole(saleTotal)}</b></div><div className="flex justify-between"><span>Paid Now</span><b>₹{formatMoneyWhole(saleSettlement.paidNow)}</b></div><div className="flex justify-between"><span>Cash Paid</span><b>₹{formatMoneyWhole(saleSettlement.cashPaid)}</b></div><div className="flex justify-between"><span>Online Paid</span><b>₹{formatMoneyWhole(saleSettlement.onlinePaid)}</b></div><div className="flex justify-between"><span>Store Credit Used</span><b>₹{formatMoneyWhole(saleSettlement.storeCreditUsed)}</b></div><div className="flex justify-between border-t pt-1 font-black text-orange-700"><span>Credit Due / Balance Impact</span><b>₹{formatMoneyWhole(saleSettlement.creditDue)}</b></div></>}{effectiveType === 'payment' && <><div className="flex justify-between"><span>Payment Received</span><b>₹{formatMoneyWhole(paymentAmount)}</b></div><div className="flex justify-between"><span>Applied To Due</span><b>₹{formatMoneyWhole(paymentApplied)}</b></div><div className="flex justify-between text-emerald-700"><span>Store Credit Created</span><b>₹{formatMoneyWhole(storeCreditCreated)}</b></div></>}{returnAllocation && <><div className="flex justify-between"><span>Return Amount</span><b>₹{formatMoneyWhole(returnAllocation.validReturnValue)}</b></div><div className="flex justify-between"><span>Refund Cash</span><b>₹{formatMoneyWhole(returnAllocation.cashRefund)}</b></div><div className="flex justify-between"><span>Refund Online</span><b>₹{formatMoneyWhole(returnAllocation.onlineRefund)}</b></div><div className="flex justify-between text-emerald-700"><span>Due Reduction</span><b>₹{formatMoneyWhole(returnAllocation.dueReduction)}</b></div></>}</div></div>
-                                      <div className="rounded-2xl border bg-white p-4"><div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Notes</div><p className="mt-3 text-xs text-slate-600">{tx.notes || 'No notes added.'}</p></div>
-                                    </div>
-                                    {items.length > 0 && <div className="mt-3 rounded-2xl border bg-white p-4"><div className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-500">Items</div><div className="divide-y">{items.map((line, idx) => <div key={`${tx.id}-item-${idx}`} className="grid grid-cols-[40px_minmax(0,1fr)_80px_90px] items-center gap-3 py-2 text-xs"><div className="h-10 w-10 overflow-hidden rounded-xl border bg-slate-50">{line.image ? <img src={line.image} className="h-full w-full object-contain" /> : <Package className="m-2 h-5 w-5 text-slate-300" />}</div><div className="min-w-0"><div className="truncate font-bold">{formatItemNameWithVariant(line.name, line.selectedVariant, line.selectedColor)}</div><div className="text-[10px] text-slate-400">Qty {line.quantity}</div></div><div className="text-right">₹{formatMoneyWhole(line.sellPrice)}</div><div className="text-right font-black">₹{formatMoneyPrecise((line.sellPrice * line.quantity) - (line.discountAmount || 0))}</div></div>)}</div></div>}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
+                        <div className="grid min-h-[520px] gap-3 lg:grid-cols-2">
+                          <section className="flex min-h-[360px] flex-col overflow-hidden rounded-xl border bg-white">
+                            <div className="sticky top-0 z-10 border-b bg-slate-50/95 px-3 py-2 backdrop-blur">
+                              <div className="text-xs font-black uppercase tracking-wider text-slate-700">Business Transactions</div>
+                              <div className="text-[11px] text-slate-500">Operational product history only</div>
+                            </div>
+                            <div className="max-h-[520px] overflow-auto">
+                              <table className="w-full min-w-[560px] border-collapse text-xs">
+                                <thead className="sticky top-0 z-10 bg-white text-[10px] uppercase tracking-wider text-slate-500 shadow-[0_1px_0_0_rgba(148,163,184,0.35)]">
+                                  <tr>
+                                    <th className="px-3 py-2 text-left font-black">Date</th>
+                                    <th className="px-3 py-2 text-left font-black">Type</th>
+                                    <th className="px-3 py-2 text-left font-black">Image</th>
+                                    <th className="px-3 py-2 text-left font-black">Product Name</th>
+                                    <th className="px-3 py-2 text-right font-black">Amount</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                  {businessTransactionRows.length === 0 ? (
+                                    <tr><td colSpan={5} className="px-3 py-8 text-center text-xs text-slate-400">No business transactions yet.</td></tr>
+                                  ) : businessTransactionRows.map((row, idx) => (
+                                    <tr key={`business-${row.sourceKind}-${row.id}`} className={`h-10 hover:bg-blue-50/40 ${idx % 2 ? 'bg-slate-50/35' : 'bg-white'}`}>
+                                      <td className="whitespace-nowrap px-3 py-2 font-semibold text-slate-700">{formatCompactDate(row.date)}</td>
+                                      <td className="px-3 py-2"><Badge variant="outline" className="whitespace-nowrap px-1.5 py-0 text-[10px] font-black uppercase">{compactTypeLabel(row.type, row.originalType, row.referenceType)}</Badge></td>
+                                      <td className="px-3 py-1.5">
+                                        <div className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-md bg-slate-100">
+                                          {row.image ? <img src={row.image} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : <Package className="h-3.5 w-3.5 text-slate-300" />}
+                                        </div>
+                                      </td>
+                                      <td className="max-w-[240px] px-3 py-2">
+                                        <div className="truncate font-semibold text-slate-800" title={row.productName}>{row.productName}</div>
+                                        {row.extraProductCount > 0 && <div className="text-[10px] font-semibold text-slate-400">+{row.extraProductCount} more</div>}
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2 text-right font-black text-slate-800">₹{formatMoneyWhole(row.amount)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </section>
+
+                          <section className="flex min-h-[360px] flex-col overflow-hidden rounded-xl border bg-white">
+                            <div className="sticky top-0 z-10 border-b bg-slate-50/95 px-3 py-2 backdrop-blur">
+                              <div className="text-xs font-black uppercase tracking-wider text-slate-700">Money / Balance Ledger</div>
+                              <div className="text-[11px] text-slate-500">Positive means customer owes store; negative means store owes customer</div>
+                            </div>
+                            <div className="max-h-[520px] overflow-auto">
+                              <table className="w-full min-w-[620px] border-collapse text-xs">
+                                <thead className="sticky top-0 z-10 bg-white text-[10px] uppercase tracking-wider text-slate-500 shadow-[0_1px_0_0_rgba(148,163,184,0.35)]">
+                                  <tr>
+                                    <th className="px-3 py-2 text-left font-black">Date</th>
+                                    <th className="px-3 py-2 text-left font-black">Type</th>
+                                    <th className="px-3 py-2 text-left font-black">Reference</th>
+                                    <th className="px-3 py-2 text-right font-black">Amount Movement</th>
+                                    <th className="px-3 py-2 text-right font-black">Running Balance</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                  {moneyBalanceLedgerRows.length === 0 ? (
+                                    <tr><td colSpan={5} className="px-3 py-8 text-center text-xs text-slate-400">No money ledger movements yet.</td></tr>
+                                  ) : moneyBalanceLedgerRows.map((row, idx) => {
+                                    const movement = getMovementDisplay(row);
+                                    const running = getRunningBalanceDisplay(row.runningBalance);
+                                    return (
+                                      <tr key={`money-${row.sourceKind}-${row.id}`} className={`h-10 hover:bg-blue-50/40 ${idx % 2 ? 'bg-slate-50/35' : 'bg-white'}`}>
+                                        <td className="whitespace-nowrap px-3 py-2 font-semibold text-slate-700">{formatCompactDate(row.date)}</td>
+                                        <td className="px-3 py-2"><Badge variant="outline" className="whitespace-nowrap px-1.5 py-0 text-[10px] font-black uppercase">{compactTypeLabel(row.type, row.originalType, row.referenceType)}</Badge></td>
+                                        <td className="max-w-[180px] px-3 py-2">
+                                          <div className="truncate font-mono text-[11px] text-slate-600" title={row.reference}>#{row.reference}</div>
+                                          {row.warning && <div className="truncate text-[10px] text-amber-600" title={row.warning}>Review</div>}
+                                        </td>
+                                        <td className={`whitespace-nowrap px-3 py-2 text-right font-black ${movement.className}`}>{movement.label}</td>
+                                        <td className={`whitespace-nowrap px-3 py-2 text-right font-black ${running.className}`}>{running.label}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </section>
                         </div>
                       )}
                       {customerDetailTab === 'store_credit' && (

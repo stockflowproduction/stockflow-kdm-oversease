@@ -8,7 +8,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { loadData } from './services/storage';
 import { emitFinanceSnapshot } from './utils/financeDebugLogger';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3, Lock } from 'lucide-react';
-import { Button } from './components/ui';
+import { Button, LightweightLoader } from './components/ui';
 import RoleLoginModal from './components/auth/RoleLoginModal';
 import { RoleSessionProvider, useRoleSession } from './src/auth/roleSession';
 import { can as simpleCan, clearAccessSession, getCurrentOperatorName, getCurrentRole, installRoleTestHelpers, isAccessUnlocked, lockAccess, setAccessSession, SimplePermission } from './src/auth/simplePermissions';
@@ -31,12 +31,13 @@ const Cashbook = lazy(() => import('./pages/Cashbook'));
 
 // --- Components ---
 
-const NavItem = ({ to, icon: Icon, label, labelClassName = '' }: { to: string, icon: any, label: string, labelClassName?: string }) => {
+const NavItem = ({ to, icon: Icon, label, labelClassName = '', optimisticActivePath, onOptimisticActivate }: { to: string, icon: any, label: string, labelClassName?: string, optimisticActivePath?: string | null, onOptimisticActivate?: (path: string) => void }) => {
   const location = useLocation();
-  const isActive = location.pathname === to;
+  const isActive = (optimisticActivePath || location.pathname) === to;
   return (
     <Link 
       to={to} 
+      onClick={() => onOptimisticActivate?.(to)}
       className={`flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${
         isActive 
           ? 'bg-primary text-primary-foreground' 
@@ -47,6 +48,15 @@ const NavItem = ({ to, icon: Icon, label, labelClassName = '' }: { to: string, i
       <span className={labelClassName}>{label}</span>
     </Link>
   );
+};
+
+
+const RouteActivationObserver = ({ onRouteCommitted }: { onRouteCommitted: () => void }) => {
+  const location = useLocation();
+  useEffect(() => {
+    onRouteCommitted();
+  }, [location.pathname, onRouteCommitted]);
+  return null;
 };
 
 const MenuController = ({ setIsMenuOpen }: { setIsMenuOpen: (open: boolean) => void }) => {
@@ -80,6 +90,8 @@ function AppContent() {
   const [salesCartCount, setSalesCartCount] = useState(0);
   const { logoutRole, setSession } = useRoleSession();
   const [accessUnlocked, setAccessUnlocked] = useState(() => isAccessUnlocked());
+  const [optimisticActivePath, setOptimisticActivePath] = useState<string | null>(null);
+  const clearOptimisticActivePath = React.useCallback(() => setOptimisticActivePath(null), []);
 
   useEffect(() => {
     installRoleTestHelpers();
@@ -247,6 +259,7 @@ function AppContent() {
 
   return (
     <Router>
+      <RouteActivationObserver onRouteCommitted={clearOptimisticActivePath} />
       <MenuController setIsMenuOpen={setIsMenuOpen} />
       <div className="flex h-screen bg-background overflow-hidden">
         {updateAvailable && (
@@ -309,18 +322,18 @@ function AppContent() {
           
           <nav className="flex-1 px-4 space-y-1">
             <p className="px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 mt-2">Menu</p>
-            <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" />
-            <NavItem to="/" icon={Package} label="Inventory" />
-            <NavItem to="/sales" icon={ShoppingCart} label="POS System" />
-            <NavItem to="/transactions" icon={ArrowRightLeft} label="Transactions" />
-            {showNav('/product-analytics') && <NavItem to="/product-analytics" icon={BarChart3} label="Product Analytics" />}
-            <NavItem to="/customers" icon={Users} label="Customers" />
-            {showNav('/pdf') && <NavItem to="/pdf" icon={FileText} label="Reports" />}
-            {showNav('/settings') && <NavItem to="/settings" icon={SettingsIcon} label="Settings" />}
-            {showNav('/cashbook') && <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" />}
-            <NavItem to="/finance" icon={Landmark} label="Finance" />
-            {showNav('/freight-booking') && <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" />}
-            {showNav('/purchase-panel') && <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Parties" />}
+            <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
+            <NavItem to="/" icon={Package} label="Inventory" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
+            <NavItem to="/sales" icon={ShoppingCart} label="POS System" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
+            <NavItem to="/transactions" icon={ArrowRightLeft} label="Transactions" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
+            {showNav('/product-analytics') && <NavItem to="/product-analytics" icon={BarChart3} label="Product Analytics" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            <NavItem to="/customers" icon={Users} label="Customers" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
+            {showNav('/pdf') && <NavItem to="/pdf" icon={FileText} label="Reports" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {showNav('/settings') && <NavItem to="/settings" icon={SettingsIcon} label="Settings" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {showNav('/cashbook') && <NavItem to="/cashbook" icon={Landmark} label="Cashbook" labelClassName="text-red-600" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            <NavItem to="/finance" icon={Landmark} label="Finance" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />
+            {showNav('/freight-booking') && <NavItem to="/freight-booking" icon={Truck} label="Freight Booking" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
+            {showNav('/purchase-panel') && <NavItem to="/purchase-panel" icon={ClipboardList} label="Purchase Parties" optimisticActivePath={optimisticActivePath} onOptimisticActivate={setOptimisticActivePath} />}
 
           </nav>
           
@@ -430,7 +443,7 @@ function AppContent() {
         {/* Main Content */}
         <main className="flex-1 overflow-auto bg-background">
           <div className="min-h-full p-4 md:p-8 pb-20 md:pb-8 max-w-7xl mx-auto">
-            <Suspense fallback={<div className="h-full flex items-center justify-center text-sm text-muted-foreground">Loading page…</div>}>
+            <Suspense fallback={<LightweightLoader label="Loading page…" className="min-h-[320px]" />}>
               <Routes>
                 <Route path="/" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Admin /></ProtectedRoute>} />
                 <Route path="/transactions" element={<ProtectedRoute isVerified={authStatus === "authenticated"}><Transactions /></ProtectedRoute>} />

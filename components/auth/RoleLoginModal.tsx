@@ -12,15 +12,16 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
   const [error, setError] = useState<string | null>(null);
 
   const submit = () => {
-    const pwd = password.trim();
-    if (!/^\d{4,8}$/.test(pwd)) return setError('Enter a numeric access password.');
+    const pwd = password;
 
     if (pwd === getEffectiveAdminPin(data.profile?.adminPin)) {
       onLogin(nowSession({ role: 'admin' }));
       return;
     }
 
-    const matchingOperator = operators.find((operator) => String(operator.password || '') === pwd);
+    const matchingOperator = /^\d{6,8}$/.test(pwd)
+      ? operators.find((operator) => String(operator.password || '') === pwd)
+      : undefined;
     if (!matchingOperator || matchingOperator.active === false) {
       setError('Invalid access password.');
       return;
@@ -41,15 +42,12 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
             <Label>Access Password</Label>
             <Input
               type="password"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              maxLength={8}
               autoFocus
               value={password}
-              onChange={(e) => { setPassword(e.target.value.replace(/[^\d]/g, '').slice(0, 8)); setError(null); }}
+              onChange={(e) => { setPassword(e.target.value); setError(null); }}
               onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
             />
-            <p className="text-[11px] text-muted-foreground">Operator PINs must be 6–8 digits. Existing admin PINs are accepted.</p>
+            <p className="text-[11px] text-muted-foreground">Enter admin password or operator PIN.</p>
           </div>
           {error && <p className="text-xs text-red-600">{error}</p>}
           <Button className="w-full" onClick={submit}>Unlock Access</Button>

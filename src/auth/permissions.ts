@@ -62,7 +62,7 @@ export const can = (session: RoleSession | null | undefined, permission: Permiss
   return operatorAllowed[permission] === true;
 };
 
-export const getEffectiveAdminPin = (adminPin?: string) => String(adminPin || '').trim() || '1234';
+export const getEffectiveAdminPin = (adminPin?: string) => String(adminPin || '') || '1234';
 
 export const restrictedRoutes: Record<string, PermissionKey> = {
   '/product-analytics': 'accessProductAnalytics',

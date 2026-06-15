@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { PartyCreditLedgerEntry, Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty, SupplierPaymentLedgerEntry } from '../types';
-import { applyConfirmedPurchasePartyOrderOnlyMerge, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
+import { applyConfirmedPurchasePartyOrderOnlyMerge, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, refreshPurchaseReceiptPostingsFromCloud, updatePurchaseOrder, updatePurchaseParty } from '../services/storage';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
@@ -127,9 +127,9 @@ const MAYURBHAI_MANUAL_MERGE = {
   canonicalPartyId: 'party-1777900371469-61499',
   duplicatePartyId: 'party-1780890742939-410',
   expectedOrderCount: 21,
-  expectedTotalPurchases: 3419694.20,
+  expectedTotalPurchases: 3421410.20,
   expectedPayments: 2010000,
-  expectedNetPayable: 1409694.20,
+  expectedNetPayable: 1411410.20,
 };
 const moneyMatches = (actual: number, expected: number) => Math.abs((Number(actual) || 0) - expected) < 0.01;
 const emptyDuplicateTotals = (): DuplicatePartyTotals => ({ purchaseCount: 0, totalPurchase: 0, totalPaidOnOrders: 0, remainingPayable: 0, paymentCount: 0, totalSupplierPayments: 0, paymentAppliedToPayable: 0, partyCreditCreated: 0, creditEntryCount: 0, creditCreated: 0, creditRemaining: 0, creditUsed: 0 });
@@ -480,8 +480,14 @@ export default function PurchasePanel() {
     setParties(nextParties);
   };
 
+  const refreshPurchaseReceipts = async () => {
+    await refreshPurchaseReceiptPostingsFromCloud();
+    refresh();
+  };
+
   useEffect(() => {
     refresh();
+    void refreshPurchaseReceipts();
     window.addEventListener('local-storage-update', refresh);
     return () => window.removeEventListener('local-storage-update', refresh);
   }, []);
@@ -1405,8 +1411,15 @@ export default function PurchasePanel() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Purchase Parties</h1>
-        <p className="text-sm text-muted-foreground">Manage purchase parties, payable, credit, and party payment ledger. Purchases are now created from Inventory → Add Purchase.</p>
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Purchase Parties</h1>
+            <p className="text-sm text-muted-foreground">Manage purchase parties, payable, credit, and party payment ledger. Purchases are now created from Inventory → Add Purchase.</p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => void refreshPurchaseReceipts()}>
+            Refresh receipts
+          </Button>
+        </div>
       </div>
 
       <div className="flex gap-2 border-b pb-2">

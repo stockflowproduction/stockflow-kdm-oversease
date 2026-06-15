@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
 import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
-import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, safeFinancePersistState, processTransaction, getSaleSettlementBreakdown, saveExpenseToSubcollection, saveExpenseActivityToSubcollection, deleteExpenseFromSubcollection, isExpenseStoredInSubcollection } from '../services/storage';
+import { buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, safeFinancePersistState, processTransaction, getSaleSettlementBreakdown, saveExpenseToSubcollection, saveExpenseActivityToSubcollection, deleteExpenseFromSubcollection, isExpenseStoredInSubcollection, refreshDeletedTransactionsFromCloud, refreshExpenseActivitiesFromCloud } from '../services/storage';
 import { financeLog } from '../services/financeLogger';
 import { AppState, CartItem, CashAdjustment, CashSession, Customer, DeleteCompensationRecord, DeletedTransactionRecord, ExpenseActivity, ManualCashbookEntry, PurchaseOrder, Transaction, UpdatedTransactionRecord, UpfrontOrder } from '../types';
 import { AlertCircle, DollarSign, Wallet, ReceiptIndianRupee, BarChart3, Lock, Unlock } from 'lucide-react';
@@ -828,6 +828,19 @@ export default function Finance() {
   const [isExpectedClosingBreakdownOpen, setIsExpectedClosingBreakdownOpen] = useState(false);
 
   const refreshData = () => setData(loadData());
+  const refreshFinanceNonCriticalData = async () => {
+    try {
+      await Promise.all([refreshDeletedTransactionsFromCloud(), refreshExpenseActivitiesFromCloud()]);
+      setData(loadData());
+      setErrors(null);
+    } catch (error) {
+      setErrors(getFriendlyErrorMessage(error, 'finance.refresh_non_critical'));
+    }
+  };
+
+  useEffect(() => {
+    void refreshFinanceNonCriticalData();
+  }, []);
 
   const cashSessions: CashSession[] = useMemo(() => (Array.isArray(data.cashSessions) ? data.cashSessions : []), [data]);
   const expenses: Expense[] = useMemo(() => (Array.isArray(data.expenses) ? data.expenses : []), [data]);
@@ -1813,7 +1826,7 @@ export default function Finance() {
     return buildLayerFinanceBreakdown(getRowsByLayer(rows, reportingLayerMode));
   }, [cashbookRowsWithSignals, profitMonth, reportingLayerMode]);
 
-  const cashbookExportRows = useMemo(() => filteredCashbookRows.map((row) => {
+  const buildCashbookExportRows = () => filteredCashbookRows.map((row) => {
     const touchesCurrentBalance = Math.abs(row.currentDueEffect) > 0.0001 || Math.abs(row.currentStoreCreditEffect) > 0.0001;
     const touchesCash = Math.abs(row.cashIn) > 0.0001 || Math.abs(row.cashOut) > 0.0001 || Math.abs(row.onlineIn) > 0.0001 || Math.abs(row.onlineOut) > 0.0001;
     const touchesProfit = Math.abs(row.grossProfitEffect) > 0.0001 || Math.abs(row.netProfitEffect) > 0.0001 || Math.abs(row.cogsEffect) > 0.0001 || Math.abs(row.expense) > 0.0001;
@@ -1857,7 +1870,7 @@ export default function Finance() {
       'Touches Profit': touchesProfit ? 'Yes' : 'No',
       'Potential Review Flag': potentialReviewFlag,
     };
-  }), [filteredCashbookRows]);
+  });
 
   const cashbookExportSummaryRows = useMemo(() => ([
     { Metric: 'Export generated at', Value: new Date().toISOString() },
@@ -1907,6 +1920,7 @@ export default function Finance() {
 
   const escapeCsvValue = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const exportCashbookCsv = (textFriendly = false) => {
+    const cashbookExportRows = buildCashbookExportRows();
     const headers = Object.keys(cashbookExportRows[0] || { 'Date': '', 'Transaction / Bill No': '' });
     const summaryBlock = [
       ['Metric', 'Value'],
@@ -1924,6 +1938,7 @@ export default function Finance() {
 
   const exportCashbookWorkbook = (ext: 'xlsx' | 'xls') => {
     // XLS and XLSX use the same workbook payload; extension controls target compatibility.
+    const cashbookExportRows = buildCashbookExportRows();
     const workbook = XLSX.utils.book_new();
     const summarySheet = XLSX.utils.json_to_sheet(cashbookExportSummaryRows);
     const detailSheet = XLSX.utils.json_to_sheet(cashbookExportRows);
@@ -2470,9 +2485,12 @@ export default function Finance() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 space-y-5">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
-          <p className="text-sm text-slate-600">Track cash movement, expenses, shifts, and transaction-level operating effects.</p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Finance</h1>
+            <p className="text-sm text-slate-600">Track cash movement, expenses, shifts, and transaction-level operating effects.</p>
+          </div>
+          <Button type="button" variant="outline" onClick={() => void refreshFinanceNonCriticalData()}>Refresh finance data</Button>
         </div>
 
         {errors && (

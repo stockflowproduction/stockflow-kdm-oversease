@@ -7,11 +7,11 @@ import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, UpfrontOrder, SupplierPaymentLedgerEntry } from '../types';
 import { NO_COLOR, NO_VARIANT } from '../services/productVariants';
 import { auth } from '../services/firebase';
-import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, TransactionPageCursor } from '../services/storage';
+import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, refreshDeletedTransactionsFromCloud, TransactionPageCursor } from '../services/storage';
 import { generateReceiptPDF, generateReceiptPDFDataUrl } from '../services/pdf';
 import { shareTransactionInvoiceViaWhatsApp } from '../services/whatsappShare';
 import { appendWhatsAppLog } from '../services/whatsappLogs';
-import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button } from '../components/ui';
+import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button, LightweightLoader } from '../components/ui';
 import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, Trash2 } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
@@ -266,6 +266,7 @@ export default function Transactions() {
     };
 
     refreshData();
+    void refreshDeletedTransactionsBin();
     window.addEventListener('storage', refreshData);
     window.addEventListener('local-storage-update', refreshData);
     return () => {
@@ -274,6 +275,19 @@ export default function Transactions() {
     };
   }, []);
 
+  const refreshDeletedTransactionsBin = async () => {
+    try {
+      await refreshDeletedTransactionsFromCloud();
+      const deletedWindow = loadDeletedTransactionsPage({ limit: DELETED_WINDOW_BATCH_SIZE });
+      setDeletedTransactions(deletedWindow.rows);
+      setDeletedWindowCursor(deletedWindow.nextCursor);
+      setHasMoreDeletedWindow(deletedWindow.hasMore);
+      setIsDeletedWindowed(deletedWindow.hasMore);
+      setLoadError(null);
+    } catch (error) {
+      setLoadError('Unable to refresh deleted transactions right now. Please try again.');
+    }
+  };
 
 
   const loadOlderTransactionsWindow = () => {
@@ -453,7 +467,7 @@ export default function Transactions() {
     if (settlement.onlinePaid > 0) return 'Online';
     return 'Cash';
   };
-  const excelExportFilteredTransactions = useMemo(() => {
+  const buildExcelExportFilteredTransactions = () => {
     const search = excelFilterSearch.trim().toLowerCase();
     const fromTime = excelFilterFrom ? new Date(`${excelFilterFrom}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
     const toTime = excelFilterTo ? new Date(`${excelFilterTo}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
@@ -490,17 +504,7 @@ export default function Transactions() {
       if (tx.type === 'sale') return settlement.creditDue > 0;
       return tx.paymentMethod === 'Credit';
     });
-  }, [
-    filteredTransactions,
-    customerPhoneById,
-    excelFilterFrom,
-    excelFilterTo,
-    excelFilterSearch,
-    excelFilterPayment,
-    excelFilterType,
-    excelAmountMoreThan,
-    excelAmountLessThan
-  ]);
+  };
   const selectedTransactions = useMemo(
     () => transactions.filter(tx => selectedTransactionIds.includes(tx.id)),
     [transactions, selectedTransactionIds]
@@ -1314,7 +1318,7 @@ export default function Transactions() {
       }
   };
   const handleRunExcelExport = () => {
-    exportTransactionsToExcel(excelExportFilteredTransactions);
+    exportTransactionsToExcel(buildExcelExportFilteredTransactions());
     setIsExcelFilterModalOpen(false);
     setIsExportModalOpen(false);
   };
@@ -1329,13 +1333,7 @@ export default function Transactions() {
           </div>
         </div>
       )}
-      {isInitialLoading && (
-        <div className="space-y-3 p-1">
-          <div className="h-8 w-48 animate-pulse rounded bg-muted" />
-          <div className="h-24 animate-pulse rounded-xl bg-muted" />
-          <div className="h-24 animate-pulse rounded-xl bg-muted" />
-        </div>
-      )}
+      {isInitialLoading && <LightweightLoader label="Loading data…" />}
       {loadError && (
         <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{loadError}</div>
       )}
@@ -1389,6 +1387,9 @@ export default function Transactions() {
             </Badge>
             {!showBin && hasMoreTransactionsWindow && (
               <Button variant="outline" onClick={loadOlderTransactionsWindow} className="h-9 text-sm">Load Older Transactions</Button>
+            )}
+            {showBin && (
+              <Button variant="outline" onClick={() => void refreshDeletedTransactionsBin()} className="h-9 text-sm">Refresh Bin</Button>
             )}
             {showBin && hasMoreDeletedWindow && (
               <Button variant="outline" onClick={loadOlderDeletedWindow} className="h-9 text-sm">Load Older Bin Rows</Button>
@@ -2569,7 +2570,7 @@ export default function Transactions() {
               </div>
 
               <div className="rounded-lg border bg-muted/20 p-3 text-sm">
-                Matching transactions: <span className="font-bold">{excelExportFilteredTransactions.length}</span>
+                Matching transactions are calculated when you download.
               </div>
 
               <div className="flex gap-2 justify-end">

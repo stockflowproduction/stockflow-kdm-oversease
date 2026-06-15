@@ -14,7 +14,7 @@ export default function AdminPasswordConfirmModal({ title = 'Admin password requ
   const [error, setError] = useState<string | null>(null);
 
   const submit = () => {
-    if (!verifyPassword(password.trim())) {
+    if (!verifyPassword(password)) {
       setError('Admin password is incorrect.');
       return;
     }

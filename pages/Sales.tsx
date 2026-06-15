@@ -113,7 +113,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
                 disabled={isDisabled}
             >
                 {productImage ? (
-                    <img src={productImage} alt={getProductName(product)} className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-110" loading="lazy" />
+                    <img src={productImage} alt={getProductName(product)} className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-110" loading="lazy"  decoding="async" />
                 ) : (
                     <div className="flex h-full w-full items-center justify-center bg-secondary/50">
                         <Package className="h-8 w-8 text-muted-foreground/30" />
@@ -1769,7 +1769,7 @@ export default function Sales() {
           ) : cart.map(item => (
             <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}`} className="border rounded-lg p-2.5 grid grid-cols-[44px_minmax(0,1fr)_24px] gap-2 items-start">
               <div className="h-11 w-11 bg-muted rounded-md border overflow-hidden">
-                {item.image ? <img src={item.image} alt="" className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-20" />}
+                {item.image ? <img src={item.image} alt="" className="w-full h-full object-contain"  loading="lazy"  decoding="async" /> : <Package className="w-full h-full p-2 opacity-20" />}
               </div>
               <div className="space-y-1 min-w-0">
                 <p className="text-sm font-semibold truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
@@ -2029,7 +2029,7 @@ export default function Sales() {
                     return (
                     <div key={line.key} className="rounded-md border px-2 py-1.5">
                       <div className="grid grid-cols-[30px_minmax(0,1.7fr)_64px_52px_58px_70px] md:grid-cols-[34px_minmax(0,2fr)_84px_70px_72px_84px] items-center gap-1.5 md:gap-2 text-[13px]">
-                        <div className="h-8 w-8 rounded border bg-muted overflow-hidden shrink-0">{line.image ? <img src={line.image} alt={line.name} className="h-full w-full object-contain" /> : <Package className="w-full h-full p-1.5 opacity-30" />}</div>
+                        <div className="h-8 w-8 rounded border bg-muted overflow-hidden shrink-0">{line.image ? <img src={line.image} alt={line.name} className="h-full w-full object-contain"  loading="lazy"  decoding="async" /> : <Package className="w-full h-full p-1.5 opacity-30" />}</div>
                         <div className="min-w-0 font-medium leading-tight">
                           <div className="truncate">{line.name}</div>
                           {variantParts && <div className="text-[11px] text-muted-foreground truncate">{variantParts}</div>}
@@ -2411,7 +2411,7 @@ export default function Sales() {
                   {cart.map(item => (
                     <div key={`${item.id}-${item.selectedVariant || NO_VARIANT}-${item.selectedColor || NO_COLOR}-summary`} className="px-4 py-2.5 grid grid-cols-[40px_minmax(0,1fr)_70px_90px_90px] gap-3 items-center">
                       <div className="h-10 w-10 rounded border overflow-hidden bg-muted">
-                        {item.image ? <img src={item.image} alt={item.name} className="w-full h-full object-contain" /> : <Package className="w-full h-full p-2 opacity-20" />}
+                        {item.image ? <img src={item.image} alt={item.name} className="w-full h-full object-contain"  loading="lazy"  decoding="async" /> : <Package className="w-full h-full p-2 opacity-20" />}
                       </div>
                       <p className="text-sm font-semibold truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
                       <p className="text-center text-sm">{item.quantity}</p>
