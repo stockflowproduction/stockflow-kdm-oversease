@@ -16,6 +16,7 @@ const ROLE_KEY = 'currentRole';
 export const OPERATOR_ID_KEY = 'currentOperatorId';
 export const OPERATOR_NAME_KEY = 'currentOperatorName';
 export const ACCESS_UNLOCKED_KEY = 'accessUnlocked';
+export const ACCESS_USER_EMAIL_KEY = 'accessUserEmail';
 
 const operatorPermissions: Record<SimplePermission, boolean> = {
   inventoryBuyPrice: false,
@@ -55,6 +56,15 @@ export const isAccessUnlocked = (): boolean => {
   try { return window.localStorage.getItem(ACCESS_UNLOCKED_KEY) === 'true'; } catch { return false; }
 };
 
+export const isAccessUnlockedForUser = (email?: string | null): boolean => {
+  if (typeof window === 'undefined' || !email || !isAccessUnlocked()) return false;
+  try {
+    return window.localStorage.getItem(ACCESS_USER_EMAIL_KEY) === email;
+  } catch {
+    return false;
+  }
+};
+
 export const isAdmin = (): boolean => getCurrentRole() === 'admin';
 
 export const setCurrentRole = (role: AppRole): AppRole => {
@@ -66,10 +76,12 @@ export const setCurrentRole = (role: AppRole): AppRole => {
   return role;
 };
 
-export const setAccessSession = (session: { role: AppRole; operatorId?: string; operatorName?: string }) => {
+export const setAccessSession = (session: { role: AppRole; operatorId?: string; operatorName?: string; userEmail?: string | null }) => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(ROLE_KEY, session.role);
   window.localStorage.setItem(ACCESS_UNLOCKED_KEY, 'true');
+  if (session.userEmail) window.localStorage.setItem(ACCESS_USER_EMAIL_KEY, session.userEmail);
+  else window.localStorage.removeItem(ACCESS_USER_EMAIL_KEY);
   if (session.role === 'operator') {
     window.localStorage.setItem(OPERATOR_ID_KEY, session.operatorId || '');
     window.localStorage.setItem(OPERATOR_NAME_KEY, session.operatorName || '');
@@ -83,6 +95,7 @@ export const setAccessSession = (session: { role: AppRole; operatorId?: string; 
 export const lockAccess = () => {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(ACCESS_UNLOCKED_KEY);
+  window.localStorage.removeItem(ACCESS_USER_EMAIL_KEY);
   window.dispatchEvent(new CustomEvent('stockflow-access-lock'));
 };
 
@@ -92,6 +105,7 @@ export const clearAccessSession = () => {
   window.localStorage.removeItem(OPERATOR_ID_KEY);
   window.localStorage.removeItem(OPERATOR_NAME_KEY);
   window.localStorage.removeItem(ACCESS_UNLOCKED_KEY);
+  window.localStorage.removeItem(ACCESS_USER_EMAIL_KEY);
   window.dispatchEvent(new CustomEvent('stockflow-role-change', { detail: { role: 'admin' } }));
 };
 

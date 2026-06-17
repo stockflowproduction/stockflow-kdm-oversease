@@ -124,6 +124,18 @@ export default function Settings() {
     setPinMessage('PIN updated successfully.');
   };
 
+  const handleClearAdminPin = () => {
+    const requiredCurrent = getEffectiveManagerPin(profile.adminPin);
+    if (currentPinInput.trim() !== requiredCurrent) return setPinMessage('Current ERP admin access PIN is incorrect.');
+    const next = { ...profile, adminPin: '' };
+    updateStoreProfile(next);
+    setProfile(next);
+    setCurrentPinInput('');
+    setNewPinInput('');
+    setConfirmPinInput('');
+    setPinMessage('ERP admin access PIN cleared. Admin access will use the Firebase login password.');
+  };
+
   const handleAddOperator = () => {
     const name = operatorNameInput.trim();
     const password = operatorPasswordInput.trim();
@@ -560,14 +572,22 @@ export default function Settings() {
         </Card>
 
         <Card>
-          <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> Manager PIN</CardTitle></CardHeader>
+          <CardHeader><CardTitle className="flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-primary" /> ERP Admin Access PIN</CardTitle></CardHeader>
           <CardContent className="space-y-3">
-            <p className="text-xs text-muted-foreground">Temporary default PIN is <span className="font-semibold">1234</span> until you set a new PIN.</p>
-            <div className="space-y-1"><Label>Current PIN</Label><Input type="password" inputMode="numeric" value={currentPinInput} onChange={e => setCurrentPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
-            <div className="space-y-1"><Label>New PIN</Label><Input type="password" inputMode="numeric" value={newPinInput} onChange={e => setNewPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
-            <div className="space-y-1"><Label>Confirm New PIN</Label><Input type="password" inputMode="numeric" value={confirmPinInput} onChange={e => setConfirmPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
+            <div className={`rounded-lg border px-3 py-2 text-sm ${String(profile.adminPin || '').trim() ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-blue-200 bg-blue-50 text-blue-900'}`}>
+              <div className="font-semibold">Status: {String(profile.adminPin || '').trim() ? 'Using ERP Admin PIN' : 'Using Firebase Password'}</div>
+              <div className="mt-0.5 text-xs">{String(profile.adminPin || '').trim() ? 'This PIN is separate from your Firebase login password.' : 'ERP access uses the Firebase account password.'}</div>
+            </div>
+            <p className="text-xs text-muted-foreground">This ERP admin access PIN is separate from the Firebase login password. If no ERP PIN is configured, admin access uses the current Firebase password.</p>
+            <p className="text-xs text-muted-foreground">Temporary legacy fallback PIN is <span className="font-semibold">1234</span> only when Firebase user info is unavailable and no ERP PIN is configured.</p>
+            <div className="space-y-1"><Label>Current ERP Admin Access PIN</Label><Input type="password" inputMode="numeric" value={currentPinInput} onChange={e => setCurrentPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
+            <div className="space-y-1"><Label>New ERP Admin Access PIN</Label><Input type="password" inputMode="numeric" value={newPinInput} onChange={e => setNewPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
+            <div className="space-y-1"><Label>Confirm New ERP Admin Access PIN</Label><Input type="password" inputMode="numeric" value={confirmPinInput} onChange={e => setConfirmPinInput(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} /></div>
             {pinMessage && <p className="text-xs text-muted-foreground">{pinMessage}</p>}
-            <Button type="button" variant="outline" onClick={handleChangePin}>Update PIN</Button>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" onClick={handleChangePin}>Change ERP Admin Access PIN</Button>
+              <Button type="button" variant="outline" onClick={handleClearAdminPin}>Clear ERP Admin Access PIN</Button>
+            </div>
           </CardContent>
         </Card>
 

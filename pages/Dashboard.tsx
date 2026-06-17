@@ -10,15 +10,51 @@ import { buildPurchasePartyLedger } from '../services/purchaseLedger';
 import { analyzeSupplierPurchaseLedger, repairSupplierPurchaseLedgerDryRun, SupplierLedgerAnalysis, SupplierLedgerDryRunPlan } from '../services/supplierLedgerReconciliation';
 import { generateLedgerStatementPDF } from '../services/pdf';
 import { buildCustomerStatementRowsFromCanonicalReplay, buildSupplierStatementRowsFromCanonicalLedger } from '../services/ledgerStatements';
-import { getCanonicalCustomerBalanceView } from '../services/customerBalanceView';
+import { buildCorrectCustomerLedgerPreview } from '../services/customerLedger';
 import { shareCustomerLedgerViaWhatsApp } from '../services/whatsappShare';
 import { appendWhatsAppLog } from '../services/whatsappLogs';
 import { auth } from '../services/firebase';
 import { can } from '../src/auth/simplePermissions';
+import { Search } from 'lucide-react';
 
 type CustomerReceivableRow = Customer & { receivable: number };
+
+type CanonicalCustomerDashboardBalance = {
+  currentDue: number;
+  storeCredit: number;
+  netReceivable: number;
+  replayFailed: boolean;
+};
+
+const getStoredCustomerDashboardBalance = (customer: Customer): CanonicalCustomerDashboardBalance => {
+  const currentDue = Math.max(0, Number(customer.totalDue || 0));
+  const storeCredit = Math.max(0, Number(customer.storeCredit || 0));
+  return { currentDue, storeCredit, netReceivable: Math.max(0, currentDue - storeCredit), replayFailed: true };
+};
+
+const getCanonicalCustomerDashboardBalance = (customer: Customer, transactions: Transaction[], upfrontOrders: UpfrontOrder[]): CanonicalCustomerDashboardBalance => {
+  const fallback = getStoredCustomerDashboardBalance(customer);
+  try {
+    const preview = buildCorrectCustomerLedgerPreview(customer, transactions, upfrontOrders);
+    return {
+      currentDue: Math.max(0, Number(preview.summary.correctedCurrentDue || 0)),
+      storeCredit: Math.max(0, Number(preview.summary.correctedStoreCredit || 0)),
+      netReceivable: Math.max(0, Number(preview.summary.correctedNetReceivable || 0)),
+      replayFailed: false,
+    };
+  } catch (error) {
+    if (import.meta.env.DEV) console.warn('[Dashboard] canonical customer display balance failed; using stored snapshot fallback', { customerId: customer.id, error });
+    return fallback;
+  }
+};
 type PartyPayableRow = PurchaseParty & { payable: number; dueOrders: PurchaseOrder[]; partyCredit?: number };
 type LedgerRow = { id: string; date: string; type: string; ref: string; description: string; debit: number; credit: number; balance: number; tone?: 'due' | 'payment' | 'cash' | 'refund'; source?: 'direct' | 'legacyGroup' | 'purchase' | 'customerPayment'; allocations?: Array<{ orderId: string; orderRef: string; paymentId: string; amount: number }>; purchaseAmount?: number; paymentAmount?: number; creditApplied?: number; creditCreated?: number; runningPayable?: number; runningCredit?: number; netPayable?: number; warnings?: Array<{ code: string; message: string }> };
+const getLedgerSortTime = (date: string): number => {
+  const time = new Date(date || '').getTime();
+  return Number.isFinite(time) ? time : 0;
+};
+const newestLedgerRowFirst = <T extends { date: string; id: string }>(a: T, b: T): number =>
+  getLedgerSortTime(b.date) - getLedgerSortTime(a.date) || a.id.localeCompare(b.id);
 const formatGroupedSupplierPaymentDescription = (method: string, allocationCount: number) => {
   const normalizedMethod = String(method || '').toLowerCase();
   const methodLabel = normalizedMethod === 'online' ? 'Online' : normalizedMethod === 'bank' ? 'Bank' : 'Cash';
@@ -175,6 +211,8 @@ export default function Dashboard() {
   const [statementPdfError, setStatementPdfError] = useState<string | null>(null);
   const [customerDashboardTab, setCustomerDashboardTab] = useState<'receivable' | 'storeCredit' | 'withoutDue'>('receivable');
   const [supplierDashboardTab, setSupplierDashboardTab] = useState<'payable' | 'credit' | 'withoutDue'>('payable');
+  const [customerDashboardSearch, setCustomerDashboardSearch] = useState('');
+  const [supplierDashboardSearch, setSupplierDashboardSearch] = useState('');
   const [dashboardDetailsReady, setDashboardDetailsReady] = useState(false);
 
   const refresh = () => {
@@ -268,23 +306,14 @@ export default function Dashboard() {
 
   const canonicalSnapshot = useMemo(() => getCanonicalCustomerBalanceSnapshot(customers, transactions), [customers, transactions]);
 
-  const canonicalCustomerBalanceById = useMemo(() => {
-    const map = new Map<string, ReturnType<typeof getCanonicalCustomerBalanceView>>();
+  const canonicalReplayBalanceByCustomerId = useMemo(() => {
+    const map = new Map<string, CanonicalCustomerDashboardBalance>();
+    if (!dashboardDetailsReady) return map;
     customers.forEach((customer) => {
-      const view = getCanonicalCustomerBalanceView(customer, customers, transactions, upfrontOrders);
-      map.set(customer.id, view);
+      map.set(customer.id, getCanonicalCustomerDashboardBalance(customer, transactions, upfrontOrders));
     });
     return map;
-  }, [customers, transactions, upfrontOrders]);
-
-  const compositeByCustomer = useMemo(() => {
-    const map = new Map<string, number>();
-    customers.forEach((customer) => {
-      const breakdown = getCustomerCompositeReceivableBreakdown(customer.id, customers, transactions, upfrontOrders);
-      map.set(customer.id, breakdown.totalDue);
-    });
-    return map;
-  }, [upfrontOrders, customers, transactions]);
+  }, [dashboardDetailsReady, customers, transactions, upfrontOrders]);
 
   const buildCustomerReceivableLedgerProjection = useCallback((customer: Customer) => {
     const customerTx = (transactionsByCustomerId.get(customer.id) || [])
@@ -348,7 +377,7 @@ export default function Dashboard() {
       }
       processed.push(tx);
     });
-    const displayRows = [...rows].reverse();
+    const displayRows = [...rows].sort(newestLedgerRowFirst);
     const persistedStoreCredit = Math.max(0, Number(canonicalSnapshot.balances.get(customer.id)?.storeCredit || customer.storeCredit || 0));
     const effectiveStoreCredit = Math.max(persistedStoreCredit, totalStoreCreditAdded);
     return { rows, displayRows, summary: { creditDueGenerated: totalCreditSales, paymentsReceived: totalPayments, storeCreditUsed: totalStoreCreditUsed, storeCreditAdded: totalStoreCreditAdded, currentReceivable: Math.max(0, runningBalance), effectiveStoreCredit } };
@@ -381,28 +410,27 @@ export default function Dashboard() {
   const isCashOverdraw = payMethod === 'cash' && cashOverdrawAmount > 0;
 
   
-const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
-    .map((customer) => ({
-      ...customer,
-      // Custom-order receivable is sourced from buildUpfrontOrderLedgerEffects and added once here.
-      receivable: Math.max(0, Number(compositeByCustomer.get(customer.id) || 0)),
-    }))
-    .filter((customer) => customer.receivable > 0)
-    .sort((a, b) => b.receivable - a.receivable), [customers, compositeByCustomer]);
   const allCustomerDashboardRows = useMemo(() => {
     if (!dashboardDetailsReady) return [] as CustomerReceivableRow[];
     return customers.map((customer) => {
-    const ledger = buildCustomerReceivableLedgerProjection(customer);
-    const hasStoreCreditLedgerActivity = Math.max(0, Number(ledger.summary.storeCreditAdded || 0)) > 0 || Math.max(0, Number(ledger.summary.storeCreditUsed || 0)) > 0;
-    const projectedNetStoreCredit = Math.max(0, Number(ledger.summary.storeCreditAdded || 0) - Number(ledger.summary.storeCreditUsed || 0));
-    const fallbackPersistedStoreCredit = Math.max(0, Number(canonicalCustomerBalanceById.get(customer.id)?.canonicalStoreCredit || 0));
-    const displayStoreCredit = hasStoreCreditLedgerActivity ? projectedNetStoreCredit : fallbackPersistedStoreCredit;
-    return { ...customer, receivable: ledger.summary.currentReceivable, storeCredit: displayStoreCredit } as CustomerReceivableRow;
-  }).sort((a, b) => a.name.localeCompare(b.name));
-  }, [dashboardDetailsReady, customers, buildCustomerReceivableLedgerProjection, canonicalCustomerBalanceById]);
+      const balance = canonicalReplayBalanceByCustomerId.get(customer.id) || getStoredCustomerDashboardBalance(customer);
+      return { ...customer, totalDue: balance.currentDue, storeCredit: balance.storeCredit, receivable: balance.netReceivable } as CustomerReceivableRow;
+    }).sort((a, b) => a.name.localeCompare(b.name));
+  }, [dashboardDetailsReady, customers, canonicalReplayBalanceByCustomerId]);
   const receivableCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable > 0), [allCustomerDashboardRows]);
   const storeCreditCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable <= 0 && Math.max(0, Number(c.storeCredit || 0)) > 0), [allCustomerDashboardRows]);
   const zeroDueCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable <= 0 && Math.max(0, Number(c.storeCredit || 0)) <= 0), [allCustomerDashboardRows]);
+  const visibleCustomerDashboardRows = useMemo(() => {
+    const rows = customerDashboardTab === 'receivable' ? receivableCustomerRows : customerDashboardTab === 'storeCredit' ? storeCreditCustomerRows : zeroDueCustomerRows;
+    const query = customerDashboardSearch.trim().toLowerCase();
+    if (!query) return rows;
+    return rows.filter((customer) => [
+      customer.name,
+      customer.phone,
+      customer.gstName,
+      customer.gstNumber,
+    ].some((value) => String(value || '').toLowerCase().includes(query)));
+  }, [customerDashboardSearch, customerDashboardTab, receivableCustomerRows, storeCreditCustomerRows, zeroDueCustomerRows]);
 
   const allPartyDashboardRows = useMemo<PartyPayableRow[]>(() => {
     if (!dashboardDetailsReady) return [];
@@ -458,6 +486,17 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const payablePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable > 0), [allPartyDashboardRows]);
   const creditPartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) > 0), [allPartyDashboardRows]);
   const zeroDuePartyRows = useMemo(() => allPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) <= 0), [allPartyDashboardRows]);
+  const visibleSupplierDashboardRows = useMemo(() => {
+    const rows = supplierDashboardTab === 'payable' ? payablePartyRows : supplierDashboardTab === 'credit' ? creditPartyRows : zeroDuePartyRows;
+    const query = supplierDashboardSearch.trim().toLowerCase();
+    if (!query) return rows;
+    return rows.filter((party) => [
+      party.name,
+      party.phone,
+      party.gst,
+      party.contactPerson,
+    ].some((value) => String(value || '').toLowerCase().includes(query)));
+  }, [creditPartyRows, payablePartyRows, supplierDashboardSearch, supplierDashboardTab, zeroDuePartyRows]);
 
   const operatorRevenueBreakdown = useMemo(() => transactions.filter((tx) => tx.type === 'sale').reduce((acc, tx) => {
     const settlement = getSaleSettlementBreakdown(tx);
@@ -468,7 +507,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   }, { cash: 0, online: 0, credit: 0 }), [transactions]);
   const operatorTotalSettledRevenue = operatorRevenueBreakdown.cash + operatorRevenueBreakdown.online + operatorRevenueBreakdown.credit;
 
-  const totalReceivable = useMemo(() => customerReceivables.reduce((sum, customer) => sum + customer.receivable, 0), [customerReceivables]);
+  const totalReceivable = useMemo(() => receivableCustomerRows.reduce((sum, customer) => sum + customer.receivable, 0), [receivableCustomerRows]);
   const totalPayable = useMemo(() => payablePartyRows.reduce((sum, party) => sum + party.payable, 0), [payablePartyRows]);
   const isPayableTraceEnabled = useMemo(() => {
     if (typeof window === 'undefined') return false;
@@ -653,8 +692,9 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
   const customerStatement = useMemo(() => {
     if (!selectedCustomer) return null;
     const projection = buildCustomerReceivableLedgerProjection(selectedCustomer);
-    return { rows: projection.rows, displayRows: projection.displayRows, totalCreditSales: projection.summary.creditDueGenerated, totalPayments: projection.summary.paymentsReceived, totalStoreCreditUsed: projection.summary.storeCreditUsed, totalStoreCreditAdded: projection.summary.storeCreditAdded, balanceDue: projection.summary.currentReceivable };
-  }, [selectedCustomer, buildCustomerReceivableLedgerProjection]);
+    const displayBalance = canonicalReplayBalanceByCustomerId.get(selectedCustomer.id) || getCanonicalCustomerDashboardBalance(selectedCustomer, transactions, upfrontOrders);
+    return { rows: projection.rows, displayRows: projection.displayRows, totalCreditSales: projection.summary.creditDueGenerated, totalPayments: projection.summary.paymentsReceived, totalStoreCreditUsed: projection.summary.storeCreditUsed, totalStoreCreditAdded: projection.summary.storeCreditAdded, balanceDue: displayBalance.netReceivable };
+  }, [selectedCustomer, buildCustomerReceivableLedgerProjection, canonicalReplayBalanceByCustomerId, transactions, upfrontOrders]);
 
   const partyStatement = useMemo(() => {
     if (!selectedParty) return null;
@@ -684,7 +724,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
       tone: row.type === 'purchase' ? 'due' : (row.type === 'supplier_payment' ? 'payment' : 'cash'),
       source: row.type === 'purchase' ? 'purchase' : row.type === 'legacy_payment' ? 'legacyGroup' : 'direct',
     }));
-    const displayRows = [...rows].reverse();
+    const displayRows = [...rows].sort(newestLedgerRowFirst);
     return {
       rows,
       displayRows,
@@ -864,7 +904,7 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
     }));
     return {
       rows,
-      displayRows: [...rows].reverse(),
+      displayRows: [...rows].sort(newestLedgerRowFirst),
       warnings: result.warnings,
       totalPurchase: result.summary.totalPurchase,
       totalPayments: result.summary.totalPayments ?? result.summary.actualPayments,
@@ -1180,8 +1220,17 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
               <Button size="sm" variant={customerDashboardTab === 'storeCredit' ? 'default' : 'outline'} onClick={() => setCustomerDashboardTab('storeCredit')}>Parties with Store Credit ({storeCreditCustomerRows.length})</Button>
               <Button size="sm" variant={customerDashboardTab === 'withoutDue' ? 'default' : 'outline'} onClick={() => setCustomerDashboardTab('withoutDue')}>Parties Without Due ({zeroDueCustomerRows.length})</Button>
             </div>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="h-9 rounded-lg border-slate-200 bg-slate-50 pl-8 text-sm"
+                placeholder="Search customers by name, phone, GST..."
+                value={customerDashboardSearch}
+                onChange={(e) => setCustomerDashboardSearch(e.target.value)}
+              />
+            </div>
             {!dashboardDetailsReady && <LightweightLoader label="Preparing dashboard…" className="min-h-[120px]" />}
-            {dashboardDetailsReady && (customerDashboardTab === 'receivable' ? receivableCustomerRows : customerDashboardTab === 'storeCredit' ? storeCreditCustomerRows : zeroDueCustomerRows).map((c) => (
+            {dashboardDetailsReady && visibleCustomerDashboardRows.map((c) => (
               <div key={c.id} className="flex items-center justify-between border rounded-lg p-3 gap-3">
                 <div className="min-w-0">
                   <div className="font-medium truncate">{c.name}</div>
@@ -1201,9 +1250,10 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
                 </div>
               </div>
             ))}
-            {dashboardDetailsReady && customerDashboardTab === 'receivable' && !receivableCustomerRows.length && <p className="text-sm text-muted-foreground">No customer receivables.</p>}
-            {dashboardDetailsReady && customerDashboardTab === 'storeCredit' && !storeCreditCustomerRows.length && <p className="text-sm text-muted-foreground">No customers with store credit.</p>}
-            {dashboardDetailsReady && customerDashboardTab === 'withoutDue' && !zeroDueCustomerRows.length && <p className="text-sm text-muted-foreground">No zero-due customers.</p>}
+            {dashboardDetailsReady && !visibleCustomerDashboardRows.length && customerDashboardSearch.trim() && <p className="text-sm text-muted-foreground">No customers match this search.</p>}
+            {dashboardDetailsReady && !customerDashboardSearch.trim() && customerDashboardTab === 'receivable' && !receivableCustomerRows.length && <p className="text-sm text-muted-foreground">No customer receivables.</p>}
+            {dashboardDetailsReady && !customerDashboardSearch.trim() && customerDashboardTab === 'storeCredit' && !storeCreditCustomerRows.length && <p className="text-sm text-muted-foreground">No customers with store credit.</p>}
+            {dashboardDetailsReady && !customerDashboardSearch.trim() && customerDashboardTab === 'withoutDue' && !zeroDueCustomerRows.length && <p className="text-sm text-muted-foreground">No zero-due customers.</p>}
           </CardContent>
         </Card>
 
@@ -1215,8 +1265,17 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
               <Button size="sm" variant={supplierDashboardTab === 'credit' ? 'default' : 'outline'} onClick={() => setSupplierDashboardTab('credit')}>Parties with Credit ({creditPartyRows.length})</Button>
               <Button size="sm" variant={supplierDashboardTab === 'withoutDue' ? 'default' : 'outline'} onClick={() => setSupplierDashboardTab('withoutDue')}>Parties Without Due ({zeroDuePartyRows.length})</Button>
             </div>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="h-9 rounded-lg border-slate-200 bg-slate-50 pl-8 text-sm"
+                placeholder="Search suppliers by name, phone, GST, contact..."
+                value={supplierDashboardSearch}
+                onChange={(e) => setSupplierDashboardSearch(e.target.value)}
+              />
+            </div>
             {!dashboardDetailsReady && <LightweightLoader label="Preparing dashboard…" className="min-h-[120px]" />}
-            {dashboardDetailsReady && (supplierDashboardTab === 'payable' ? payablePartyRows : supplierDashboardTab === 'credit' ? creditPartyRows : zeroDuePartyRows).map((p) => (
+            {dashboardDetailsReady && visibleSupplierDashboardRows.map((p) => (
               <div key={p.id} className="flex items-center justify-between border rounded-lg p-3 gap-3">
                 <div className="min-w-0">
                   <div className="font-medium truncate">{p.name}</div>
@@ -1237,9 +1296,10 @@ const customerReceivables = useMemo<CustomerReceivableRow[]>(() => customers
                 </div>
               </div>
             ))}
-            {dashboardDetailsReady && supplierDashboardTab === 'payable' && !payablePartyRows.length && <p className="text-sm text-muted-foreground">No payable parties.</p>}
-            {dashboardDetailsReady && supplierDashboardTab === 'credit' && !creditPartyRows.length && <p className="text-sm text-muted-foreground">No party credits recorded yet.</p>}
-            {dashboardDetailsReady && supplierDashboardTab === 'withoutDue' && !zeroDuePartyRows.length && <p className="text-sm text-muted-foreground">No zero-due parties.</p>}
+            {dashboardDetailsReady && !visibleSupplierDashboardRows.length && supplierDashboardSearch.trim() && <p className="text-sm text-muted-foreground">No suppliers match this search.</p>}
+            {dashboardDetailsReady && !supplierDashboardSearch.trim() && supplierDashboardTab === 'payable' && !payablePartyRows.length && <p className="text-sm text-muted-foreground">No payable parties.</p>}
+            {dashboardDetailsReady && !supplierDashboardSearch.trim() && supplierDashboardTab === 'credit' && !creditPartyRows.length && <p className="text-sm text-muted-foreground">No party credits recorded yet.</p>}
+            {dashboardDetailsReady && !supplierDashboardSearch.trim() && supplierDashboardTab === 'withoutDue' && !zeroDuePartyRows.length && <p className="text-sm text-muted-foreground">No zero-due parties.</p>}
           </CardContent>
         </Card>
       </div>

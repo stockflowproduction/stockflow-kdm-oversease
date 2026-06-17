@@ -1,8 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { loadData } from '../../services/storage';
-import { ENABLE_ROLE_ACCESS, getEffectiveAdminPin, RoleSession } from './permissions';
+import { ENABLE_ROLE_ACCESS, RoleSession } from './permissions';
 import { getCurrentRole } from './simplePermissions';
 import AdminPasswordConfirmModal from '../../components/auth/AdminPasswordConfirmModal';
+import { verifyAdminAccessPassword } from './accessPassword';
 
 const STORAGE_KEY = 'stockflow_role_session_v1';
 
@@ -74,7 +75,7 @@ export const RoleSessionProvider = ({ children }: { children: React.ReactNode })
         <AdminPasswordConfirmModal
           title="Admin password required"
           message={overrideRequest.message}
-          verifyPassword={(password) => password === getEffectiveAdminPin(loadData().profile?.adminPin)}
+          verifyPassword={(password) => verifyAdminAccessPassword(password, loadData().profile?.adminPin)}
           onCancel={() => { overrideRequest.resolve(false); setOverrideRequest(null); }}
           onConfirm={() => { overrideRequest.resolve(true); setOverrideRequest(null); }}
         />

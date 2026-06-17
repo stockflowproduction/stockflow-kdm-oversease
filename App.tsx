@@ -11,11 +11,13 @@ import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users
 import { Button, LightweightLoader } from './components/ui';
 import RoleLoginModal from './components/auth/RoleLoginModal';
 import { RoleSessionProvider, useRoleSession } from './src/auth/roleSession';
-import { can as simpleCan, clearAccessSession, getCurrentOperatorName, getCurrentRole, installRoleTestHelpers, isAccessUnlocked, lockAccess, setAccessSession, SimplePermission } from './src/auth/simplePermissions';
+import { can as simpleCan, clearAccessSession, getCurrentOperatorName, getCurrentRole, installRoleTestHelpers, isAccessUnlocked, isAccessUnlockedForUser, lockAccess, setAccessSession, SimplePermission } from './src/auth/simplePermissions';
 import { RestrictedPage } from './components/auth/PermissionGuard';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 import Settings from './pages/Settings';
 const WhatsAppLogs = lazy(() => import('./pages/WhatsAppLogs'));
+
+const DEV_ACCESS_BYPASS_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_DEV_ACCESS_BYPASS === 'true';
 
 const Admin = lazy(() => import('./pages/Admin'));
 const Sales = lazy(() => import('./pages/Sales'));
@@ -95,6 +97,9 @@ function AppContent() {
 
   useEffect(() => {
     installRoleTestHelpers();
+    if (DEV_ACCESS_BYPASS_ENABLED) {
+      console.warn('DEV ACCESS BYPASS ENABLED');
+    }
   }, []);
 
   useEffect(() => {
@@ -114,7 +119,12 @@ function AppContent() {
         return;
       }
 
-      setCurrentEmail(user.email || null);
+      const authedEmail = user.email || null;
+      if (isAccessUnlocked() && !isAccessUnlockedForUser(authedEmail)) {
+        clearAccessSession();
+        setAccessUnlocked(false);
+      }
+      setCurrentEmail(authedEmail);
       setAuthStatus(user.emailVerified ? 'authenticated' : 'unverified');
     });
 
@@ -223,7 +233,7 @@ function AppContent() {
   const handleAccessLogin = (session: Parameters<typeof setSession>[0]) => {
     if (!session) return;
     setSession(session);
-    setAccessSession({ role: session.role, operatorId: session.operatorId, operatorName: session.operatorName });
+    setAccessSession({ role: session.role, operatorId: session.operatorId, operatorName: session.operatorName, userEmail: currentEmail });
     setAccessUnlocked(true);
   };
 

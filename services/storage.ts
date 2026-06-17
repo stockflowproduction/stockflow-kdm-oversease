@@ -4511,6 +4511,48 @@ const normalizeUpfrontPaymentMethod = (raw?: string): UpfrontOrderLedgerEffect['
   return 'Unknown';
 };
 
+const sanitizeUpfrontOrderImageValue = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (/^data:image/i.test(trimmed) || /^blob:/i.test(trimmed)) return undefined;
+  return trimmed;
+};
+
+const sanitizeUpfrontOrderForPersist = (order: UpfrontOrder): UpfrontOrder => {
+  const sanitizedImage = sanitizeUpfrontOrderImageValue(order.productImage);
+  const next: UpfrontOrder = { ...order };
+  if (sanitizedImage) next.productImage = sanitizedImage;
+  else delete next.productImage;
+  return next;
+};
+
+const shouldLogUpfrontOrderSanitization = () => {
+  if (import.meta.env?.DEV) return true;
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.location.search.includes('upfrontOrderDebug=1')
+      || window.location.hash.includes('upfrontOrderDebug=1')
+      || window.localStorage.getItem('UPFRONT_ORDER_DEBUG') === '1';
+  } catch {
+    return false;
+  }
+};
+
+const sanitizeUpfrontOrdersForPersist = (orders: UpfrontOrder[] = [], reason: string): UpfrontOrder[] => {
+  let strippedImageCount = 0;
+  const next = (Array.isArray(orders) ? orders : []).map((order) => {
+    const hadImage = typeof order?.productImage === 'string' && order.productImage.trim().length > 0;
+    const sanitized = sanitizeUpfrontOrderForPersist(order);
+    if (hadImage && !sanitized.productImage) strippedImageCount += 1;
+    return sanitized;
+  });
+  if (strippedImageCount > 0 && shouldLogUpfrontOrderSanitization()) {
+    console.info('[storage] Sanitized legacy upfront order image payloads before save.', { reason, strippedImageCount });
+  }
+  return next;
+};
+
 /**
  * Phase 2 helper only (read-model):
  * Builds normalized custom/upfront-order accounting effect rows without mutating state.
@@ -4631,7 +4673,8 @@ export const addUpfrontOrder = (order: UpfrontOrder): AppState => {
       ),
     };
 
-    const newOrders = [...data.upfrontOrders, normalizedOrder];
+    const existingOrders = sanitizeUpfrontOrdersForPersist(data.upfrontOrders, 'addUpfrontOrder_existing');
+    const newOrders = [...existingOrders, sanitizeUpfrontOrderForPersist(normalizedOrder)];
     const newState = { ...data, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'addUpfrontOrder', auditOperation: 'CREATE' });
     emitBehaviorStateChange({ type: 'order_created', entityId: normalizedOrder.id, to: normalizedOrder.status, metadata: { customerId: normalizedOrder.customerId, totalCost: normalizedOrder.totalCost } });
@@ -4647,7 +4690,7 @@ export const updateUpfrontOrder = (order: UpfrontOrder): AppState => {
 
     assertUpfrontOrderPayload(order, new Set(data.customers.map(c => c.id)));
 
-    const newOrders = data.upfrontOrders.map(o => o.id === order.id ? order : o);
+    const newOrders = sanitizeUpfrontOrdersForPersist(data.upfrontOrders.map(o => o.id === order.id ? order : o), 'updateUpfrontOrder');
     const newState = { ...data, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'updateUpfrontOrder', auditOperation: 'UPDATE' });
     const previous = data.upfrontOrders.find(o => o.id === order.id);
@@ -4698,7 +4741,7 @@ export const collectUpfrontPayment = (orderId: string, amount: number): AppState
         ],
     };
 
-    const newOrders = data.upfrontOrders.map(o => o.id === orderId ? updatedOrder : o);
+    const newOrders = sanitizeUpfrontOrdersForPersist(data.upfrontOrders.map(o => o.id === orderId ? updatedOrder : o), 'collectUpfrontPayment');
     const newState = { ...data, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'collectUpfrontPayment', auditOperation: 'UPDATE' });
     emitBehaviorStateChange({ type: 'payment_collected', entityId: orderId, from: order.status, to: newStatus, metadata: { amount, remainingAmount: Math.max(0, newRemaining) } });
