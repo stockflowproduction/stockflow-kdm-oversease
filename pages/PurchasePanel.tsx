@@ -595,12 +595,6 @@ export default function PurchasePanel() {
   useEffect(() => {
     setOrdersPage((prev) => Math.min(prev, orderTotalPages));
   }, [orderTotalPages]);
-  useEffect(() => {
-    setPurchaseRowsPage(1);
-  }, [purchaseRowsSearch, purchaseRowsPartyFilter, purchaseRowsPaymentFilter, purchaseRowsRemainingFilter, purchaseRowsCreditFilter, purchaseRowsProductFilter, purchaseRowsFrom, purchaseRowsTo]);
-  useEffect(() => {
-    setPurchaseRowsPage((prev) => Math.min(prev, purchaseDiagnosticTotalPages));
-  }, [purchaseDiagnosticTotalPages]);
 
   const selectableInventoryVariants = useMemo(() => {
     if (!selectedProduct) return [] as Array<{ key: string; label: string; stock: number; variant?: string; color?: string }>;
@@ -1217,6 +1211,12 @@ export default function PurchasePanel() {
     const start = (purchaseRowsPage - 1) * 50;
     return filteredPurchaseDiagnosticRows.slice(start, start + 50);
   }, [filteredPurchaseDiagnosticRows, purchaseRowsPage]);
+  useEffect(() => {
+    setPurchaseRowsPage(1);
+  }, [purchaseRowsSearch, purchaseRowsPartyFilter, purchaseRowsPaymentFilter, purchaseRowsRemainingFilter, purchaseRowsCreditFilter, purchaseRowsProductFilter, purchaseRowsFrom, purchaseRowsTo]);
+  useEffect(() => {
+    setPurchaseRowsPage((prev) => Math.min(prev, purchaseDiagnosticTotalPages));
+  }, [purchaseDiagnosticTotalPages]);
 
   const dataSnapshot = useMemo(() => loadData(), [orders, parties]);
   const supplierPayments = useMemo(() => dataSnapshot.supplierPayments || [], [dataSnapshot]);
