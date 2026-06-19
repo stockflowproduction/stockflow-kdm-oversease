@@ -1064,23 +1064,26 @@ export default function PurchasePanel() {
     });
     return map;
   }, [orders]);
+  const diagnosticProducts = products ?? [];
+  const diagnosticParties = parties ?? [];
+  const diagnosticOrders = orders ?? [];
 
   const productById = useMemo(() => {
     const map = new Map<string, Product>();
-    products.forEach((product) => {
+    diagnosticProducts.forEach((product) => {
       if (product?.id) map.set(product.id, product);
     });
     return map;
-  }, [products]);
+  }, [diagnosticProducts]);
   const partyById = useMemo(() => {
     const map = new Map<string, PurchaseParty>();
-    parties.forEach((party) => {
+    diagnosticParties.forEach((party) => {
       if (party?.id) map.set(party.id, party);
     });
     return map;
-  }, [parties]);
+  }, [diagnosticParties]);
   const purchaseOrderDiagnosticRows = useMemo<PurchaseOrderDiagnosticRow[]>(() => {
-    return orders
+    return diagnosticOrders
       .slice()
       .sort((a, b) => new Date(b.orderDate || b.createdAt || '').getTime() - new Date(a.orderDate || a.createdAt || '').getTime())
       .flatMap((order) => {
@@ -1137,7 +1140,7 @@ export default function PurchasePanel() {
           } satisfies PurchaseOrderDiagnosticRow;
         });
       });
-  }, [orders, partyById, productById]);
+  }, [diagnosticOrders, partyById, productById]);
   const purchaseDiagnosticProductOptions = useMemo(() => {
     const seen = new Map<string, string>();
     purchaseOrderDiagnosticRows.forEach((row) => {
