@@ -4,7 +4,7 @@ import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
 import { Product, PurchaseOrder, PurchaseOrderLine } from '../types';
 import { NO_COLOR, NO_VARIANT, getProductStockRows, productHasCombinationStock } from '../services/productVariants';
-import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, editInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder, uploadImageFileToCloudinary } from '../services/storage';
+import { loadData, addProduct, updateProduct, deleteProduct, addCategory, deleteCategory, getNextBarcode, renameCategory, addVariantMaster, addColorMaster, createPurchaseOrder, createPurchaseParty, getPurchaseParties, reverseInventoryPurchaseHistoryEntry, editInventoryPurchaseHistoryEntry, applyPartyCreditToPurchaseOrder, uploadImageFileToCloudinary, analyzeMissingProductPurchaseHistoryRows, MissingProductPurchaseHistoryRowsAnalysis } from '../services/storage';
 import { Button, Input, Select, Card, CardContent, CardHeader, CardTitle, Label, Badge } from '../components/ui';
 import { Plus, Trash2, Edit, Save, X, Search, QrCode, Download, Share2, AlertCircle, Tags, FileDown, Package, Coins, AlertTriangle, Layers, ScanBarcode, Eye, TrendingUp, ChevronRight, MoreVertical } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
@@ -17,6 +17,8 @@ import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { getProductAuditSample, getProductBarcode, getProductCategory, getProductName, safeLower, safeText } from '../utils/productText';
 import { can } from '../src/auth/simplePermissions';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
+
+const SHOW_FORENSIC_ANALYZER = Boolean((import.meta as any).env?.DEV);
 
 function ConfirmDialog({ open, title, message, onCancel, onConfirm, confirmLabel = 'Confirm' }: { open: boolean; title: string; message: string; onCancel: () => void; onConfirm: () => void; confirmLabel?: string }) {
   useEscapeLayer(open, onCancel, { priority: 120 });
@@ -128,6 +130,7 @@ export default function Admin() {
   const [purchaseEditQuantity, setPurchaseEditQuantity] = useState('');
   const [purchaseEditUnitPrice, setPurchaseEditUnitPrice] = useState('');
   const [purchaseEditError, setPurchaseEditError] = useState<string | null>(null);
+  const [missingHistoryAnalysis, setMissingHistoryAnalysis] = useState<MissingProductPurchaseHistoryRowsAnalysis | null>(null);
   const [selectedPhotoProduct, setSelectedPhotoProduct] = useState<Product | null>(null);
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState(false);
   const [photoUploadError, setPhotoUploadError] = useState<string | null>(null);
@@ -142,6 +145,7 @@ export default function Admin() {
   useEscapeLayer(Boolean(previewImage), () => setPreviewImage(null), { priority: 200 });
   useEscapeLayer(Boolean(barcodePreview), () => setBarcodePreview(null), { priority: 150 });
   useEscapeLayer(Boolean(purchaseEditTarget), () => setPurchaseEditTarget(null), { priority: 130 });
+  useEscapeLayer(Boolean(missingHistoryAnalysis), () => setMissingHistoryAnalysis(null), { priority: 125 });
   useEscapeLayer(Boolean(pendingPurchaseReverse), () => setPendingPurchaseReverse(null), { priority: 120 });
   useEscapeLayer(Boolean(pendingDeleteProductId), () => setPendingDeleteProductId(null), { priority: 120 });
   useEscapeLayer(isBatchDeleteConfirmOpen, () => setIsBatchDeleteConfirmOpen(false), { priority: 120 });
@@ -1158,6 +1162,34 @@ export default function Admin() {
   const handleDelete = async (id: string) => {
     setPendingDeleteProductId(id);
   };
+  const runMissingProductHistoryAnalysis = () => {
+    setMissingHistoryAnalysis(analyzeMissingProductPurchaseHistoryRows());
+  };
+  const downloadMissingProductHistoryAnalysis = () => {
+    if (!missingHistoryAnalysis) return;
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      reportType: 'missing_product_purchase_history_rows',
+      ...missingHistoryAnalysis,
+      repairPlan: [
+        'Restore missing embedded product.purchaseHistory rows from purchaseOrders.',
+        'Do not alter purchaseOrders.',
+        'Do not alter supplier payments.',
+        'Do not alter ledgers.',
+        'Backup product docs before patching.',
+      ],
+      note: 'Repair is not implemented in this pass.',
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `missing-product-history-analysis-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
   const openLostDamageModal = (product: Product) => {
     setLostDamageTarget(product);
     setLostDamageQtyInput(String(Math.max(0, Number(product.lostDamageQty || 0))));
@@ -1990,6 +2022,9 @@ export default function Admin() {
                      </>
                    )}
                    <Button variant="outline" onClick={() => setIsImportModalOpen(true)} className="h-9">Upload Existing File</Button>
+                   {SHOW_FORENSIC_ANALYZER && (
+                     <Button variant="outline" onClick={runMissingProductHistoryAnalysis} className="h-9">Analyze Missing Product History</Button>
+                   )}
                    
                    <Button onClick={() => openModal()} className="bg-primary hover:bg-primary/90 text-white shadow-md hover:shadow-lg transition-all flex-1 md:flex-none">
                        <Plus className="w-4 h-4 mr-2" /> <span className="md:inline">Add Product</span>
@@ -2610,6 +2645,103 @@ export default function Admin() {
                   )}
                 </div>
               )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      {missingHistoryAnalysis && (
+        <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/60 p-4">
+          <Card className="w-full max-w-6xl max-h-[90vh] overflow-hidden">
+            <CardHeader className="flex flex-row items-center justify-between gap-3">
+              <div>
+                <CardTitle>Missing Product Purchase History Analysis</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Scanned {missingHistoryAnalysis.scannedPurchaseOrders} purchase orders and {missingHistoryAnalysis.scannedLines} product-linked lines.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={downloadMissingProductHistoryAnalysis}><Download className="w-4 h-4 mr-2" /> Download JSON</Button>
+                <Button variant="ghost" size="sm" onClick={() => setMissingHistoryAnalysis(null)}><X className="w-4 h-4" /></Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4 overflow-y-auto max-h-[calc(90vh-84px)]">
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                Repair is not implemented in this pass.
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-lg border bg-slate-50 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Missing Rows</div>
+                  <div className="mt-1 text-2xl font-bold text-slate-900">{missingHistoryAnalysis.missingCount}</div>
+                </div>
+                <div className="rounded-lg border bg-slate-50 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Scanned Orders</div>
+                  <div className="mt-1 text-2xl font-bold text-slate-900">{missingHistoryAnalysis.scannedPurchaseOrders}</div>
+                </div>
+                <div className="rounded-lg border bg-slate-50 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Scanned Lines</div>
+                  <div className="mt-1 text-2xl font-bold text-slate-900">{missingHistoryAnalysis.scannedLines}</div>
+                </div>
+              </div>
+              {!missingHistoryAnalysis.missingRows.length ? (
+                <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  No missing product purchase history rows detected in currently loaded data.
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/40">
+                      <tr>
+                        <th className="text-left p-3">Purchase Order</th>
+                        <th className="text-left p-3">Product</th>
+                        <th className="text-left p-3">Party</th>
+                        <th className="text-left p-3">Date</th>
+                        <th className="text-right p-3">Qty</th>
+                        <th className="text-right p-3">Unit Price</th>
+                        <th className="text-right p-3">Total</th>
+                        <th className="text-left p-3">Reason</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {missingHistoryAnalysis.missingRows.map((row) => (
+                        <tr key={`${row.purchaseOrderId}-${row.productId}-${row.expectedHistoryRowPreview.id}`} className="border-t align-top">
+                          <td className="p-3 font-mono text-xs">{row.purchaseOrderId}</td>
+                          <td className="p-3">
+                            <div className="font-medium">{row.productName}</div>
+                            <div className="text-xs text-muted-foreground">{row.productId}</div>
+                            <div className="text-xs text-muted-foreground">
+                              Preview: {row.expectedHistoryRowPreview.variant || NO_VARIANT} / {row.expectedHistoryRowPreview.color || NO_COLOR}
+                            </div>
+                          </td>
+                          <td className="p-3">
+                            <div>{row.partyName}</div>
+                            <div className="text-xs text-muted-foreground">{row.partyId}</div>
+                          </td>
+                          <td className="p-3">{row.date ? new Date(row.date).toLocaleString() : 'N/A'}</td>
+                          <td className="p-3 text-right">{row.quantity}</td>
+                          <td className="p-3 text-right">₹{row.unitPrice.toFixed(2)}</td>
+                          <td className="p-3 text-right">₹{row.total.toFixed(2)}</td>
+                          <td className="p-3">
+                            <div className="font-medium">{row.reason === 'product_not_found' ? 'Product doc missing' : 'History row missing'}</div>
+                            <div className="text-xs text-muted-foreground">
+                              Preview payment: {row.expectedHistoryRowPreview.paymentMethod || 'N/A'} · Paid ₹{Number(row.expectedHistoryRowPreview.paidAmount || 0).toFixed(2)}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="rounded-lg border bg-slate-50 p-3 text-sm">
+                <div className="font-semibold">Recommended repair plan</div>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
+                  <li>Restore missing embedded <code>product.purchaseHistory</code> rows from <code>purchaseOrders</code>.</li>
+                  <li>Do not alter <code>purchaseOrders</code>.</li>
+                  <li>Do not alter supplier payments.</li>
+                  <li>Do not alter ledgers.</li>
+                  <li>Backup product docs before patching.</li>
+                </ul>
+              </div>
             </CardContent>
           </Card>
         </div>

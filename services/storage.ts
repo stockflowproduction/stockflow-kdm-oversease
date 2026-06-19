@@ -5639,6 +5639,116 @@ export const getPurchaseOrders = (): PurchaseOrder[] => {
   return data.purchaseOrders || [];
 };
 
+export type MissingProductPurchaseHistoryRowPreview = {
+  id: string;
+  date: string;
+  variant?: string;
+  color?: string;
+  quantity: number;
+  unitPrice: number;
+  totalAmount: number;
+  purchaseOrderId: string;
+  partyName: string;
+  paymentMethod?: 'cash' | 'online' | 'credit';
+  paidAmount?: number;
+  totalPaid?: number;
+  remainingAmount?: number;
+  reference?: string;
+  notes?: string;
+};
+
+export type MissingProductPurchaseHistoryRowIssue = {
+  purchaseOrderId: string;
+  productId: string;
+  productName: string;
+  partyId: string;
+  partyName: string;
+  date: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+  reason: 'product_not_found' | 'history_row_missing';
+  expectedHistoryRowPreview: MissingProductPurchaseHistoryRowPreview;
+};
+
+export type MissingProductPurchaseHistoryRowsAnalysis = {
+  scannedPurchaseOrders: number;
+  scannedLines: number;
+  missingRows: MissingProductPurchaseHistoryRowIssue[];
+  missingCount: number;
+};
+
+export const analyzeMissingProductPurchaseHistoryRows = (): MissingProductPurchaseHistoryRowsAnalysis => {
+  const data = loadData();
+  const products = Array.isArray(data.products) ? data.products : [];
+  const purchaseOrders = Array.isArray(data.purchaseOrders) ? data.purchaseOrders : [];
+  const productsById = new Map(products.map((product) => [product.id, product]));
+  const missingRows: MissingProductPurchaseHistoryRowIssue[] = [];
+  let scannedLines = 0;
+  let scannedPurchaseOrders = 0;
+
+  purchaseOrders.forEach((order) => {
+    if (!order || order.status === 'cancelled') return;
+    scannedPurchaseOrders += 1;
+    (order.lines || []).forEach((line, lineIndex) => {
+      if (!line?.productId) return;
+      scannedLines += 1;
+      const product = productsById.get(line.productId);
+      const productHistory = Array.isArray(product?.purchaseHistory) ? product!.purchaseHistory! : [];
+      const hasMatchingHistory = productHistory.some((historyRow) => String(historyRow.purchaseOrderId || '').trim() === String(order.id || '').trim());
+      if (product && hasMatchingHistory) return;
+
+      const quantity = Math.max(0, Number(line.quantity || 0));
+      const unitPrice = Math.max(0, Number(line.unitCost || 0));
+      const total = Math.max(0, Number(line.totalCost || (quantity * unitPrice)));
+      const paidAmount = Math.max(0, Number(order.totalPaid || 0));
+      const paymentMethod = paidAmount > 0
+        ? ((order.paymentHistory || []).some((payment: any) => String(payment.method || '').toLowerCase() === 'online')
+            && !(order.paymentHistory || []).some((payment: any) => String(payment.method || '').toLowerCase() === 'cash')
+            ? 'online'
+            : 'cash')
+        : 'credit';
+
+      missingRows.push({
+        purchaseOrderId: order.id,
+        productId: line.productId,
+        productName: line.productName || product?.name || 'Unknown product',
+        partyId: order.partyId,
+        partyName: order.partyName,
+        date: order.orderDate || order.createdAt || '',
+        quantity,
+        unitPrice,
+        total,
+        reason: product ? 'history_row_missing' : 'product_not_found',
+        expectedHistoryRowPreview: {
+          id: `preview-ph-${order.id}-${line.productId}-${lineIndex}`,
+          date: order.orderDate || order.createdAt || '',
+          variant: line.variant,
+          color: line.color,
+          quantity,
+          unitPrice,
+          totalAmount: total,
+          purchaseOrderId: order.id,
+          partyName: order.partyName,
+          paymentMethod,
+          paidAmount,
+          totalPaid: paidAmount,
+          remainingAmount: Math.max(0, Number(order.remainingAmount || 0)),
+          reference: order.billNumber,
+          notes: order.notes,
+        },
+      });
+    });
+  });
+
+  return {
+    scannedPurchaseOrders,
+    scannedLines,
+    missingRows,
+    missingCount: missingRows.length,
+  };
+};
+
 export const createPurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
   const data = loadData();
   const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
