@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { PartyCreditLedgerEntry, Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty, SupplierPaymentLedgerEntry } from '../types';
-import { applyConfirmedPurchasePartyOrderOnlyMerge, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, refreshPurchaseReceiptPostingsFromCloud, repairMissingProductPurchaseHistoryRowsDryRun, updatePurchaseOrder, updatePurchaseParty, MissingProductPurchaseHistoryDryRunResult } from '../services/storage';
+import { applyConfirmedPurchasePartyOrderOnlyMerge, applyPartyCreditToPurchaseOrder, applySafePurchasePartyMerge, createPurchaseOrder, createPurchaseParty, createSupplierPayment, deletePurchaseParty, getPurchaseOrders, getPurchaseParties, loadData, receivePurchaseOrder, recordPurchaseOrderPayment, refreshPurchaseReceiptPostingsFromCloud, repairMissingProductPurchaseHistoryRowsDryRun, searchPurchaseOrdersRuntime, updatePurchaseOrder, updatePurchaseParty, MissingProductPurchaseHistoryDryRunResult, PurchaseOrderRuntimeSearchResult } from '../services/storage';
 import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadPurchaseData, downloadPurchaseTemplate, importPurchaseFromFile } from '../services/importExcel';
 import { getProductStockRows } from '../services/productVariants';
@@ -514,6 +514,16 @@ export default function PurchasePanel() {
   const [purchaseRowsPage, setPurchaseRowsPage] = useState(1);
   const [purchaseViewProduct, setPurchaseViewProduct] = useState<Product | null>(null);
   const [repairDryRunResult, setRepairDryRunResult] = useState<MissingProductPurchaseHistoryDryRunResult | null>(null);
+  const [purchaseRuntimeSearchOrderId, setPurchaseRuntimeSearchOrderId] = useState('po-admin-1781847887520');
+  const [purchaseRuntimeSearchProductName, setPurchaseRuntimeSearchProductName] = useState('Breathe Right Nasal Strips - 26 Pcs');
+  const [purchaseRuntimeSearchSupplierName, setPurchaseRuntimeSearchSupplierName] = useState('Jenilbhai');
+  const [purchaseRuntimeSearchProductId, setPurchaseRuntimeSearchProductId] = useState('');
+  const [purchaseRuntimeSearchPartyId, setPurchaseRuntimeSearchPartyId] = useState('');
+  const [purchaseRuntimeSearchAmount, setPurchaseRuntimeSearchAmount] = useState<number | ''>(49025);
+  const [purchaseRuntimeSearchQuantity, setPurchaseRuntimeSearchQuantity] = useState<number | ''>(19610);
+  const [purchaseRuntimeSearchDateFrom, setPurchaseRuntimeSearchDateFrom] = useState('');
+  const [purchaseRuntimeSearchDateTo, setPurchaseRuntimeSearchDateTo] = useState('');
+  const [purchaseRuntimeSearchResult, setPurchaseRuntimeSearchResult] = useState<PurchaseOrderRuntimeSearchResult | null>(null);
   const [receiveTargetOrder, setReceiveTargetOrder] = useState<PurchaseOrder | null>(null);
   useEscapeLayer(isModalOpen, () => setIsModalOpen(false), { priority: 80 });
   useEscapeLayer(showPartyPopup, () => setShowPartyPopup(false), { priority: 80 });
@@ -522,6 +532,7 @@ export default function PurchasePanel() {
   useEscapeLayer(showPaymentPopup, () => setShowPaymentPopup(false), { priority: 80 });
   useEscapeLayer(Boolean(purchaseViewProduct), () => setPurchaseViewProduct(null), { priority: 80 });
   useEscapeLayer(Boolean(repairDryRunResult), () => setRepairDryRunResult(null), { priority: 80 });
+  useEscapeLayer(Boolean(purchaseRuntimeSearchResult), () => setPurchaseRuntimeSearchResult(null), { priority: 80 });
   const [receivePriceMethod, setReceivePriceMethod] = useState<ReceivePriceMethod>('no_change');
   const [partyCreditToApply, setPartyCreditToApply] = useState<number | ''>('');
   const [partyCreditTouched, setPartyCreditTouched] = useState(false);
@@ -1513,12 +1524,26 @@ export default function PurchasePanel() {
     }
   };
   const canUsePurchaseHistoryDryRun = import.meta.env.DEV || isAdmin();
+  const canUsePurchaseRuntimeSearch = import.meta.env.DEV || isAdmin();
   const openProductSnapshot = (productId: string) => {
     if (!productId) return;
     setPurchaseViewProduct(productById.get(productId) || null);
   };
   const openRepairDryRun = () => {
     setRepairDryRunResult(repairMissingProductPurchaseHistoryRowsDryRun());
+  };
+  const openPurchaseRuntimeSearch = () => {
+    setPurchaseRuntimeSearchResult(searchPurchaseOrdersRuntime({
+      purchaseOrderId: purchaseRuntimeSearchOrderId,
+      productName: purchaseRuntimeSearchProductName,
+      supplierName: purchaseRuntimeSearchSupplierName,
+      productId: purchaseRuntimeSearchProductId,
+      partyId: purchaseRuntimeSearchPartyId,
+      amount: purchaseRuntimeSearchAmount === '' ? null : Number(purchaseRuntimeSearchAmount),
+      quantity: purchaseRuntimeSearchQuantity === '' ? null : Number(purchaseRuntimeSearchQuantity),
+      dateFrom: purchaseRuntimeSearchDateFrom,
+      dateTo: purchaseRuntimeSearchDateTo,
+    }));
   };
   const downloadRepairDryRunJson = () => {
     if (!repairDryRunResult) return;
@@ -1555,6 +1580,22 @@ export default function PurchasePanel() {
     const link = document.createElement('a');
     link.href = url;
     link.download = `repair-missing-product-history-rollback-preview-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+  const downloadPurchaseRuntimeSearchJson = () => {
+    if (!purchaseRuntimeSearchResult) return;
+    const blob = new Blob([JSON.stringify({
+      reportType: 'purchase_order_runtime_search',
+      ...purchaseRuntimeSearchResult,
+      note: 'Read-only runtime search. No purchase orders, products, ledgers, or Firestore documents were modified.',
+    }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `purchase-order-runtime-search-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -1956,11 +1997,65 @@ export default function PurchasePanel() {
               <CardTitle>Purchase Orders</CardTitle>
               <p className="text-sm text-muted-foreground">All purchase transactions with supplier, product, payment, payable, credit, and linkage details.</p>
             </div>
-            {canUsePurchaseHistoryDryRun && (
-              <Button size="sm" variant="outline" onClick={openRepairDryRun}>Dry-run Restore Product History</Button>
-            )}
+            <div className="flex flex-wrap gap-2">
+              {canUsePurchaseRuntimeSearch && (
+                <Button size="sm" variant="outline" onClick={openPurchaseRuntimeSearch}>Find Purchase Order</Button>
+              )}
+              {canUsePurchaseHistoryDryRun && (
+                <Button size="sm" variant="outline" onClick={openRepairDryRun}>Dry-run Restore Product History</Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
+            {canUsePurchaseRuntimeSearch && (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Find Purchase Order</div>
+                    <div className="text-xs text-slate-500">Read-only runtime search across merged purchase orders, root fallback presence, subcollection presence, and embedded product history rows.</div>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={openPurchaseRuntimeSearch}>Trace Search</Button>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                  <div>
+                    <Label>Purchase Order ID</Label>
+                    <Input value={purchaseRuntimeSearchOrderId} onChange={(e) => setPurchaseRuntimeSearchOrderId(e.target.value)} placeholder="po-admin-1781847887520" />
+                  </div>
+                  <div>
+                    <Label>Product Name</Label>
+                    <Input value={purchaseRuntimeSearchProductName} onChange={(e) => setPurchaseRuntimeSearchProductName(e.target.value)} placeholder="Breathe Right Nasal Strips - 26 Pcs" />
+                  </div>
+                  <div>
+                    <Label>Supplier Name</Label>
+                    <Input value={purchaseRuntimeSearchSupplierName} onChange={(e) => setPurchaseRuntimeSearchSupplierName(e.target.value)} placeholder="Jenilbhai" />
+                  </div>
+                  <div>
+                    <Label>Product ID</Label>
+                    <Input value={purchaseRuntimeSearchProductId} onChange={(e) => setPurchaseRuntimeSearchProductId(e.target.value)} placeholder="PRID_..." />
+                  </div>
+                  <div>
+                    <Label>Party ID</Label>
+                    <Input value={purchaseRuntimeSearchPartyId} onChange={(e) => setPurchaseRuntimeSearchPartyId(e.target.value)} placeholder="party-..." />
+                  </div>
+                  <div>
+                    <Label>Amount</Label>
+                    <Input type="number" value={purchaseRuntimeSearchAmount} onChange={(e) => setPurchaseRuntimeSearchAmount(e.target.value === '' ? '' : Number(e.target.value))} placeholder="49025" />
+                  </div>
+                  <div>
+                    <Label>Quantity</Label>
+                    <Input type="number" value={purchaseRuntimeSearchQuantity} onChange={(e) => setPurchaseRuntimeSearchQuantity(e.target.value === '' ? '' : Number(e.target.value))} placeholder="19610" />
+                  </div>
+                  <div>
+                    <Label>Date From</Label>
+                    <Input type="date" value={purchaseRuntimeSearchDateFrom} onChange={(e) => setPurchaseRuntimeSearchDateFrom(e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Date To</Label>
+                    <Input type="date" value={purchaseRuntimeSearchDateTo} onChange={(e) => setPurchaseRuntimeSearchDateTo(e.target.value)} />
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-7">
               <SummaryCard label="Total Purchase Amount" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalPurchaseAmount)}`} />
               <SummaryCard label="Total Paid" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalPaid)}`} />
@@ -2339,6 +2434,119 @@ export default function PurchasePanel() {
                     ))}
                     {!repairDryRunResult.unsafePatches.length && (
                       <tr><td colSpan={6} className="p-4 text-center text-muted-foreground">No unsafe patches detected.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
+      <Modal open={Boolean(purchaseRuntimeSearchResult)} onClose={() => setPurchaseRuntimeSearchResult(null)} title="Find Purchase Order">
+        {purchaseRuntimeSearchResult ? (
+          <div className="space-y-4">
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+              <SummaryCard label="Verdict" value={purchaseRuntimeSearchResult.verdict} />
+              <SummaryCard label="Candidates" value={`${purchaseRuntimeSearchResult.candidateCount}`} />
+              <SummaryCard label="Generated" value={new Date(purchaseRuntimeSearchResult.generatedAt).toLocaleString()} />
+              <SummaryCard label="Order ID" value={purchaseRuntimeSearchResult.criteria.purchaseOrderId || 'Not provided'} />
+            </div>
+            <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">
+              Read-only runtime search only. No purchase orders, products, ledgers, Firestore documents, or product history rows were changed.
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={downloadPurchaseRuntimeSearchJson}>Download JSON</Button>
+            </div>
+            <div className="rounded-xl border bg-white p-3 text-sm">
+              <div className="font-semibold text-slate-900">Recommended next step</div>
+              <div className="mt-1 text-slate-700">{purchaseRuntimeSearchResult.recommendedNextStep}</div>
+            </div>
+            <div className="rounded-xl border bg-white p-3">
+              <div className="font-semibold text-slate-900">Search criteria</div>
+              <div className="mt-2 grid gap-2 text-xs text-slate-700 md:grid-cols-2 xl:grid-cols-4">
+                <div><span className="font-medium">Product:</span> {purchaseRuntimeSearchResult.criteria.productName || '—'}</div>
+                <div><span className="font-medium">Supplier:</span> {purchaseRuntimeSearchResult.criteria.supplierName || '—'}</div>
+                <div><span className="font-medium">Product ID:</span> {purchaseRuntimeSearchResult.criteria.productId || '—'}</div>
+                <div><span className="font-medium">Party ID:</span> {purchaseRuntimeSearchResult.criteria.partyId || '—'}</div>
+                <div><span className="font-medium">Amount:</span> {purchaseRuntimeSearchResult.criteria.amount !== null ? `₹${formatNumber(purchaseRuntimeSearchResult.criteria.amount)}` : '—'}</div>
+                <div><span className="font-medium">Quantity:</span> {purchaseRuntimeSearchResult.criteria.quantity !== null ? formatNumber(purchaseRuntimeSearchResult.criteria.quantity, 0) : '—'}</div>
+                <div><span className="font-medium">Date From:</span> {purchaseRuntimeSearchResult.criteria.dateFrom || '—'}</div>
+                <div><span className="font-medium">Date To:</span> {purchaseRuntimeSearchResult.criteria.dateTo || '—'}</div>
+              </div>
+            </div>
+            <div className="rounded-xl border bg-white">
+              <div className="border-b px-4 py-3 text-sm font-semibold">Candidate matches</div>
+              <div className="overflow-auto">
+                <table className="w-full min-w-[1900px] text-xs">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="p-2 text-left">Purchase Order</th>
+                      <th className="p-2 text-left">Source</th>
+                      <th className="p-2 text-left">Dates</th>
+                      <th className="p-2 text-left">Party</th>
+                      <th className="p-2 text-left">Product</th>
+                      <th className="p-2 text-right">Qty</th>
+                      <th className="p-2 text-right">Unit</th>
+                      <th className="p-2 text-right">Total</th>
+                      <th className="p-2 text-right">Paid</th>
+                      <th className="p-2 text-right">Remaining</th>
+                      <th className="p-2 text-left">Status</th>
+                      <th className="p-2 text-left">Presence</th>
+                      <th className="p-2 text-left">Match Reasons</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purchaseRuntimeSearchResult.candidates.map((candidate) => (
+                      <tr key={`${candidate.orderSource}-${candidate.purchaseOrderId}-${candidate.productId}-${candidate.partyId}-${candidate.date}`} className="border-t align-top">
+                        <td className="p-2">
+                          <div className="font-mono">{candidate.purchaseOrderId || '—'}</div>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => void copyText(candidate.purchaseOrderId)} disabled={!candidate.purchaseOrderId}>Copy Order ID</Button>
+                            <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => void copyText(candidate.productId)} disabled={!candidate.productId}>Copy Product ID</Button>
+                            <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => void copyText(candidate.partyId)} disabled={!candidate.partyId}>Copy Party ID</Button>
+                          </div>
+                        </td>
+                        <td className="p-2">
+                          <div>{candidate.orderSource}</div>
+                          <div className="mt-1 text-[10px] text-muted-foreground">Root: {candidate.sameOrderAppearsInRootFallback ? 'yes' : 'no'} · Sub: {candidate.sameOrderAppearsInSubcollection ? 'yes' : 'no'}</div>
+                        </td>
+                        <td className="p-2">
+                          <div>Primary: {candidate.date ? new Date(candidate.date).toLocaleString() : '—'}</div>
+                          <div className="text-[10px] text-muted-foreground">orderDate: {candidate.orderDate || '—'}</div>
+                          <div className="text-[10px] text-muted-foreground">createdAt: {candidate.createdAt || '—'}</div>
+                          <div className="text-[10px] text-muted-foreground">updatedAt: {candidate.updatedAt || '—'}</div>
+                        </td>
+                        <td className="p-2">
+                          <div>{candidate.partyName || '—'}</div>
+                          <div className="font-mono text-[10px] text-muted-foreground">{candidate.partyId || '—'}</div>
+                        </td>
+                        <td className="p-2">
+                          <div className="font-medium">{candidate.productName || '—'}</div>
+                          <div className="font-mono text-[10px] text-muted-foreground">{candidate.productId || '—'}</div>
+                          <div className="text-[10px] text-muted-foreground">{candidate.variant || 'No Variant'} / {candidate.color || 'No Color'}</div>
+                        </td>
+                        <td className="p-2 text-right">{formatNumber(candidate.quantity, 0)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(candidate.unitPrice)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(candidate.total)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(candidate.paid)}</td>
+                        <td className="p-2 text-right">₹{formatNumber(candidate.remaining)}</td>
+                        <td className="p-2">{candidate.status || '—'}</td>
+                        <td className="p-2">
+                          <div className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productExists ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{candidate.productExists ? 'Product found' : 'Product missing'}</div>
+                          <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.partyExists ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{candidate.partyExists ? 'Party found' : 'Party missing'}</div>
+                          <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productPurchaseHistoryContainsOrderId ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{candidate.productPurchaseHistoryContainsOrderId ? 'History linked' : 'History missing'}</div>
+                          {candidate.productHistoryHasRowButPurchaseOrderMissing && (
+                            <div className="mt-1 inline-flex rounded-full bg-blue-100 px-2 py-1 text-[10px] font-semibold text-blue-700">History row only</div>
+                          )}
+                        </td>
+                        <td className="p-2">{candidate.matchReasons.join(', ') || 'Matched by current filters'}</td>
+                      </tr>
+                    ))}
+                    {!purchaseRuntimeSearchResult.candidates.length && (
+                      <tr>
+                        <td colSpan={13} className="p-6 text-center text-muted-foreground">No candidates matched the current runtime search criteria.</td>
+                      </tr>
                     )}
                   </tbody>
                 </table>

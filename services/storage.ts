@@ -5780,6 +5780,206 @@ export type MissingProductPurchaseHistoryDryRunResult = {
   correlationCounts: MissingProductPurchaseHistoryDryRunCorrelationCounts;
 };
 
+export type PurchaseOrderRuntimeSearchCriteria = {
+  purchaseOrderId?: string;
+  productName?: string;
+  supplierName?: string;
+  productId?: string;
+  partyId?: string;
+  amount?: number | null;
+  quantity?: number | null;
+  dateFrom?: string;
+  dateTo?: string;
+};
+
+export type PurchaseOrderRuntimeSearchCandidate = {
+  purchaseOrderId: string;
+  orderSource: 'subcollection' | 'rootFallback' | 'merged' | 'productHistoryOnly' | 'unknown';
+  date: string;
+  orderDate: string;
+  createdAt: string;
+  updatedAt: string;
+  partyId: string;
+  partyName: string;
+  productId: string;
+  productName: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+  paid: number;
+  remaining: number;
+  status: string;
+  productExists: boolean;
+  partyExists: boolean;
+  productPurchaseHistoryContainsOrderId: boolean;
+  sameOrderAppearsInRootFallback: boolean;
+  sameOrderAppearsInSubcollection: boolean;
+  productHistoryHasRowButPurchaseOrderMissing: boolean;
+  matchReasons: string[];
+  variant: string;
+  color: string;
+};
+
+export type PurchaseOrderRuntimeSearchResult = {
+  generatedAt: string;
+  criteria: {
+    purchaseOrderId: string;
+    productName: string;
+    supplierName: string;
+    productId: string;
+    partyId: string;
+    amount: number | null;
+    quantity: number | null;
+    dateFrom: string;
+    dateTo: string;
+  };
+  candidateCount: number;
+  candidates: PurchaseOrderRuntimeSearchCandidate[];
+  verdict:
+    | 'found_normal'
+    | 'found_history_missing'
+    | 'found_product_changed'
+    | 'found_party_changed'
+    | 'found_date_changed'
+    | 'found_only_in_root_fallback'
+    | 'found_only_in_subcollection'
+    | 'found_only_in_product_history'
+    | 'not_found';
+  recommendedNextStep: string;
+};
+
+const normalizeSearchText = (value?: string) => String(value || '').trim().toLowerCase();
+const normalizeSearchId = (value?: string) => String(value || '').trim();
+const valueIncludesSearch = (value: unknown, search: string) => !search || String(value || '').toLowerCase().includes(search);
+const numberMatchesWithTolerance = (actual: number, expected: number | null | undefined, tolerance = 1) => {
+  if (expected === null || expected === undefined || !Number.isFinite(expected)) return false;
+  return Math.abs((Number(actual) || 0) - expected) <= tolerance;
+};
+const numberMatchesExactly = (actual: number, expected: number | null | undefined) => {
+  if (expected === null || expected === undefined || !Number.isFinite(expected)) return false;
+  return Math.abs((Number(actual) || 0) - expected) < 0.0001;
+};
+const dateMatchesRuntimeSearchRange = (dateValue: string, dateFrom: string, dateTo: string) => {
+  if (!dateFrom && !dateTo) return true;
+  const dateMs = dateValue ? new Date(dateValue).getTime() : Number.NaN;
+  if (!Number.isFinite(dateMs)) return false;
+  const fromMs = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
+  const toMs = dateTo ? new Date(`${dateTo}T23:59:59.999`).getTime() : Number.POSITIVE_INFINITY;
+  return dateMs >= fromMs && dateMs <= toMs;
+};
+const buildRuntimeSearchMatchReasons = ({
+  purchaseOrderId,
+  candidatePurchaseOrderId,
+  productName,
+  candidateProductName,
+  supplierName,
+  candidateSupplierName,
+  productId,
+  candidateProductId,
+  partyId,
+  candidatePartyId,
+  amount,
+  orderTotal,
+  lineTotal,
+  quantity,
+  candidateQuantity,
+  dateFrom,
+  dateTo,
+  candidateDate,
+}: {
+  purchaseOrderId: string;
+  candidatePurchaseOrderId: string;
+  productName: string;
+  candidateProductName: string;
+  supplierName: string;
+  candidateSupplierName: string;
+  productId: string;
+  candidateProductId: string;
+  partyId: string;
+  candidatePartyId: string;
+  amount: number | null;
+  orderTotal: number;
+  lineTotal: number;
+  quantity: number | null;
+  candidateQuantity: number;
+  dateFrom: string;
+  dateTo: string;
+  candidateDate: string;
+}) => {
+  const reasons: string[] = [];
+  if (purchaseOrderId && normalizeSearchId(candidatePurchaseOrderId) === purchaseOrderId) reasons.push('purchaseOrderId exact');
+  if (productName && valueIncludesSearch(candidateProductName, productName)) reasons.push('productName partial');
+  if (supplierName && valueIncludesSearch(candidateSupplierName, supplierName)) reasons.push('supplierName partial');
+  if (productId && normalizeSearchId(candidateProductId) === productId) reasons.push('productId exact');
+  if (partyId && normalizeSearchId(candidatePartyId) === partyId) reasons.push('partyId exact');
+  if (amount !== null && amount !== undefined) {
+    if (numberMatchesWithTolerance(lineTotal, amount)) reasons.push('amount matches line total ±1');
+    else if (numberMatchesWithTolerance(orderTotal, amount)) reasons.push('amount matches order total ±1');
+  }
+  if (quantity !== null && quantity !== undefined && numberMatchesExactly(candidateQuantity, quantity)) reasons.push('quantity exact');
+  if ((dateFrom || dateTo) && dateMatchesRuntimeSearchRange(candidateDate, dateFrom, dateTo)) reasons.push('date range match');
+  return reasons;
+};
+const candidateMatchesRuntimeSearch = ({
+  purchaseOrderId,
+  candidatePurchaseOrderId,
+  productName,
+  candidateProductName,
+  supplierName,
+  candidateSupplierName,
+  productId,
+  candidateProductId,
+  partyId,
+  candidatePartyId,
+  amount,
+  orderTotal,
+  lineTotal,
+  quantity,
+  candidateQuantity,
+  dateFrom,
+  dateTo,
+  candidateDate,
+}: {
+  purchaseOrderId: string;
+  candidatePurchaseOrderId: string;
+  productName: string;
+  candidateProductName: string;
+  supplierName: string;
+  candidateSupplierName: string;
+  productId: string;
+  candidateProductId: string;
+  partyId: string;
+  candidatePartyId: string;
+  amount: number | null;
+  orderTotal: number;
+  lineTotal: number;
+  quantity: number | null;
+  candidateQuantity: number;
+  dateFrom: string;
+  dateTo: string;
+  candidateDate: string;
+}) => {
+  if (purchaseOrderId && normalizeSearchId(candidatePurchaseOrderId) !== purchaseOrderId) return false;
+  if (productName && !valueIncludesSearch(candidateProductName, productName)) return false;
+  if (supplierName && !valueIncludesSearch(candidateSupplierName, supplierName)) return false;
+  if (productId && normalizeSearchId(candidateProductId) !== productId) return false;
+  if (partyId && normalizeSearchId(candidatePartyId) !== partyId) return false;
+  if (amount !== null && amount !== undefined && !numberMatchesWithTolerance(lineTotal, amount) && !numberMatchesWithTolerance(orderTotal, amount)) return false;
+  if (quantity !== null && quantity !== undefined && !numberMatchesExactly(candidateQuantity, quantity)) return false;
+  if ((dateFrom || dateTo) && !dateMatchesRuntimeSearchRange(candidateDate, dateFrom, dateTo)) return false;
+  return true;
+};
+const inferRuntimeSearchOrderSource = (purchaseOrderId: string): PurchaseOrderRuntimeSearchCandidate['orderSource'] => {
+  const normalizedId = normalizeSearchId(purchaseOrderId);
+  if (!normalizedId) return 'unknown';
+  const inSubcollection = subcollectionPurchaseOrdersCache.some((row) => normalizeSearchId(row?.id) === normalizedId);
+  const inRootFallback = legacyRootPurchaseOrdersCache.some((row) => normalizeSearchId(row?.id) === normalizedId);
+  if (inSubcollection && inRootFallback) return 'merged';
+  if (inSubcollection) return 'subcollection';
+  if (inRootFallback) return 'rootFallback';
+  return 'unknown';
+};
+
 const getPurchaseOrderSource = (purchaseOrderId: string): 'subcollection' | 'rootFallback' | 'unknown' => {
   const normalizedId = String(purchaseOrderId || '').trim();
   if (!normalizedId) return 'unknown';
@@ -5956,6 +6156,240 @@ export const tracePurchaseOrderProductHistoryLink = (purchaseOrderId: string): P
       lineCount: Array.isArray(order.lines) ? order.lines.length : 0,
     },
     lines,
+    verdict,
+    recommendedNextStep,
+  };
+};
+
+export const searchPurchaseOrdersRuntime = (criteria: PurchaseOrderRuntimeSearchCriteria): PurchaseOrderRuntimeSearchResult => {
+  const data = loadData();
+  const products = Array.isArray(data.products) ? data.products : [];
+  const purchaseOrders = Array.isArray(data.purchaseOrders) ? data.purchaseOrders : [];
+  const parties = Array.isArray(data.purchaseParties) ? data.purchaseParties : [];
+  const productsById = new Map(products.map((product) => [normalizeSearchId(product.id), product]));
+  const partiesById = new Map(parties.map((party) => [normalizeSearchId(party.id), party]));
+  const normalizedCriteria = {
+    purchaseOrderId: normalizeSearchId(criteria.purchaseOrderId),
+    productName: normalizeSearchText(criteria.productName),
+    supplierName: normalizeSearchText(criteria.supplierName),
+    productId: normalizeSearchId(criteria.productId),
+    partyId: normalizeSearchId(criteria.partyId),
+    amount: criteria.amount !== null && criteria.amount !== undefined && Number.isFinite(Number(criteria.amount)) ? Number(criteria.amount) : null,
+    quantity: criteria.quantity !== null && criteria.quantity !== undefined && Number.isFinite(Number(criteria.quantity)) ? Number(criteria.quantity) : null,
+    dateFrom: String(criteria.dateFrom || '').trim(),
+    dateTo: String(criteria.dateTo || '').trim(),
+  };
+  const candidates: PurchaseOrderRuntimeSearchCandidate[] = [];
+  const candidateKeys = new Set<string>();
+
+  purchaseOrders.forEach((order) => {
+    (Array.isArray(order.lines) ? order.lines : []).forEach((line, lineIndex) => {
+      const productId = normalizeSearchId(line?.productId);
+      const resolvedProduct = productId ? productsById.get(productId) : undefined;
+      const productName = String(line?.productName || resolvedProduct?.name || '').trim();
+      const partyId = normalizeSearchId(order.partyId);
+      const partyName = String(order.partyName || '').trim();
+      const quantity = Math.max(0, Number(line?.quantity || 0));
+      const unitPrice = Math.max(0, Number(line?.unitCost || 0));
+      const lineTotal = Math.max(0, Number(line?.totalCost || (quantity * unitPrice)));
+      const orderTotal = Math.max(0, Number(order.totalAmount || 0));
+      const candidateDate = String(order.orderDate || order.createdAt || order.updatedAt || '').trim();
+      const matchReasons = buildRuntimeSearchMatchReasons({
+        ...normalizedCriteria,
+        candidatePurchaseOrderId: String(order.id || ''),
+        candidateProductName: productName,
+        candidateSupplierName: partyName,
+        candidateProductId: productId,
+        candidatePartyId: partyId,
+        orderTotal,
+        lineTotal,
+        candidateQuantity: quantity,
+        candidateDate,
+      });
+      const matches = candidateMatchesRuntimeSearch({
+        ...normalizedCriteria,
+        candidatePurchaseOrderId: String(order.id || ''),
+        candidateProductName: productName,
+        candidateSupplierName: partyName,
+        candidateProductId: productId,
+        candidatePartyId: partyId,
+        orderTotal,
+        lineTotal,
+        candidateQuantity: quantity,
+        candidateDate,
+      });
+      if (!matches) return;
+
+      const matchingHistoryRows = Array.isArray(resolvedProduct?.purchaseHistory)
+        ? resolvedProduct.purchaseHistory.filter((row) => normalizeSearchId(row.purchaseOrderId) === normalizeSearchId(order.id))
+        : [];
+      const candidateKey = `order:${order.id}:${line.id || lineIndex}:${productId}`;
+      if (candidateKeys.has(candidateKey)) return;
+      candidateKeys.add(candidateKey);
+
+      candidates.push({
+        purchaseOrderId: String(order.id || ''),
+        orderSource: inferRuntimeSearchOrderSource(String(order.id || '')),
+        date: candidateDate,
+        orderDate: String(order.orderDate || ''),
+        createdAt: String(order.createdAt || ''),
+        updatedAt: String(order.updatedAt || ''),
+        partyId,
+        partyName,
+        productId,
+        productName,
+        quantity,
+        unitPrice,
+        total: lineTotal,
+        paid: Math.max(0, Number(order.totalPaid || 0)),
+        remaining: Math.max(0, Number(order.remainingAmount ?? (orderTotal - Number(order.totalPaid || 0))) || 0),
+        status: String(order.status || ''),
+        productExists: Boolean(resolvedProduct),
+        partyExists: partiesById.has(partyId),
+        productPurchaseHistoryContainsOrderId: matchingHistoryRows.length > 0,
+        sameOrderAppearsInRootFallback: legacyRootPurchaseOrdersCache.some((row) => normalizeSearchId(row?.id) === normalizeSearchId(order.id)),
+        sameOrderAppearsInSubcollection: subcollectionPurchaseOrdersCache.some((row) => normalizeSearchId(row?.id) === normalizeSearchId(order.id)),
+        productHistoryHasRowButPurchaseOrderMissing: false,
+        matchReasons,
+        variant: String(line?.variant || ''),
+        color: String(line?.color || ''),
+      });
+    });
+  });
+
+  products.forEach((product) => {
+    const productId = normalizeSearchId(product.id);
+    const historyRows = Array.isArray(product.purchaseHistory) ? product.purchaseHistory : [];
+    historyRows.forEach((historyRow, historyIndex) => {
+      const purchaseOrderId = normalizeSearchId(historyRow.purchaseOrderId);
+      const matchingOrder = purchaseOrders.find((order) => normalizeSearchId(order.id) === purchaseOrderId);
+      if (matchingOrder) return;
+      const partyName = String(historyRow.partyName || '').trim();
+      const candidateDate = String(historyRow.date || '').trim();
+      const quantity = Math.max(0, Number(historyRow.quantity || 0));
+      const unitPrice = Math.max(0, Number(historyRow.unitPrice || 0));
+      const total = Math.max(0, Number((historyRow as { totalAmount?: number }).totalAmount || (quantity * unitPrice)));
+      const resolvedParty = parties.find((party) => normalizeSearchText(party.name) === normalizeSearchText(partyName)) || null;
+      const matchReasons = buildRuntimeSearchMatchReasons({
+        ...normalizedCriteria,
+        candidatePurchaseOrderId: purchaseOrderId,
+        candidateProductName: String(product.name || '').trim(),
+        candidateSupplierName: partyName,
+        candidateProductId: productId,
+        candidatePartyId: normalizeSearchId(resolvedParty?.id),
+        orderTotal: total,
+        lineTotal: total,
+        candidateQuantity: quantity,
+        candidateDate,
+      });
+      const matches = candidateMatchesRuntimeSearch({
+        ...normalizedCriteria,
+        candidatePurchaseOrderId: purchaseOrderId,
+        candidateProductName: String(product.name || '').trim(),
+        candidateSupplierName: partyName,
+        candidateProductId: productId,
+        candidatePartyId: normalizeSearchId(resolvedParty?.id),
+        orderTotal: total,
+        lineTotal: total,
+        candidateQuantity: quantity,
+        candidateDate,
+      });
+      if (!matches) return;
+
+      const candidateKey = `history:${purchaseOrderId}:${productId}:${historyIndex}`;
+      if (candidateKeys.has(candidateKey)) return;
+      candidateKeys.add(candidateKey);
+
+      candidates.push({
+        purchaseOrderId,
+        orderSource: 'productHistoryOnly',
+        date: candidateDate,
+        orderDate: candidateDate,
+        createdAt: '',
+        updatedAt: '',
+        partyId: normalizeSearchId(resolvedParty?.id),
+        partyName,
+        productId,
+        productName: String(product.name || '').trim(),
+        quantity,
+        unitPrice,
+        total,
+        paid: Math.max(0, Number(historyRow.paidAmount || historyRow.totalPaid || 0)),
+        remaining: Math.max(0, Number(historyRow.remainingAmount || 0)),
+        status: 'product_history_only',
+        productExists: true,
+        partyExists: Boolean(resolvedParty),
+        productPurchaseHistoryContainsOrderId: true,
+        sameOrderAppearsInRootFallback: legacyRootPurchaseOrdersCache.some((row) => normalizeSearchId(row?.id) === purchaseOrderId),
+        sameOrderAppearsInSubcollection: subcollectionPurchaseOrdersCache.some((row) => normalizeSearchId(row?.id) === purchaseOrderId),
+        productHistoryHasRowButPurchaseOrderMissing: true,
+        matchReasons,
+        variant: String(historyRow.variant || ''),
+        color: String(historyRow.color || ''),
+      });
+    });
+  });
+
+  const exactOrderIdMatches = normalizedCriteria.purchaseOrderId
+    ? candidates.filter((candidate) => normalizeSearchId(candidate.purchaseOrderId) === normalizedCriteria.purchaseOrderId)
+    : [];
+  const anyHistoryMissing = candidates.some((candidate) => candidate.orderSource !== 'productHistoryOnly' && candidate.productExists && !candidate.productPurchaseHistoryContainsOrderId);
+  const anyRootOnly = candidates.some((candidate) => candidate.orderSource === 'rootFallback');
+  const anySubOnly = candidates.some((candidate) => candidate.orderSource === 'subcollection');
+  const allHistoryOnly = candidates.length > 0 && candidates.every((candidate) => candidate.orderSource === 'productHistoryOnly');
+  const productChanged =
+    exactOrderIdMatches.length > 0
+    && Boolean(normalizedCriteria.productName || normalizedCriteria.productId)
+    && !exactOrderIdMatches.some((candidate) =>
+      (!normalizedCriteria.productName || valueIncludesSearch(candidate.productName, normalizedCriteria.productName))
+      && (!normalizedCriteria.productId || normalizeSearchId(candidate.productId) === normalizedCriteria.productId)
+    );
+  const partyChanged =
+    exactOrderIdMatches.length > 0
+    && Boolean(normalizedCriteria.supplierName || normalizedCriteria.partyId)
+    && !exactOrderIdMatches.some((candidate) =>
+      (!normalizedCriteria.supplierName || valueIncludesSearch(candidate.partyName, normalizedCriteria.supplierName))
+      && (!normalizedCriteria.partyId || normalizeSearchId(candidate.partyId) === normalizedCriteria.partyId)
+    );
+  const dateChanged =
+    exactOrderIdMatches.length > 0
+    && Boolean(normalizedCriteria.dateFrom || normalizedCriteria.dateTo)
+    && !exactOrderIdMatches.some((candidate) => dateMatchesRuntimeSearchRange(candidate.date, normalizedCriteria.dateFrom, normalizedCriteria.dateTo));
+
+  let verdict: PurchaseOrderRuntimeSearchResult['verdict'] = 'not_found';
+  let recommendedNextStep = 'No matching purchase order or product history rows were found in the currently loaded runtime data. Broaden the search fields or confirm the business dataset is fully hydrated.';
+
+  if (allHistoryOnly) {
+    verdict = 'found_only_in_product_history';
+    recommendedNextStep = 'A product.purchaseHistory row exists without a matching loaded purchase order. Inspect root fallback and subcollection drift next.';
+  } else if (productChanged) {
+    verdict = 'found_product_changed';
+    recommendedNextStep = 'The order id was found, but the current product linkage/name no longer matches the searched product criteria.';
+  } else if (partyChanged) {
+    verdict = 'found_party_changed';
+    recommendedNextStep = 'The order id was found, but the supplier/party linkage no longer matches the searched party criteria.';
+  } else if (dateChanged) {
+    verdict = 'found_date_changed';
+    recommendedNextStep = 'The order id was found, but its current order date falls outside the searched date window.';
+  } else if (anyHistoryMissing) {
+    verdict = 'found_history_missing';
+    recommendedNextStep = 'Matching purchase orders were found, but one or more linked products are missing the embedded product.purchaseHistory row.';
+  } else if (candidates.length > 0 && candidates.every((candidate) => candidate.orderSource === 'rootFallback')) {
+    verdict = 'found_only_in_root_fallback';
+    recommendedNextStep = 'The matching order currently appears only through legacy root fallback data. Compare subcollection hydration and migration drift.';
+  } else if (candidates.length > 0 && candidates.every((candidate) => candidate.orderSource === 'subcollection')) {
+    verdict = 'found_only_in_subcollection';
+    recommendedNextStep = 'The matching order currently appears only in subcollection data. Compare root fallback expectations if the user remembers an older reference.';
+  } else if (candidates.length > 0) {
+    verdict = 'found_normal';
+    recommendedNextStep = 'The matching order is present in the loaded runtime data with intact product and party linkage.';
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    criteria: normalizedCriteria,
+    candidateCount: candidates.length,
+    candidates: candidates.sort((a, b) => new Date(b.date || b.updatedAt || '').getTime() - new Date(a.date || a.updatedAt || '').getTime()),
     verdict,
     recommendedNextStep,
   };
