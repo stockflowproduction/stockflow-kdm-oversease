@@ -9,9 +9,8 @@ import { loadData } from './services/storage';
 import { emitFinanceSnapshot } from './utils/financeDebugLogger';
 import { LayoutDashboard, ShoppingCart, FileText, Package, ArrowRightLeft, Users, Menu, X, Settings as SettingsIcon, LogOut, Landmark, Truck, ClipboardList, BarChart3, Lock } from 'lucide-react';
 import { Button, LightweightLoader } from './components/ui';
-import RoleLoginModal from './components/auth/RoleLoginModal';
 import { RoleSessionProvider, useRoleSession } from './src/auth/roleSession';
-import { can as simpleCan, clearAccessSession, getCurrentOperatorName, getCurrentRole, installRoleTestHelpers, isAccessUnlocked, isAccessUnlockedForUser, lockAccess, setAccessSession, SimplePermission } from './src/auth/simplePermissions';
+import { can as simpleCan, clearAccessSession, getCurrentOperatorId, getCurrentOperatorName, getCurrentRole, installRoleTestHelpers, isAccessUnlocked, isAccessUnlockedForUser, lockAccess, setAccessSession, SimplePermission } from './src/auth/simplePermissions';
 import { RestrictedPage } from './components/auth/PermissionGuard';
 import { useVersionCheck } from './src/hooks/useVersionCheck';
 import Settings from './pages/Settings';
@@ -241,6 +240,17 @@ function AppContent() {
     setAccessUnlocked(true);
   };
 
+  useEffect(() => {
+    if (authStatus !== 'authenticated' || accessUnlocked) return;
+    const role = getCurrentRole();
+    handleAccessLogin({
+      role,
+      operatorId: role === 'operator' ? getCurrentOperatorId() || undefined : undefined,
+      operatorName: role === 'operator' ? getCurrentOperatorName() || undefined : undefined,
+      loginAt: new Date().toISOString(),
+    });
+  }, [accessUnlocked, authStatus, currentEmail]);
+
   const handleLockAccess = () => {
     logoutRole();
     lockAccess();
@@ -287,10 +297,6 @@ function AppContent() {
 
   if (authStatus === 'unverified') {
       return <VerificationRequired email={currentEmail || undefined} />;
-  }
-
-  if (authStatus === 'authenticated' && !accessUnlocked) {
-    return <RoleLoginModal onLogin={handleAccessLogin} />;
   }
 
   const operatorName = getCurrentOperatorName();
