@@ -134,6 +134,10 @@ type PurchaseOrderDiagnosticRow = {
   productName: string;
   productImage: string;
   productFound: boolean;
+  linkReviewNeeded: boolean;
+  linkReviewReason: 'none' | 'product_missing' | 'product_id_mismatch_name_match';
+  matchedByNameProductId: string;
+  matchedByNameProductName: string;
   resolvedProductName: string;
   resolvedProductStock: number | null;
   productHistoryLinked: boolean;
@@ -568,7 +572,11 @@ export default function PurchasePanel() {
     return products.filter(p => safeLower(getProductSearchText(p)).includes(q));
   }, [products, productSearch]);
   const categorySuggestions = useMemo(
-    () => Array.from(new Set(products.map(p => getProductCategory(p).trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    () => Array.from<string>(new Set<string>(
+      products
+        .map((p) => getProductCategory(p).trim())
+        .filter((value): value is string => Boolean(value))
+    )).sort((a, b) => a.localeCompare(b)),
     [products]
   );
 
@@ -882,10 +890,19 @@ export default function PurchasePanel() {
       return;
     }
 
+    const orderId = editingOrderId || `po-${uid()}`;
+    const existingLineByBucket = new Map<string, PurchaseOrderLine>(
+      (existingOrderBeingEdited?.lines || []).map((line): [string, PurchaseOrderLine] => [comboKey(line.variant, line.color), line])
+    );
     const lines: PurchaseOrderLine[] = activeLines.map((line, idx) => ({
-      id: `${line.key}-${idx}-${uid()}`,
+      id: existingLineByBucket.get(comboKey(line.variant, line.color))?.id || `${line.key}-${idx}-${uid()}`,
       sourceType: sourceMode,
-      productId: sourceMode === 'inventory' ? selectedProduct?.id : undefined,
+      productId: sourceMode === 'inventory'
+        ? String(selectedProduct?.id || '').trim()
+        : (
+          String(existingLineByBucket.get(comboKey(line.variant, line.color))?.productId || '').trim()
+          || `pending-product-${orderId}-${existingLineByBucket.get(comboKey(line.variant, line.color))?.id || `${line.key}-${idx}`}`
+        ),
       productName: sourceMode === 'inventory' ? (selectedProduct?.name || '') : newProductDraft.name,
       pendingProductBarcode: sourceMode === 'new' ? newProductDraft.barcode : undefined,
       pendingProductDraft: sourceMode === 'new' ? {
@@ -908,11 +925,12 @@ export default function PurchasePanel() {
       color: line.color,
       quantity: toNum(line.quantity),
       unitCost: toNum(line.unitCost),
-      totalCost: toNum(line.quantity) * toNum(line.unitCost),
+      totalCost: Number((toNum(line.quantity) * toNum(line.unitCost)).toFixed(2)),
+      lineTotal: Number((toNum(line.quantity) * toNum(line.unitCost)).toFixed(2)),
     }));
 
     const now = new Date().toISOString();
-    const taxableAmount = lines.reduce((s, l) => s + l.totalCost, 0);
+    const taxableAmount = Number(lines.reduce((s, l) => s + l.totalCost, 0).toFixed(2));
     const gstRate = gstPercent === '' ? 0 : Math.max(0, Number(gstPercent) || 0);
     const gstAmount = Number(((taxableAmount * gstRate) / 100).toFixed(2));
     const initialPaid = Math.max(0, Number(initialPaidAmount) || 0);
@@ -927,7 +945,7 @@ export default function PurchasePanel() {
     const desiredCreditToApply = partyCreditTouched ? uiPartyCreditToApply : autoCreditToApply;
     const finalCreditToApply = Math.min(desiredCreditToApply, latestAvailablePartyCredit, latestMaxCreditUsable);
     const order: PurchaseOrder = {
-      id: editingOrderId || `po-${uid()}`,
+      id: orderId,
       partyId: party.id,
       partyName: party.name,
       partyPhone: party.phone,
@@ -1091,6 +1109,15 @@ export default function PurchasePanel() {
     });
     return map;
   }, [diagnosticProducts]);
+  const productsByNormalizedName = useMemo(() => {
+    const map = new Map<string, Product[]>();
+    diagnosticProducts.forEach((product) => {
+      const normalizedName = safeLower(getProductName(product).trim());
+      if (!normalizedName) return;
+      map.set(normalizedName, [...(map.get(normalizedName) || []), product]);
+    });
+    return map;
+  }, [diagnosticProducts]);
   const partyById = useMemo(() => {
     const map = new Map<string, PurchaseParty>();
     diagnosticParties.forEach((party) => {
@@ -1118,12 +1145,23 @@ export default function PurchasePanel() {
         const partyFound = partyById.has(order.partyId);
         return (order.lines || []).map((line, lineIndex) => {
           const productId = String(line.productId || '').trim();
+          const lineProductName = String(line.productName || '').trim();
+          const normalizedLineProductName = safeLower(lineProductName);
           const resolvedProduct = productId ? productById.get(productId) : undefined;
+          const nameMatchedProducts = !resolvedProduct && normalizedLineProductName
+            ? (productsByNormalizedName.get(normalizedLineProductName) || []).filter((product) => String(product.id || '').trim() !== productId)
+            : [];
+          const suggestedProduct = nameMatchedProducts.length === 1 ? nameMatchedProducts[0] : undefined;
           const matchingHistoryRows = resolvedProduct?.purchaseHistory?.filter((row) => String(row.purchaseOrderId || '').trim() === String(order.id || '').trim()) || [];
           const quantity = Math.max(0, Number(line.quantity || 0));
           const lineTotal = Math.max(0, Number(line.totalCost || (quantity * Number(line.unitCost || 0))));
           const qtyPerCtn = Number((line as any).piecesPerCartoon || (line as any).piecesPerCtn || (line as any).qtyPerCtn || 0);
           const totalCtn = Number((line as any).numberOfCartoons || (line as any).totalCtn || (line as any).cartons || 0);
+          const linkReviewReason: PurchaseOrderDiagnosticRow['linkReviewReason'] = resolvedProduct
+            ? 'none'
+            : suggestedProduct
+              ? 'product_id_mismatch_name_match'
+              : 'product_missing';
           return {
             rowId: `${order.id}-${line.id || lineIndex}`,
             orderId: order.id,
@@ -1138,11 +1176,19 @@ export default function PurchasePanel() {
             lineIndex,
             lineId: String(line.id || ''),
             productId,
-            productName: String(line.productName || resolvedProduct?.name || 'Unknown product'),
-            productImage: String(line.image || resolvedProduct?.image || ''),
+            productName: String(line.productName || resolvedProduct?.name || suggestedProduct?.name || 'Unknown product'),
+            productImage: String(line.image || resolvedProduct?.image || suggestedProduct?.image || ''),
             productFound: Boolean(resolvedProduct),
-            resolvedProductName: String(resolvedProduct?.name || ''),
-            resolvedProductStock: resolvedProduct ? Math.max(0, Number(resolvedProduct.stock || 0)) : null,
+            linkReviewNeeded: linkReviewReason !== 'none',
+            linkReviewReason,
+            matchedByNameProductId: String(suggestedProduct?.id || ''),
+            matchedByNameProductName: String(suggestedProduct?.name || ''),
+            resolvedProductName: String(resolvedProduct?.name || suggestedProduct?.name || ''),
+            resolvedProductStock: resolvedProduct
+              ? Math.max(0, Number(resolvedProduct.stock || 0))
+              : suggestedProduct
+                ? Math.max(0, Number(suggestedProduct.stock || 0))
+                : null,
             productHistoryLinked: matchingHistoryRows.length > 0,
             variant: String(line.variant || ''),
             color: String(line.color || ''),
@@ -1161,7 +1207,7 @@ export default function PurchasePanel() {
           } satisfies PurchaseOrderDiagnosticRow;
         });
       });
-  }, [diagnosticOrders, partyById, productById]);
+  }, [diagnosticOrders, partyById, productById, productsByNormalizedName]);
   const purchaseDiagnosticProductOptions = useMemo(() => {
     const seen = new Map<string, string>();
     purchaseOrderDiagnosticRows.forEach((row) => {
@@ -1211,9 +1257,11 @@ export default function PurchasePanel() {
     let totalRemaining = 0;
     let totalCreditApplied = 0;
     let totalCreditCreated = 0;
+    let linkReviewCount = 0;
     filteredPurchaseDiagnosticRows.forEach((row) => {
       totalCreditApplied += row.creditApplied;
       totalCreditCreated += row.creditCreated;
+      if (row.linkReviewNeeded) linkReviewCount += 1;
       if (seenOrders.has(row.orderId)) return;
       seenOrders.add(row.orderId);
       totalPurchaseAmount += row.orderTotal;
@@ -1226,6 +1274,7 @@ export default function PurchasePanel() {
       totalRemaining,
       totalCreditApplied,
       totalCreditCreated,
+      linkReviewCount,
       orderCount: uniqueOrders.size,
       lineCount: filteredPurchaseDiagnosticRows.length,
     };
@@ -2045,7 +2094,7 @@ export default function PurchasePanel() {
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-slate-900">Find Purchase Order</div>
-                    <div className="text-xs text-slate-500">Read-only runtime search across merged purchase orders, root fallback presence, subcollection presence, and embedded product history rows.</div>
+                    <div className="text-xs text-slate-500">Read-only runtime search across the current purchase timeline and linked product rows.</div>
                   </div>
                   <Button size="sm" variant="outline" onClick={openPurchaseRuntimeSearch}>Trace Search</Button>
                 </div>
@@ -2089,12 +2138,13 @@ export default function PurchasePanel() {
                 </div>
               </div>
             )}
-            <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-7">
+            <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-8">
               <SummaryCard label="Total Purchase Amount" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalPurchaseAmount)}`} />
               <SummaryCard label="Total Paid" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalPaid)}`} />
               <SummaryCard label="Total Remaining" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalRemaining)}`} />
               <SummaryCard label="Total Credit Applied" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalCreditApplied)}`} />
               <SummaryCard label="Total Credit Created" value={`₹${formatNumber(filteredPurchaseDiagnosticSummary.totalCreditCreated)}`} />
+              <SummaryCard label="Needs Link Review" value={`${filteredPurchaseDiagnosticSummary.linkReviewCount}`} />
               <SummaryCard label="Number of Orders" value={`${filteredPurchaseDiagnosticSummary.orderCount}`} />
               <SummaryCard label="Number of Lines" value={`${filteredPurchaseDiagnosticSummary.lineCount}`} />
             </div>
@@ -2219,16 +2269,30 @@ export default function PurchasePanel() {
                       <td className="p-2 max-w-[180px] whitespace-pre-wrap break-words">{row.notes || '—'}</td>
                       <td className="p-2">
                         <div className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.productFound ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{row.productFound ? 'Product found' : 'Product missing'}</div>
-                        <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.productHistoryLinked ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{row.productHistoryLinked ? 'History linked' : 'History missing'}</div>
+                        <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.productHistoryLinked ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{row.productHistoryLinked ? 'Purchase record linked' : 'Link review needed'}</div>
+                        {row.linkReviewReason === 'product_id_mismatch_name_match' && (
+                          <div className="mt-1 rounded-full bg-blue-100 px-2 py-1 text-[10px] font-semibold text-blue-700">
+                            Needs Link Review: name matches {row.matchedByNameProductName || 'existing product'}
+                          </div>
+                        )}
                         <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${row.partyFound ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{row.partyFound ? 'Party found' : 'Party missing'}</div>
+                        {row.linkReviewReason === 'product_missing' && !row.productFound && (
+                          <div className="mt-1 rounded-full bg-rose-100 px-2 py-1 text-[10px] font-semibold text-rose-700">
+                            No matching product found in inventory
+                          </div>
+                        )}
                         {row.resolvedProductStock !== null && <div className="mt-1 text-[10px] text-muted-foreground">Stock: {formatNumber(row.resolvedProductStock, 0)}</div>}
+                        {row.linkReviewReason === 'product_id_mismatch_name_match' && row.matchedByNameProductId && (
+                          <div className="mt-1 font-mono text-[10px] text-muted-foreground">Suggested Product ID: {row.matchedByNameProductId}</div>
+                        )}
                       </td>
                       <td className="p-2">
                         <div className="flex flex-col gap-1">
                           <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => setExpandedPartyId((prev) => prev === row.orderPartyId ? null : row.orderPartyId)} disabled={!row.partyFound}>View Ledger</Button>
-                          <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => openProductSnapshot(row.productId)} disabled={!row.productFound}>View Product</Button>
+                          <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => openProductSnapshot(row.productId)} disabled={!row.productFound || row.linkReviewNeeded}>View Product Details</Button>
                           <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => void copyText(row.orderId)}>Copy Order ID</Button>
                           <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => void copyText(row.productId)} disabled={!row.productId}>Copy Product ID</Button>
+                          <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => void copyText(row.matchedByNameProductId)} disabled={!row.matchedByNameProductId}>Copy Suggested Product ID</Button>
                           <Button size="sm" variant="outline" className="h-7 px-2 text-[10px]" onClick={() => void copyText(row.orderPartyId)} disabled={!row.orderPartyId}>Copy Party ID</Button>
                         </div>
                       </td>
@@ -2589,9 +2653,9 @@ export default function PurchasePanel() {
                         <td className="p-2">
                           <div className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productExists ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{candidate.productExists ? 'Product found' : 'Product missing'}</div>
                           <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.partyExists ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{candidate.partyExists ? 'Party found' : 'Party missing'}</div>
-                          <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productPurchaseHistoryContainsOrderId ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{candidate.productPurchaseHistoryContainsOrderId ? 'History linked' : 'History missing'}</div>
+                          <div className={`mt-1 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${candidate.productPurchaseHistoryContainsOrderId ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{candidate.productPurchaseHistoryContainsOrderId ? 'Purchase record linked' : 'Link review needed'}</div>
                           {candidate.productHistoryHasRowButPurchaseOrderMissing && (
-                            <div className="mt-1 inline-flex rounded-full bg-blue-100 px-2 py-1 text-[10px] font-semibold text-blue-700">History row only</div>
+                            <div className="mt-1 inline-flex rounded-full bg-blue-100 px-2 py-1 text-[10px] font-semibold text-blue-700">Stored row only</div>
                           )}
                         </td>
                         <td className="p-2">{candidate.matchReasons.join(', ') || 'Matched by current filters'}</td>
@@ -2610,7 +2674,7 @@ export default function PurchasePanel() {
         ) : null}
       </Modal>
 
-      <Modal open={Boolean(purchaseViewProduct)} onClose={() => setPurchaseViewProduct(null)} title={purchaseViewProduct ? `Product Snapshot · ${purchaseViewProduct.name}` : 'Product Snapshot'}>
+      <Modal open={Boolean(purchaseViewProduct)} onClose={() => setPurchaseViewProduct(null)} title={purchaseViewProduct ? `Product Details · ${purchaseViewProduct.name}` : 'Product Details'}>
         {purchaseViewProduct ? (
           <div className="grid gap-4 md:grid-cols-[180px_minmax(0,1fr)]">
             <div className="overflow-hidden rounded-2xl border bg-slate-50">
@@ -2625,7 +2689,7 @@ export default function PurchasePanel() {
                 <SummaryCard label="Product ID" value={purchaseViewProduct.id} />
                 <SummaryCard label="Current Stock" value={formatNumber(Math.max(0, Number(purchaseViewProduct.stock || 0)), 0)} />
                 <SummaryCard label="Buy Price" value={`₹${formatNumber(Math.max(0, Number(purchaseViewProduct.buyPrice || 0)))}`} />
-                <SummaryCard label="Purchase History Rows" value={`${purchaseViewProduct.purchaseHistory?.length || 0}`} />
+                <SummaryCard label="Stored Purchase Rows" value={`${purchaseViewProduct.purchaseHistory?.length || 0}`} />
               </div>
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
                 <div><span className="font-semibold">Name:</span> {purchaseViewProduct.name}</div>

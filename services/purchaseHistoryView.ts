@@ -5,11 +5,12 @@ type ProductPurchaseHistoryRow = NonNullable<Product['purchaseHistory']>[number]
 
 export type PurchaseOrderDerivedHistoryRow = {
   id: string;
-  source: 'purchase_order';
+  source: 'purchase_order' | 'link_review';
   legacyHistoryId: string | null;
-  purchaseOrderId: string;
+  purchaseOrderId: string | null;
   lineId: string;
-  productId: string;
+  productId: string | null;
+  productName: string | null;
   date: string;
   variant: string;
   color: string;
@@ -33,13 +34,8 @@ export type PurchaseOrderDerivedHistoryRow = {
     online: number;
     partyCredit: number;
   };
-  compatibility: {
-    usesLegacyFallbackFields: boolean;
-    missingPreviousStock: boolean;
-    missingPreviousBuyPrice: boolean;
-    missingNextBuyPrice: boolean;
-    missingReference: boolean;
-  };
+  linkStatus: 'resolved' | 'needs_review';
+  reviewReason: string | null;
 };
 
 export type LegacyProductPurchaseHistoryFallbackRow = {
@@ -88,7 +84,7 @@ export type ProductPurchaseHistoryDisplayRow =
 
 export type ProductPurchaseHistoryComparisonIssue = {
   id: string;
-  type: 'missing_legacy_row' | 'orphan_legacy_row' | 'missing_purchase_order_link' | 'purchase_order_link_mismatch' | 'quantity_mismatch' | 'amount_mismatch';
+  type: 'missing_purchase_order' | 'broken_product_link' | 'quantity_mismatch' | 'amount_mismatch';
   severity: 'warning';
   purchaseOrderId: string | null;
   canonicalRowId: string | null;
@@ -104,20 +100,23 @@ export type ProductPurchaseHistoryComparisonIssue = {
 
 export type ProductPurchaseHistoryComparisonAudit = {
   canonicalCount: number;
+  needsLinkReviewCount: number;
   legacyCount: number;
   matchedCount: number;
   issueCount: number;
-  missingLegacyCount: number;
-  orphanLegacyCount: number;
+  legacySnapshotMissingCount: number;
+  missingPurchaseOrderCount: number;
+  brokenProductLinkCount: number;
   quantityMismatchCount: number;
   amountMismatchCount: number;
-  missingLinkCount: number;
   issues: ProductPurchaseHistoryComparisonIssue[];
 };
 
 type PurchaseHistorySelectorInput = {
   orders: PurchaseOrder[];
   productId: string;
+  productName?: string | null;
+  legacyRows?: ProductPurchaseHistoryRow[];
   variant?: string | null;
   color?: string | null;
 };
@@ -135,6 +134,10 @@ const normalizeOptionalFilter = (value?: string | null) => {
 const normalizeVariantColor = (value?: string | null, fallback?: string) => {
   const trimmed = String(value || '').trim();
   return trimmed || fallback || '';
+};
+
+const normalizeProductName = (value?: string | null) => {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
 };
 
 const toNullableNumber = (value: unknown) => {
@@ -237,14 +240,18 @@ const getPurchaseOrderPaymentMethod = (
 export const getProductPurchaseHistoryRowsFromPurchaseOrders = ({
   orders,
   productId,
+  productName,
+  legacyRows = [],
   variant,
   color,
 }: PurchaseHistorySelectorInput): PurchaseOrderDerivedHistoryRow[] => {
   const normalizedProductId = String(productId || '').trim();
-  if (!normalizedProductId) return [];
+  const normalizedProductName = normalizeProductName(productName);
+  if (!normalizedProductId && !normalizedProductName) return [];
 
   const variantFilter = normalizeOptionalFilter(variant);
   const colorFilter = normalizeOptionalFilter(color);
+  const usedLegacyIndexes = new Set<number>();
 
   return (orders || [])
     .slice()
@@ -258,8 +265,12 @@ export const getProductPurchaseHistoryRowsFromPurchaseOrders = ({
       const paymentMethod = getPurchaseOrderPaymentMethod(order);
 
       return (order.lines || [])
-        .filter((line) => String(line.productId || '').trim() === normalizedProductId)
         .filter((line) => {
+          const lineProductId = String(line.productId || '').trim();
+          const lineProductName = normalizeProductName(line.productName);
+          const exactIdMatch = normalizedProductId && lineProductId === normalizedProductId;
+          const nameReviewMatch = !exactIdMatch && normalizedProductName && lineProductName === normalizedProductName;
+          if (!exactIdMatch && !nameReviewMatch) return false;
           const lineVariant = normalizeVariantColor(line.variant, NO_VARIANT);
           const lineColor = normalizeVariantColor(line.color, NO_COLOR);
           if (variantFilter && lineVariant !== variantFilter) return false;
@@ -267,18 +278,22 @@ export const getProductPurchaseHistoryRowsFromPurchaseOrders = ({
           return true;
         })
         .map((line, lineIndex) => {
+          const lineProductId = String(line.productId || '').trim() || null;
+          const lineProductName = String(line.productName || '').trim() || null;
+          const exactIdMatch = Boolean(normalizedProductId && lineProductId === normalizedProductId);
+          const linkStatus: PurchaseOrderDerivedHistoryRow['linkStatus'] = exactIdMatch ? 'resolved' : 'needs_review';
           const quantity = Math.max(0, toSafeNumber(line.quantity));
           const unitPrice = Math.max(0, toSafeNumber(line.unitCost));
           const derivedReference = String(order.billNumber || order.id || '').trim() || null;
           const derivedNotes = String(order.notes || '').trim() || null;
-
-          return {
+          const draftRow = {
             id: `po-row-${order.id}-${String(line.id || lineIndex)}`,
-            source: 'purchase_order',
+            source: (exactIdMatch ? 'purchase_order' : 'link_review') as PurchaseOrderDerivedHistoryRow['source'],
             legacyHistoryId: null,
-            purchaseOrderId: order.id,
+            purchaseOrderId: String(order.id || '').trim() || null,
             lineId: String(line.id || lineIndex),
-            productId: normalizedProductId,
+            productId: lineProductId,
+            productName: lineProductName,
             date: orderDate,
             variant: normalizeVariantColor(line.variant, NO_VARIANT),
             color: normalizeVariantColor(line.color, NO_COLOR),
@@ -298,14 +313,25 @@ export const getProductPurchaseHistoryRowsFromPurchaseOrders = ({
             orderPaid,
             remainingPayable,
             paymentBreakdown,
-            compatibility: {
-              usesLegacyFallbackFields: true,
-              missingPreviousStock: true,
-              missingPreviousBuyPrice: true,
-              missingNextBuyPrice: true,
-              missingReference: !derivedReference,
-            },
+            linkStatus,
+            reviewReason: exactIdMatch ? null : 'Purchase order line productName matches, but productId is missing or mismatched.',
           } satisfies PurchaseOrderDerivedHistoryRow;
+
+          if (!exactIdMatch) {
+            return draftRow;
+          }
+
+          const matchedLegacyIndex = findBestLegacyMatchIndex(legacyRows, draftRow, usedLegacyIndexes);
+          if (matchedLegacyIndex >= 0) {
+            usedLegacyIndexes.add(matchedLegacyIndex);
+            const matchedLegacy = legacyRows[matchedLegacyIndex];
+            return {
+              ...draftRow,
+              legacyHistoryId: matchedLegacy.id || null,
+            } satisfies PurchaseOrderDerivedHistoryRow;
+          }
+
+          return draftRow;
         });
     });
 };
@@ -345,62 +371,14 @@ export const getProductPurchaseHistoryDisplayRows = ({
   variant,
   color,
 }: PurchaseHistoryDisplaySelectorInput): ProductPurchaseHistoryDisplayRow[] => {
-  const canonicalRows = getProductPurchaseHistoryRowsFromPurchaseOrders({
+  return getProductPurchaseHistoryRowsFromPurchaseOrders({
     orders,
     productId,
+    productName: product?.name,
+    legacyRows: Array.isArray(product?.purchaseHistory) ? product.purchaseHistory : [],
     variant,
     color,
   });
-
-  const legacyRows = Array.isArray(product?.purchaseHistory)
-    ? product!.purchaseHistory!.filter((row) => {
-      const rowVariant = normalizeVariantColor(row.variant, NO_VARIANT);
-      const rowColor = normalizeVariantColor(row.color, NO_COLOR);
-      const variantFilter = normalizeOptionalFilter(variant);
-      const colorFilter = normalizeOptionalFilter(color);
-      if (variantFilter && rowVariant !== variantFilter) return false;
-      if (colorFilter && rowColor !== colorFilter) return false;
-      return true;
-    })
-    : [];
-
-  const usedLegacyIndexes = new Set<number>();
-
-  const mergedCanonicalRows: ProductPurchaseHistoryDisplayRow[] = canonicalRows.map((row) => {
-    const matchedLegacyIndex = findBestLegacyMatchIndex(legacyRows, row, usedLegacyIndexes);
-    if (matchedLegacyIndex < 0) return row;
-
-    usedLegacyIndexes.add(matchedLegacyIndex);
-    const matchedLegacy = legacyRows[matchedLegacyIndex];
-    return {
-      ...row,
-      id: matchedLegacy.id || row.id,
-      legacyHistoryId: matchedLegacy.id || null,
-      previousStock: toNullableNumber(matchedLegacy.previousStock),
-      previousBuyPrice: toNullableNumber(matchedLegacy.previousBuyPrice),
-      nextBuyPrice: toNullableNumber(matchedLegacy.nextBuyPrice),
-      reference: String(matchedLegacy.reference || '').trim() || row.reference,
-      notes: String(matchedLegacy.notes || '').trim() || row.notes,
-      partyName: String(matchedLegacy.partyName || '').trim() || row.partyName,
-      paymentMethod: matchedLegacy.paymentMethod || row.paymentMethod,
-      paidAmount: Math.max(row.paidAmount, Math.max(0, toSafeNumber(matchedLegacy.paidAmount))),
-      compatibility: {
-        usesLegacyFallbackFields: true,
-        missingPreviousStock: !Number.isFinite(Number(matchedLegacy.previousStock)),
-        missingPreviousBuyPrice: !Number.isFinite(Number(matchedLegacy.previousBuyPrice)),
-        missingNextBuyPrice: !Number.isFinite(Number(matchedLegacy.nextBuyPrice)),
-        missingReference: !(String(matchedLegacy.reference || '').trim() || row.reference),
-      },
-    } satisfies PurchaseOrderDerivedHistoryRow;
-  });
-
-  const orphanLegacyRows = legacyRows
-    .filter((_, index) => !usedLegacyIndexes.has(index))
-    .map((row) => buildLegacyFallbackRow(productId, row, { orphanedLegacyRow: true }));
-
-  return [...mergedCanonicalRows, ...orphanLegacyRows]
-    .slice()
-    .sort((a, b) => new Date(b.date || '').getTime() - new Date(a.date || '').getTime());
 };
 
 export const getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct = (
@@ -411,6 +389,8 @@ export const getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct = (
   return getProductPurchaseHistoryRowsFromPurchaseOrders({
     orders,
     productId: product.id,
+    productName: product.name,
+    legacyRows: Array.isArray(product.purchaseHistory) ? product.purchaseHistory : [],
   });
 };
 
@@ -433,55 +413,56 @@ export const compareProductPurchaseHistoryForProduct = (
   if (!product) {
     return {
       canonicalCount: 0,
+      needsLinkReviewCount: 0,
       legacyCount: 0,
       matchedCount: 0,
       issueCount: 0,
-      missingLegacyCount: 0,
-      orphanLegacyCount: 0,
+      legacySnapshotMissingCount: 0,
+      missingPurchaseOrderCount: 0,
+      brokenProductLinkCount: 0,
       quantityMismatchCount: 0,
       amountMismatchCount: 0,
-      missingLinkCount: 0,
       issues: [],
     };
   }
 
-  const canonicalRows = getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct(product, orders);
+  const allDerivedRows = getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct(product, orders);
+  const canonicalRows = allDerivedRows.filter((row) => row.linkStatus === 'resolved');
+  const linkReviewRows = allDerivedRows.filter((row) => row.linkStatus === 'needs_review');
   const legacyRows = Array.isArray(product.purchaseHistory) ? product.purchaseHistory : [];
-  const usedLegacyIndexes = new Set<number>();
   const issues: ProductPurchaseHistoryComparisonIssue[] = [];
+  const legacySnapshotMissingCount = canonicalRows.filter((row) => !row.legacyHistoryId).length;
+
+  linkReviewRows.forEach((row) => {
+    issues.push({
+      id: `broken-link-${row.id}`,
+      type: 'broken_product_link',
+      severity: 'warning',
+      purchaseOrderId: row.purchaseOrderId || null,
+      canonicalRowId: row.id,
+      legacyHistoryId: null,
+      variant: row.variant,
+      color: row.color,
+      canonicalQuantity: row.quantity,
+      legacyQuantity: null,
+      canonicalAmount: Math.max(0, toSafeNumber(row.lineTotal || (row.quantity * row.unitPrice))),
+      legacyAmount: null,
+      message: 'Purchase order line needs product link review. productName matches, but productId is missing or mismatched.',
+    });
+  });
 
   canonicalRows.forEach((canonicalRow) => {
-    const matchedLegacyIndex = findBestLegacyMatchIndex(legacyRows, canonicalRow, usedLegacyIndexes);
     const canonicalAmount = Math.max(0, toSafeNumber(canonicalRow.lineTotal || (canonicalRow.quantity * canonicalRow.unitPrice)));
-
-    if (matchedLegacyIndex < 0) {
-      issues.push({
-        id: `missing-legacy-${canonicalRow.id}`,
-        type: 'missing_legacy_row',
-        severity: 'warning',
-        purchaseOrderId: canonicalRow.purchaseOrderId || null,
-        canonicalRowId: canonicalRow.id,
-        legacyHistoryId: null,
-        variant: canonicalRow.variant,
-        color: canonicalRow.color,
-        canonicalQuantity: canonicalRow.quantity,
-        legacyQuantity: null,
-        canonicalAmount,
-        legacyAmount: null,
-        message: 'Purchase order row has no matching embedded product.purchaseHistory row.',
-      });
-      return;
-    }
-
-    usedLegacyIndexes.add(matchedLegacyIndex);
-    const legacyRow = legacyRows[matchedLegacyIndex];
+    if (!canonicalRow.legacyHistoryId) return;
+    const legacyRow = legacyRows.find((row) => row.id === canonicalRow.legacyHistoryId);
+    if (!legacyRow) return;
     const legacyAmount = Math.max(0, toSafeNumber(legacyRow.quantity) * toSafeNumber(legacyRow.unitPrice));
     const legacyOrderId = normalizeHistoryOrderId(legacyRow);
 
     if (!legacyOrderId) {
       issues.push({
         id: `missing-link-${legacyRow.id}`,
-        type: 'missing_purchase_order_link',
+        type: 'missing_purchase_order',
         severity: 'warning',
         purchaseOrderId: canonicalRow.purchaseOrderId || null,
         canonicalRowId: canonicalRow.id,
@@ -492,12 +473,12 @@ export const compareProductPurchaseHistoryForProduct = (
         legacyQuantity: Math.max(0, toSafeNumber(legacyRow.quantity)),
         canonicalAmount,
         legacyAmount,
-        message: 'Matched legacy history row is missing purchaseOrderId.',
+        message: 'Legacy purchase snapshot is missing its purchaseOrderId link.',
       });
     } else if (legacyOrderId !== canonicalRow.purchaseOrderId) {
       issues.push({
         id: `link-mismatch-${legacyRow.id}`,
-        type: 'purchase_order_link_mismatch',
+        type: 'missing_purchase_order',
         severity: 'warning',
         purchaseOrderId: canonicalRow.purchaseOrderId || null,
         canonicalRowId: canonicalRow.id,
@@ -508,7 +489,7 @@ export const compareProductPurchaseHistoryForProduct = (
         legacyQuantity: Math.max(0, toSafeNumber(legacyRow.quantity)),
         canonicalAmount,
         legacyAmount,
-        message: 'Legacy purchaseOrderId does not match the canonical purchase order row.',
+        message: 'Legacy purchase snapshot points to a different purchase order than the canonical row.',
       });
     }
 
@@ -550,10 +531,11 @@ export const compareProductPurchaseHistoryForProduct = (
   });
 
   legacyRows.forEach((legacyRow, index) => {
-    if (usedLegacyIndexes.has(index)) return;
+    const usedByCanonical = canonicalRows.some((row) => row.legacyHistoryId === legacyRow.id);
+    if (usedByCanonical) return;
     issues.push({
       id: `orphan-legacy-${legacyRow.id}`,
-      type: 'orphan_legacy_row',
+      type: 'missing_purchase_order',
       severity: 'warning',
       purchaseOrderId: normalizeHistoryOrderId(legacyRow),
       canonicalRowId: null,
@@ -564,26 +546,26 @@ export const compareProductPurchaseHistoryForProduct = (
       legacyQuantity: Math.max(0, toSafeNumber(legacyRow.quantity)),
       canonicalAmount: null,
       legacyAmount: Math.max(0, toSafeNumber(legacyRow.quantity) * toSafeNumber(legacyRow.unitPrice)),
-      message: 'Embedded product.purchaseHistory row has no matching canonical purchase order row.',
+      message: 'Legacy purchase snapshot has no matching purchase order row.',
     });
   });
 
-  const missingLegacyCount = issues.filter((issue) => issue.type === 'missing_legacy_row').length;
-  const orphanLegacyCount = issues.filter((issue) => issue.type === 'orphan_legacy_row').length;
+  const missingPurchaseOrderCount = issues.filter((issue) => issue.type === 'missing_purchase_order').length;
+  const brokenProductLinkCount = issues.filter((issue) => issue.type === 'broken_product_link').length;
   const quantityMismatchCount = issues.filter((issue) => issue.type === 'quantity_mismatch').length;
   const amountMismatchCount = issues.filter((issue) => issue.type === 'amount_mismatch').length;
-  const missingLinkCount = issues.filter((issue) => issue.type === 'missing_purchase_order_link' || issue.type === 'purchase_order_link_mismatch').length;
 
   return {
     canonicalCount: canonicalRows.length,
+    needsLinkReviewCount: linkReviewRows.length,
     legacyCount: legacyRows.length,
-    matchedCount: usedLegacyIndexes.size,
+    matchedCount: canonicalRows.filter((row) => row.legacyHistoryId).length,
     issueCount: issues.length,
-    missingLegacyCount,
-    orphanLegacyCount,
+    legacySnapshotMissingCount,
+    missingPurchaseOrderCount,
+    brokenProductLinkCount,
     quantityMismatchCount,
     amountMismatchCount,
-    missingLinkCount,
     issues,
   };
 };

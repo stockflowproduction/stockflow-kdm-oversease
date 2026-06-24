@@ -734,7 +734,7 @@ export default function Transactions() {
     const firstImageObjSrc = typeof firstImageObj === 'string'
       ? firstImageObj
       : (firstImageObj?.src || firstImageObj?.url || '');
-    return product.thumbnailImage || product.image || (product as any).imageSrc || firstGalleryImage || firstImageObjSrc || '';
+    return (product as any).thumbnailImage || product.image || (product as any).imageSrc || firstGalleryImage || firstImageObjSrc || '';
   };
 
   const filteredProductsForPicker = useMemo(() => {

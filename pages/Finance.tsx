@@ -282,7 +282,7 @@ const resolveTransactionTimeForSession = (transaction: Transaction) => {
 
 const getReturnFinancialEffectsForFinance = (transaction: Transaction) => {
   try {
-    const allocation = getCanonicalReturnAllocation(transaction);
+    const allocation = getCanonicalReturnAllocation(transaction, [], 0);
     return { affectsCash: allocation.cashRefund > 0 };
   } catch (error) {
     if ((import.meta as any).env?.DEV) {

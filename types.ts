@@ -31,6 +31,8 @@ export interface Product {
   lostDamageUnitCost?: number;
   lostDamageUpdatedAt?: string;
   createdAt?: string;
+  updatedAt?: string;
+  thumbnailImage?: string;
   purchaseHistory?: Array<{
     id: string;
     date: string;
@@ -44,6 +46,8 @@ export interface Product {
     purchaseOrderId?: string;
     paymentMethod?: 'cash' | 'online' | 'credit';
     paidAmount?: number;
+    totalPaid?: number;
+    remainingAmount?: number;
     partyName?: string;
     notes?: string;
     reference?: string;
@@ -87,8 +91,11 @@ export interface Transaction {
   paymentAppliedToReceivable?: number;
   paymentAppliedToCanonicalReceivable?: number;
   paymentAppliedToCustomOrderReceivable?: number;
+  appliedToCanonicalReceivable?: number;
+  appliedToCustomOrderReceivable?: number;
   cashReceived?: number;
   changeReturned?: number;
+  receivableIncrease?: number;
   returnHandlingMode?: 'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit';
   saleSettlement?: {
     cashPaid: number;
@@ -540,6 +547,7 @@ export interface PurchaseOrderLine {
   quantity: number;
   unitCost: number;
   totalCost: number;
+  lineTotal?: number;
 }
 
 export interface PurchaseOrder {

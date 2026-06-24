@@ -117,7 +117,7 @@ const getDeletedTransactionLedgerRow = (deleted: any, customerMap: Map<string, s
   const txType = String(deleted?.type || original?.type || '').toLowerCase();
 
   if (txType === 'sale' || txType === 'historical_reference') {
-    const settlement = getCashbookSaleBreakdown(original as Transaction, original);
+    const settlement = getCashbookSaleBreakdown(original as unknown as Transaction, original);
     const isMixed = (settlement.cashPaid > 0 && settlement.onlinePaid > 0) || (settlement.creditDue > 0 && (settlement.cashPaid > 0 || settlement.onlinePaid > 0));
     const payment: PayType = isMixed ? 'mixed' : (settlement.creditDue > 0 ? 'credit' : (settlement.cashPaid > 0 ? 'cash' : settlement.onlinePaid > 0 ? 'online' : getCashbookPaymentMethod(original)));
     return {
@@ -458,7 +458,7 @@ export default function Cashbook() {
         cashIn: Math.max(0, toNum(u.cashbookDelta?.cashIn)), cashOut: Math.max(0, toNum(u.cashbookDelta?.cashOut)), bankIn: Math.max(0, toNum(u.cashbookDelta?.onlineIn)), bankOut: Math.max(0, toNum(u.cashbookDelta?.onlineOut)),
         receivableIncrease: Math.max(0, toNum(u.cashbookDelta?.currentDueEffect)), receivableDecrease: Math.max(0, -toNum(u.cashbookDelta?.currentDueEffect)), payableIncrease: 0, payableDecrease: 0, storeCreditIncrease: Math.max(0, toNum(u.cashbookDelta?.currentStoreCreditEffect)), storeCreditDecrease: Math.max(0, -toNum(u.cashbookDelta?.currentStoreCreditEffect)) })),
     ];
-    const upfrontRows: Row[] = buildUpfrontOrderLedgerEffects(safeUpfrontOrders, safeCustomers).flatMap((effect) => {
+    const upfrontRows: Row[] = buildUpfrontOrderLedgerEffects(safeUpfrontOrders, safeCustomers).flatMap<Row>((effect): Row[] => {
       if (effect.type === 'legacy_custom_order_info') return [];
       if (effect.type === 'custom_order_receivable') {
         return [{

@@ -15,7 +15,7 @@ import { UploadImportModal } from '../components/UploadImportModal';
 import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFile } from '../services/importExcel';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { getProductAuditSample, getProductBarcode, getProductCategory, getProductName, safeLower, safeText } from '../utils/productText';
-import { ProductPurchaseHistoryDisplayRow, compareProductPurchaseHistoryForProduct, getProductPurchaseHistoryDisplayRowsForProduct, getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct } from '../services/purchaseHistoryView';
+import { PurchaseOrderDerivedHistoryRow, compareProductPurchaseHistoryForProduct, getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct } from '../services/purchaseHistoryView';
 import { can } from '../src/auth/simplePermissions';
 import { useEscapeLayer } from '../src/hooks/useEscapeLayer';
 
@@ -440,28 +440,35 @@ export default function Admin() {
 
   const renderPurchaseHistoryCards = (
     productName: string,
-    rows: ProductPurchaseHistoryDisplayRow[]
+    rows: PurchaseOrderDerivedHistoryRow[]
   ) => (
     <div className="space-y-2">
       {rows.map((h) => (
         (() => {
-          const lineQty = toNonNegativeNumber(h.quantity);
-          const unitCost = toNonNegativeNumber(h.unitPrice);
-          const lineTotal = Number((toNonNegativeNumber(h.lineTotal || (lineQty * unitCost))).toFixed(2));
+          const lineTotal = Number((toNonNegativeNumber(h.lineTotal || (toNonNegativeNumber(h.quantity) * toNonNegativeNumber(h.unitPrice)))).toFixed(2));
           const orderTotal = h.orderTotal == null ? null : toNonNegativeNumber(h.orderTotal);
           const orderPaid = h.orderPaid == null ? null : toNonNegativeNumber(h.orderPaid);
           const remainingPayable = h.remainingPayable == null ? null : toNonNegativeNumber(h.remainingPayable);
           const paymentSummary = h.paymentBreakdown || { cash: 0, online: 0, partyCredit: 0 };
           const partyName = h.partyName || 'Not linked / Unknown';
           const poLabel = h.purchaseOrderLabel || h.purchaseOrderId || '—';
-          const canUseLegacyActions = Boolean(h.legacyHistoryId);
+          const canUseLegacyActions = Boolean(h.legacyHistoryId) && h.linkStatus === 'resolved';
+          const isReviewRow = h.linkStatus === 'needs_review';
 
           return (
         <div key={h.id} className="rounded-lg border bg-muted/10 p-3 text-xs space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="font-semibold">{productName}</div>
+            <div className="flex items-center gap-2">
+              <div className="font-semibold">{productName}</div>
+              {isReviewRow && <Badge variant="outline">Needs Link Review</Badge>}
+            </div>
             <div className="text-muted-foreground">{new Date(h.date).toLocaleString()}</div>
           </div>
+          {h.productName && h.productName !== productName && (
+            <div className="text-[11px] text-amber-700">
+              Order product name: <span className="font-medium">{h.productName}</span>
+            </div>
+          )}
           <div className="text-muted-foreground">
             <span className="font-medium text-foreground">Variant:</span> {formatVariantColorValue(h.variant, NO_VARIANT)} &nbsp;•&nbsp;
             <span className="font-medium text-foreground">Color:</span> {formatVariantColorValue(h.color, NO_COLOR)}
@@ -469,19 +476,16 @@ export default function Admin() {
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
             <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Qty</div><div className="font-semibold">{toNonNegativeNumber(h.quantity)}</div></div>
             <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Unit Cost</div><div className="font-semibold">₹{toNonNegativeNumber(h.unitPrice).toFixed(2)}</div></div>
-            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Prev Stock</div><div className="font-semibold">{toNonNegativeNumber(h.previousStock)}</div></div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-[11px]">
-            <span className="rounded border bg-background px-2 py-1">
-              <span className="text-muted-foreground">Prev Buy:</span> ₹{toNonNegativeNumber(h.previousBuyPrice).toFixed(2)}
-            </span>
-            <span className="rounded border bg-background px-2 py-1">
-              <span className="text-muted-foreground">New Buy:</span> ₹{toNonNegativeNumber(h.nextBuyPrice).toFixed(2)}
-            </span>
+            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Line Total</div><div className="font-semibold">₹{lineTotal.toFixed(2)}</div></div>
           </div>
           <div className="space-y-1 text-[11px]">
             <div><span className="text-muted-foreground">Reference:</span> {h.reference || '—'}</div>
             <div><span className="text-muted-foreground">Notes:</span> {h.notes || '—'}</div>
+            {isReviewRow && (
+              <div className="text-amber-700">
+                <span className="font-medium">Review:</span> {h.reviewReason || 'Purchase order line needs a product link review.'}
+              </div>
+            )}
           </div>
           <div className="rounded border bg-background p-2 space-y-2">
             <div className="text-[10px] uppercase text-muted-foreground">Purchase Summary</div>
@@ -506,9 +510,9 @@ export default function Admin() {
               <Button
                 size="sm"
                 variant="outline"
-                disabled={!canUseLegacyActions || !h.purchaseOrderId}
+                disabled={!canUseLegacyActions || !h.purchaseOrderId || isReviewRow}
                 onClick={() => { if (canUseLegacyActions) void handleDeletePurchaseHistoryEntry(h.legacyHistoryId!); }}
-                title={!canUseLegacyActions ? 'Legacy history row is not available yet for this canonical purchase row.' : !h.purchaseOrderId ? 'Cannot delete legacy purchase entry without linked order metadata.' : 'Reverse purchase'}
+                title={isReviewRow ? 'Unresolved purchase link rows cannot be edited or reversed.' : !canUseLegacyActions ? 'Legacy history row is not available yet for this canonical purchase row.' : !h.purchaseOrderId ? 'Cannot delete legacy purchase entry without linked order metadata.' : 'Reverse purchase'}
               >
                 Delete Purchase Entry
               </Button>
@@ -827,15 +831,6 @@ export default function Admin() {
     () => getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct(purchaseTarget, loadData().purchaseOrders || []),
     [purchaseTarget]
   );
-  void canonicalPurchaseHistoryRows;
-  const mergedPurchaseHistoryDisplayRows = useMemo(
-    () => getProductPurchaseHistoryDisplayRowsForProduct(purchaseTarget, loadData().purchaseOrders || []),
-    [purchaseTarget]
-  );
-  const purchaseHistoryComparisonAudit = useMemo(
-    () => compareProductPurchaseHistoryForProduct(purchaseTarget, loadData().purchaseOrders || []),
-    [purchaseTarget]
-  );
   // Target model freeze:
   // Inventory purchase history is in transition to a purchase-order-derived view.
   // Until the migration is complete, embedded `product.purchaseHistory` remains a
@@ -843,15 +838,25 @@ export default function Admin() {
   // treated as the primary source of truth for purchase display data.
   const purchaseHistoryRows = useMemo(() => {
     if (!purchaseTarget) return [];
-    const rows = [...mergedPurchaseHistoryDisplayRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const rows = [...canonicalPurchaseHistoryRows].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     if (purchaseHistoryVariantFilter === 'all') return rows;
     return rows.filter((row) => `${row.variant || NO_VARIANT}::${row.color || NO_COLOR}` === purchaseHistoryVariantFilter);
-  }, [purchaseTarget, purchaseHistoryVariantFilter, mergedPurchaseHistoryDisplayRows]);
+  }, [purchaseTarget, purchaseHistoryVariantFilter, canonicalPurchaseHistoryRows]);
+
+  const resolvedPurchaseHistoryRows = useMemo(
+    () => purchaseHistoryRows.filter((row) => row.linkStatus === 'resolved'),
+    [purchaseHistoryRows]
+  );
+
+  const linkReviewPurchaseHistoryRows = useMemo(
+    () => purchaseHistoryRows.filter((row) => row.linkStatus === 'needs_review'),
+    [purchaseHistoryRows]
+  );
 
   const purchaseHistoryVariantOptions = useMemo(() => {
     if (!purchaseTarget) return [];
     const map = new Map<string, { variant: string; color: string }>();
-    mergedPurchaseHistoryDisplayRows.forEach((row) => {
+    canonicalPurchaseHistoryRows.forEach((row) => {
       const variant = row.variant || NO_VARIANT;
       const color = row.color || NO_COLOR;
       const key = `${variant}::${color}`;
@@ -860,19 +865,13 @@ export default function Admin() {
       }
     });
     return Array.from(map.entries()).map(([key, value]) => ({ key, ...value }));
-  }, [purchaseTarget, mergedPurchaseHistoryDisplayRows]);
+  }, [purchaseTarget, canonicalPurchaseHistoryRows]);
 
-  const filteredPurchaseHistoryComparisonIssues = useMemo(() => {
-    if (purchaseHistoryVariantFilter === 'all') return purchaseHistoryComparisonAudit.issues;
-    return purchaseHistoryComparisonAudit.issues.filter(
-      (issue) => `${issue.variant || NO_VARIANT}::${issue.color || NO_COLOR}` === purchaseHistoryVariantFilter
-    );
-  }, [purchaseHistoryComparisonAudit, purchaseHistoryVariantFilter]);
-
-  const viewingPurchaseHistoryRows = useMemo(
-    () => [...(viewingProduct?.purchaseHistory || [])].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
-    [viewingProduct]
-  );
+  const viewingPurchaseHistoryRows = useMemo(() => {
+    if (!viewingProduct) return [];
+    return getProductPurchaseHistoryRowsFromPurchaseOrdersForProduct(viewingProduct, loadData().purchaseOrders || [])
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [viewingProduct]);
 
   useEffect(() => {
     if (!purchaseTarget || !productHasCombinationStock(purchaseTarget)) {
@@ -1635,15 +1634,15 @@ export default function Admin() {
   const inventoryPurchaseHistoryAuditRows = useMemo(() => {
     return filteredProducts.map((product) => {
       const audit = compareProductPurchaseHistoryForProduct(product, purchaseOrderRowsForAudit);
-      const implication = audit.missingLegacyCount > 0 && audit.legacyCount === 0
-        ? 'Canonical purchase orders exist but embedded purchase history is blank.'
-        : audit.orphanLegacyCount > 0 && audit.canonicalCount === 0
-          ? 'Embedded purchase history exists without canonical purchase-order coverage.'
-          : audit.missingLinkCount > 0
-            ? 'Embedded rows have broken or inconsistent purchase-order links.'
-            : audit.quantityMismatchCount > 0 || audit.amountMismatchCount > 0
-              ? 'Canonical and embedded rows disagree on quantity or amount.'
-              : 'Canonical and embedded purchase history are aligned.';
+      const implication = audit.brokenProductLinkCount > 0
+        ? 'Some purchase-order lines need product link review before they can be treated as fully resolved history.'
+        : audit.missingPurchaseOrderCount > 0
+          ? 'Legacy purchase snapshot rows exist without a matching purchase order.'
+          : audit.quantityMismatchCount > 0 || audit.amountMismatchCount > 0
+            ? 'Canonical purchase-order rows and legacy audit snapshots disagree on quantity or amount.'
+            : audit.legacySnapshotMissingCount > 0
+              ? 'Legacy snapshot rows are missing, but canonical purchase-order history is available.'
+              : 'Canonical purchase orders and legacy audit snapshots are aligned.';
 
       return { product, audit, implication };
     });
@@ -1653,11 +1652,13 @@ export default function Admin() {
       summary.productsScanned += 1;
       summary.canonicalRows += row.audit.canonicalCount;
       summary.embeddedRows += row.audit.legacyCount;
+      summary.needsLinkReviewRows += row.audit.needsLinkReviewCount;
+      summary.legacySnapshotMissingRows += row.audit.legacySnapshotMissingCount;
       summary.totalIssues += row.audit.issueCount;
       if (row.audit.issueCount > 0) summary.productsWithIssues += 1;
-      if (row.audit.missingLegacyCount > 0) summary.productsMissingLegacy += 1;
-      if (row.audit.orphanLegacyCount > 0) summary.productsWithOrphans += 1;
-      if (row.audit.missingLinkCount > 0) summary.productsWithLinkIssues += 1;
+      if (row.audit.legacySnapshotMissingCount > 0) summary.productsMissingLegacy += 1;
+      if (row.audit.missingPurchaseOrderCount > 0) summary.productsWithOrphans += 1;
+      if (row.audit.brokenProductLinkCount > 0) summary.productsWithLinkIssues += 1;
       if (row.audit.quantityMismatchCount > 0 || row.audit.amountMismatchCount > 0) summary.productsWithValueMismatch += 1;
       return summary;
     }, {
@@ -1669,6 +1670,8 @@ export default function Admin() {
       productsWithValueMismatch: 0,
       canonicalRows: 0,
       embeddedRows: 0,
+      needsLinkReviewRows: 0,
+      legacySnapshotMissingRows: 0,
       totalIssues: 0,
     });
   }, [inventoryPurchaseHistoryAuditRows]);
@@ -2169,15 +2172,15 @@ export default function Admin() {
               <div className="mt-1 text-2xl font-bold text-slate-900">{inventoryPurchaseHistoryAuditSummary.canonicalRows}</div>
             </div>
             <div className="rounded-lg border bg-white p-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Embedded Rows</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Legacy Snapshot Rows</div>
               <div className="mt-1 text-2xl font-bold text-slate-900">{inventoryPurchaseHistoryAuditSummary.embeddedRows}</div>
             </div>
             <div className="rounded-lg border bg-white p-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Missing Legacy Coverage</div>
-              <div className="mt-1 text-2xl font-bold text-amber-700">{inventoryPurchaseHistoryAuditSummary.productsMissingLegacy}</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Needs Link Review</div>
+              <div className="mt-1 text-2xl font-bold text-amber-700">{inventoryPurchaseHistoryAuditSummary.needsLinkReviewRows}</div>
             </div>
             <div className="rounded-lg border bg-white p-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Value / Link Issues</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Business Issues</div>
               <div className="mt-1 text-2xl font-bold text-rose-700">
                 {inventoryPurchaseHistoryAuditSummary.productsWithLinkIssues + inventoryPurchaseHistoryAuditSummary.productsWithValueMismatch}
               </div>
@@ -2199,12 +2202,12 @@ export default function Admin() {
               </thead>
               <tbody>
                 {inventoryPurchaseHistoryAuditTopRows.map(({ product, audit, implication }) => {
-                  const primaryGap = audit.missingLegacyCount > 0
-                    ? 'Missing embedded rows'
-                    : audit.orphanLegacyCount > 0
-                      ? 'Orphan embedded rows'
-                      : audit.missingLinkCount > 0
-                        ? 'Broken purchase links'
+                  const primaryGap = audit.brokenProductLinkCount > 0
+                    ? 'Needs product link review'
+                    : audit.missingPurchaseOrderCount > 0
+                      ? 'Missing purchase order'
+                      : audit.legacySnapshotMissingCount > 0
+                        ? 'Legacy snapshot missing'
                         : audit.quantityMismatchCount > 0 || audit.amountMismatchCount > 0
                           ? 'Value mismatch'
                           : 'Aligned';
@@ -2841,77 +2844,6 @@ export default function Admin() {
                 </>
               ) : (
                 <div className="space-y-3">
-                  <div className={`rounded-lg border p-3 ${purchaseHistoryComparisonAudit.issueCount ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="flex items-center gap-2 font-semibold">
-                        <AlertTriangle className={`w-4 h-4 ${purchaseHistoryComparisonAudit.issueCount ? 'text-amber-600' : 'text-emerald-600'}`} />
-                        Purchase History Comparison Audit
-                      </div>
-                      <Badge variant={purchaseHistoryComparisonAudit.issueCount ? 'outline' : 'success'}>
-                        {purchaseHistoryComparisonAudit.issueCount ? `${purchaseHistoryComparisonAudit.issueCount} mismatch${purchaseHistoryComparisonAudit.issueCount === 1 ? '' : 'es'}` : 'In sync'}
-                      </Badge>
-                    </div>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Rollout-only audit comparing canonical purchase-order-derived rows against embedded product.purchaseHistory rows.
-                    </p>
-                    <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                      <div className="rounded border bg-background p-2 text-xs">
-                        <div className="text-muted-foreground">Canonical Rows</div>
-                        <div className="font-semibold">{purchaseHistoryComparisonAudit.canonicalCount}</div>
-                      </div>
-                      <div className="rounded border bg-background p-2 text-xs">
-                        <div className="text-muted-foreground">Embedded Rows</div>
-                        <div className="font-semibold">{purchaseHistoryComparisonAudit.legacyCount}</div>
-                      </div>
-                      <div className="rounded border bg-background p-2 text-xs">
-                        <div className="text-muted-foreground">Matched Rows</div>
-                        <div className="font-semibold">{purchaseHistoryComparisonAudit.matchedCount}</div>
-                      </div>
-                      <div className="rounded border bg-background p-2 text-xs">
-                        <div className="text-muted-foreground">Missing Links</div>
-                        <div className="font-semibold">{purchaseHistoryComparisonAudit.missingLinkCount}</div>
-                      </div>
-                      <div className="rounded border bg-background p-2 text-xs">
-                        <div className="text-muted-foreground">Missing Embedded Rows</div>
-                        <div className="font-semibold">{purchaseHistoryComparisonAudit.missingLegacyCount}</div>
-                      </div>
-                      <div className="rounded border bg-background p-2 text-xs">
-                        <div className="text-muted-foreground">Orphan Embedded Rows</div>
-                        <div className="font-semibold">{purchaseHistoryComparisonAudit.orphanLegacyCount}</div>
-                      </div>
-                      <div className="rounded border bg-background p-2 text-xs">
-                        <div className="text-muted-foreground">Qty Mismatches</div>
-                        <div className="font-semibold">{purchaseHistoryComparisonAudit.quantityMismatchCount}</div>
-                      </div>
-                      <div className="rounded border bg-background p-2 text-xs">
-                        <div className="text-muted-foreground">Amount Mismatches</div>
-                        <div className="font-semibold">{purchaseHistoryComparisonAudit.amountMismatchCount}</div>
-                      </div>
-                    </div>
-                    {!!filteredPurchaseHistoryComparisonIssues.length && (
-                      <div className="mt-3 space-y-2">
-                        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                          Current Audit Findings
-                        </div>
-                        <div className="max-h-52 overflow-y-auto rounded border bg-background">
-                          {filteredPurchaseHistoryComparisonIssues.map((issue) => (
-                            <div key={issue.id} className="border-b p-2 text-xs last:border-b-0">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="font-medium">{issue.message}</div>
-                                <Badge variant="outline">{issue.type}</Badge>
-                              </div>
-                              <div className="mt-1 text-muted-foreground">
-                                PO: {issue.purchaseOrderId || '—'} · Variant: {formatVariantColorValue(issue.variant, NO_VARIANT)} / {formatVariantColorValue(issue.color, NO_COLOR)}
-                              </div>
-                              <div className="mt-1 text-muted-foreground">
-                                Canonical Qty/Amount: {issue.canonicalQuantity ?? '—'} / {issue.canonicalAmount == null ? '—' : `₹${issue.canonicalAmount.toFixed(2)}`} · Embedded Qty/Amount: {issue.legacyQuantity ?? '—'} / {issue.legacyAmount == null ? '—' : `₹${issue.legacyAmount.toFixed(2)}`}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
                   {purchaseHistoryVariantOptions.length > 1 && (
                     <div className="space-y-1">
                       <Label>Filter by Variant / Color</Label>
@@ -2929,13 +2861,34 @@ export default function Admin() {
                       </select>
                     </div>
                   )}
-                  {!purchaseHistoryRows.length ? (
+                  {!resolvedPurchaseHistoryRows.length && !linkReviewPurchaseHistoryRows.length ? (
                     <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
                       No purchase history found for this product yet.
                     </div>
                   ) : (
-                    <div className="max-h-[420px] overflow-y-auto rounded-md border p-2">
-                      {renderPurchaseHistoryCards(purchaseTarget.name, purchaseHistoryRows)}
+                    <div className="space-y-3">
+                      {!!resolvedPurchaseHistoryRows.length && (
+                        <div className="space-y-2">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Purchase History</div>
+                          <div className="max-h-[420px] overflow-y-auto rounded-md border p-2">
+                            {renderPurchaseHistoryCards(purchaseTarget.name, resolvedPurchaseHistoryRows)}
+                          </div>
+                        </div>
+                      )}
+                      {!!linkReviewPurchaseHistoryRows.length && (
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-amber-700">
+                            <AlertTriangle className="w-4 h-4" />
+                            Needs Link Review
+                          </div>
+                          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                            These purchase-order rows matched this product by name, but their productId is missing or mismatched. They are shown for review and remain non-editable.
+                          </div>
+                          <div className="max-h-[320px] overflow-y-auto rounded-md border p-2">
+                            {renderPurchaseHistoryCards(purchaseTarget.name, linkReviewPurchaseHistoryRows)}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

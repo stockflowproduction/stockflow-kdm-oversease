@@ -4395,6 +4395,90 @@ const assertUpfrontOrderPayload = (order: UpfrontOrder, existingCustomerIds: Set
   }
 };
 
+const assertPurchaseOrderPayload = (order: PurchaseOrder) => {
+  if (!order || typeof order !== 'object') {
+    failValidation('INVALID_PURCHASE_ORDER', 'Purchase order payload is invalid.');
+  }
+  if (!(typeof order.partyId === 'string' && order.partyId.trim())) {
+    failValidation('INVALID_PURCHASE_ORDER_PARTY', 'Purchase order partyId is required.', { partyId: order.partyId });
+  }
+  if (!(typeof order.partyName === 'string' && order.partyName.trim())) {
+    failValidation('INVALID_PURCHASE_ORDER_PARTY', 'Purchase order partyName is required.', { partyName: order.partyName });
+  }
+  if (!Array.isArray(order.lines) || !order.lines.length) {
+    failValidation('INVALID_PURCHASE_ORDER_LINES', 'Purchase order must contain at least one line item.');
+  }
+
+  order.lines.forEach((line, index) => {
+    if (!(typeof line.productName === 'string' && line.productName.trim())) {
+      failValidation('INVALID_PURCHASE_ORDER_LINE_PRODUCT', 'Purchase order line productName is required.', { lineIndex: index });
+    }
+    if (!(typeof line.productId === 'string' && line.productId.trim())) {
+      failValidation('INVALID_PURCHASE_ORDER_LINE_PRODUCT', 'Purchase order line productId is required.', {
+        lineIndex: index,
+        productName: line.productName,
+      });
+    }
+    if (!(Number.isFinite(line.quantity) && line.quantity > 0)) {
+      failValidation('INVALID_PURCHASE_ORDER_LINE_QUANTITY', 'Purchase order line quantity must be greater than zero.', { lineIndex: index, quantity: line.quantity });
+    }
+    if (!isValidMoney(line.unitCost) || line.unitCost < 0) {
+      failValidation('INVALID_PURCHASE_ORDER_LINE_UNIT_COST', 'Purchase order line unitCost is invalid.', { lineIndex: index, unitCost: line.unitCost });
+    }
+    if (!isValidMoney(line.totalCost) || line.totalCost < 0) {
+      failValidation('INVALID_PURCHASE_ORDER_LINE_TOTAL', 'Purchase order line totalCost is invalid.', { lineIndex: index, totalCost: line.totalCost });
+    }
+    if (!isValidMoney(line.lineTotal ?? line.totalCost) || Number(line.lineTotal ?? line.totalCost) < 0) {
+      failValidation('INVALID_PURCHASE_ORDER_LINE_TOTAL', 'Purchase order line lineTotal is invalid.', { lineIndex: index, lineTotal: line.lineTotal });
+    }
+    const computedLineTotal = Number((Math.max(0, Number(line.quantity || 0)) * Math.max(0, Number(line.unitCost || 0))).toFixed(2));
+    if (Math.abs(Number(line.totalCost || 0) - computedLineTotal) > MONEY_EPSILON) {
+      failValidation('INVALID_PURCHASE_ORDER_LINE_TOTAL', 'Purchase order line totalCost must equal quantity × unitCost.', {
+        lineIndex: index,
+        totalCost: line.totalCost,
+        computedLineTotal,
+      });
+    }
+    if (Math.abs(Number(line.lineTotal ?? line.totalCost) - computedLineTotal) > MONEY_EPSILON) {
+      failValidation('INVALID_PURCHASE_ORDER_LINE_TOTAL', 'Purchase order line lineTotal must equal quantity × unitCost.', {
+        lineIndex: index,
+        lineTotal: line.lineTotal,
+        computedLineTotal,
+      });
+    }
+  });
+};
+
+const buildPendingPurchaseOrderProductId = (orderId: string, line: Pick<PurchaseOrderLine, 'id' | 'productName' | 'variant' | 'color'>, index: number) => {
+  const stableLineId = String(line.id || `line-${index}`).trim() || `line-${index}`;
+  return `pending-product-${orderId}-${stableLineId}`;
+};
+
+const normalizePurchaseOrderForPersistence = (order: PurchaseOrder): PurchaseOrder => {
+  const normalizedLines = (Array.isArray(order.lines) ? order.lines : []).map((line, index) => {
+    const quantity = Math.max(0, Number(line.quantity || 0));
+    const unitCost = Math.max(0, Number(line.unitCost || 0));
+    const computedLineTotal = Number((quantity * unitCost).toFixed(2));
+    return {
+      ...line,
+      productId: String(line.productId || '').trim() || buildPendingPurchaseOrderProductId(order.id, line, index),
+      productName: String(line.productName || '').trim(),
+      quantity,
+      unitCost,
+      totalCost: computedLineTotal,
+      lineTotal: computedLineTotal,
+    };
+  });
+
+  return {
+    ...order,
+    partyId: String(order.partyId || '').trim(),
+    partyName: String(order.partyName || '').trim(),
+    lines: normalizedLines,
+    totalQuantity: normalizedLines.reduce((sum, line) => sum + Math.max(0, Number(line.quantity || 0)), 0),
+  };
+};
+
 const assertPaymentMethodByType = (type: Transaction['type'], paymentMethod: Transaction['paymentMethod']) => {
   const validMethods: Transaction['paymentMethod'][] = ['Cash', 'Credit', 'Online'];
 
@@ -6865,14 +6949,16 @@ export const repairMissingProductPurchaseHistoryRowsDryRun = (): MissingProductP
 };
 
 export const createPurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
+  const orderForPersistence = normalizePurchaseOrderForPersistence(order);
+  assertPurchaseOrderPayload(orderForPersistence);
   const data = loadData();
-  const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
-  const totalPaid = Math.max(0, Math.min(totalAmount, Number(order.totalPaid) || 0));
+  const totalAmount = Math.max(0, Number(orderForPersistence.totalAmount) || 0);
+  const totalPaid = Math.max(0, Math.min(totalAmount, Number(orderForPersistence.totalPaid) || 0));
   const normalizedOrder: PurchaseOrder = {
-    ...order,
+    ...orderForPersistence,
     totalPaid,
     remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
-    paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
+    paymentHistory: Array.isArray(orderForPersistence.paymentHistory) ? orderForPersistence.paymentHistory : [],
   };
   const next = [normalizedOrder, ...(data.purchaseOrders || [])];
   if (db) {
@@ -6887,14 +6973,16 @@ export const createPurchaseOrder = async (order: PurchaseOrder): Promise<Purchas
 };
 
 export const updatePurchaseOrder = async (order: PurchaseOrder): Promise<PurchaseOrder> => {
+  const orderForPersistence = normalizePurchaseOrderForPersistence(order);
+  assertPurchaseOrderPayload(orderForPersistence);
   const data = loadData();
-  const totalAmount = Math.max(0, Number(order.totalAmount) || 0);
-  const totalPaid = Math.max(0, Math.min(totalAmount, Number(order.totalPaid) || 0));
+  const totalAmount = Math.max(0, Number(orderForPersistence.totalAmount) || 0);
+  const totalPaid = Math.max(0, Math.min(totalAmount, Number(orderForPersistence.totalPaid) || 0));
   const normalizedOrder: PurchaseOrder = {
-    ...order,
+    ...orderForPersistence,
     totalPaid,
     remainingAmount: Math.max(0, Number((totalAmount - totalPaid).toFixed(2))),
-    paymentHistory: Array.isArray(order.paymentHistory) ? order.paymentHistory : [],
+    paymentHistory: Array.isArray(orderForPersistence.paymentHistory) ? orderForPersistence.paymentHistory : [],
   };
   const existingOrders = data.purchaseOrders || [];
   const next = existingOrders.some(item => item.id === order.id)
@@ -7942,7 +8030,7 @@ const applyPurchaseLineToProduct = async (
   }
 
   const newProduct: Product = {
-    id: `purchase-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    id: String(line.productId || '').trim() || `purchase-product-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
     barcode: line.pendingProductBarcode || line.pendingProductDraft?.barcode || `PUR-${Math.floor(100000 + Math.random() * 900000)}`,
     name: line.productName.trim(),
     description: line.pendingProductDraft?.description || '',

@@ -1,7 +1,17 @@
 import { AppState, Transaction } from '../types';
 import { normalizeTransactionItems } from './transactionItems';
 
-export type FinanceActivity = { type: string; source: string; amount?: number; entity?: string; note?: string; at?: string; method?: string };
+export type FinanceActivity = {
+  type: string;
+  source: string;
+  amount?: number;
+  entity?: string;
+  note?: string;
+  at?: string;
+  method?: string;
+  writeKeys?: string[];
+  cloudReady?: boolean;
+};
 const isToday = (iso: string) => { const d = new Date(iso); const t = new Date(); return d.getFullYear()===t.getFullYear() && d.getMonth()===t.getMonth() && d.getDate()===t.getDate(); };
 
 export const logFinanceSnapshot = (_reason: string, _snapshot: Record<string, number>) => {

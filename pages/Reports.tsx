@@ -82,7 +82,7 @@ export default function Reports() {
     const contentWidth = pageWidth - (margin * 2);
     const cardWidth = (contentWidth - ((cols - 1) * colGap)) / cols;
     // Internal report needs more space for margins/buy price, Customer catalog is compact
-    const cardHeight = reportType === 'internal' ? 92 : 60; 
+    const cardHeight = 92; 
 
     let x = margin;
     let y = 30; // Start Y after header
@@ -157,84 +157,48 @@ export default function Reports() {
         // Replaced 'sku' with 'barcode'
         doc.text(product.barcode, x + 3, skuY); 
 
-        if (reportType === 'customer') {
-            // -- Customer Mode: Compact Layout (No Gap) --
-            
-            // Move Price/Badge UP relative to SKU, not pinned to bottom
-            const priceY = skuY + 8; // 8mm below SKU line
-            
-            // Price
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(12);
-            doc.setTextColor(0, 0, 0);
-            doc.text(`Rs.${product.sellPrice}`, x + 3, priceY);
-            
-            // Stock Badge (Aligned to right of the card, same Y height)
-            const inStock = product.stock > 0;
-            const badgeText = inStock ? "In Stock" : "Out of Stock";
-            const badgeWidth = doc.getTextWidth(badgeText) + 6;
-            const badgeX = x + cardWidth - badgeWidth - 3;
-            const badgeRectY = priceY - 5; // Align rectangle with text baseline
-            
-            // Draw Badge Background
-            if (inStock) {
-                doc.setFillColor(209, 250, 229); // Green background
-                doc.setTextColor(6, 95, 70);     // Green text
-            } else {
-                doc.setFillColor(254, 226, 226); // Red background
-                doc.setTextColor(185, 28, 28);   // Red text
-            }
-            
-            doc.roundedRect(badgeX, badgeRectY, badgeWidth, 7, 2, 2, 'F');
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "bold");
-            doc.text(badgeText, badgeX + 3, priceY);
+        const stockY = skuY + 5;
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8);
+        doc.setTextColor(80, 80, 80);
+        doc.text(`Stock: ${product.stock}`, x + 3, stockY);
+        const categoryY = stockY + 5;
+        doc.text(`Category: ${product.category || 'Uncategorized'}`, x + 3, categoryY);
 
-        } else {
-            // -- Internal Mode: Structured card layout --
-            const stockY = skuY + 5;
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
-            doc.setTextColor(80, 80, 80);
-            doc.text(`Stock: ${product.stock}`, x + 3, stockY);
-            const categoryY = stockY + 5;
-            doc.text(`Category: ${product.category || 'Uncategorized'}`, x + 3, categoryY);
-
-            const variants = (product.variants || []).filter(v => v && v !== NO_VARIANT);
-            const colors = (product.colors || []).filter(c => c && c !== NO_COLOR);
-            const vcLine = [variants.length ? `V: ${variants.join('/')}` : '', colors.length ? `C: ${colors.join('/')}` : ''].filter(Boolean).join('  ');
-            let buyY = categoryY + 5;
-            if (vcLine) {
-              doc.setTextColor(100, 100, 100);
-              doc.setFontSize(7);
-              doc.text(vcLine, x + 3, buyY);
-              buyY += 5;
-            }
-
-            doc.setTextColor(50, 50, 50);
-            doc.setFontSize(9);
-            doc.text(`Buy: Rs.${product.buyPrice}`, x + 3, buyY);
-            
-            // Footer Base Y (Bottom of card)
-            const footerY = y + cardHeight - 6;
-
-            // Sell Price: Bottom Left
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(9);
-            doc.setTextColor(80, 80, 80);
-            doc.text(`Sell: Rs.${product.sellPrice}`, x + 3, footerY);
-
-            // Margin: Bottom Right
-            const margin = product.sellPrice - product.buyPrice;
-            const marginX = x + cardWidth - 3;
-            doc.setFont("helvetica", "bold");
-            
-            // Color code margin
-            if (margin >= 0) doc.setTextColor(21, 128, 61); // Green
-            else doc.setTextColor(185, 28, 28); // Red
-            
-            doc.text(`M: ${margin.toFixed(0)}`, marginX, footerY, { align: "right" });
+        const variants = (product.variants || []).filter(v => v && v !== NO_VARIANT);
+        const colors = (product.colors || []).filter(c => c && c !== NO_COLOR);
+        const vcLine = [variants.length ? `V: ${variants.join('/')}` : '', colors.length ? `C: ${colors.join('/')}` : ''].filter(Boolean).join('  ');
+        let buyY = categoryY + 5;
+        if (vcLine) {
+          doc.setTextColor(100, 100, 100);
+          doc.setFontSize(7);
+          doc.text(vcLine, x + 3, buyY);
+          buyY += 5;
         }
+
+        doc.setTextColor(50, 50, 50);
+        doc.setFontSize(9);
+        doc.text(`Buy: Rs.${product.buyPrice}`, x + 3, buyY);
+        
+        // Footer Base Y (Bottom of card)
+        const footerY = y + cardHeight - 6;
+
+        // Sell Price: Bottom Left
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(9);
+        doc.setTextColor(80, 80, 80);
+        doc.text(`Sell: Rs.${product.sellPrice}`, x + 3, footerY);
+
+        // Margin: Bottom Right
+        const profitMargin = product.sellPrice - product.buyPrice;
+        const marginX = x + cardWidth - 3;
+        doc.setFont("helvetica", "bold");
+        
+        // Color code margin
+        if (profitMargin >= 0) doc.setTextColor(21, 128, 61); // Green
+        else doc.setTextColor(185, 28, 28); // Red
+        
+        doc.text(`M: ${profitMargin.toFixed(0)}`, marginX, footerY, { align: "right" });
 
         // --- Grid Logic ---
         x += cardWidth + colGap;
@@ -351,7 +315,7 @@ export default function Reports() {
           const filtered = products
             .filter(p => opts.selectedCategories.includes((p.category || 'Uncategorized').trim() || 'Uncategorized'))
             .filter(p => opts.includeOutOfStock || Number(p.stock || 0) > 0);
-          const profile = loadData().profile || {};
+          const profile = loadData().profile;
           setProgress({ show: true, label: 'Building pages…', percent: 60 });
           await generateProductCatalogPDF(filtered, { fileName: 'stockflow-customer-report.pdf', groupByCategory: opts.groupByCategory, showInStockPrices: opts.showInStockPrices, showOutOfStockPrices: opts.showOutOfStockPrices, firstPageImage: profile.customerCatalogFirstPage });
           setProgress({ show: false, label: '', percent: 0 });
