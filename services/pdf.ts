@@ -48,49 +48,42 @@ const getThermalPaperWidth = (profile?: Partial<StoreProfile> | null): ThermalPa
   (profile?.thermalPaperWidth === '58mm' ? '58mm' : '80mm')
 );
 
-const printHtmlViaHiddenFrame = (html: string): Promise<void> => new Promise((resolve, reject) => {
-  const printFrame = document.createElement('iframe');
-  printFrame.name = 'stockflow_thermal_print_frame';
-  printFrame.style.position = 'fixed';
-  printFrame.style.width = '0';
-  printFrame.style.height = '0';
-  printFrame.style.border = '0';
-  printFrame.style.opacity = '0';
-  printFrame.style.pointerEvents = 'none';
-  printFrame.style.right = '0';
-  printFrame.style.bottom = '0';
-  document.body.appendChild(printFrame);
-
-  const cleanup = () => {
-    if (printFrame.parentNode) {
-      printFrame.parentNode.removeChild(printFrame);
-    }
-  };
-
-  const frameDoc = printFrame.contentWindow?.document || printFrame.contentDocument;
-  if (!frameDoc || !printFrame.contentWindow) {
-    cleanup();
-    reject(new Error('Browser print fallback could not initialize.'));
+const printHtmlViaBrowserWindow = (html: string): Promise<void> => new Promise((resolve, reject) => {
+  const printWindow = window.open('', '_blank', 'popup=yes,width=520,height=900');
+  if (!printWindow) {
+    reject(new Error('PRINT_POPUP_BLOCKED'));
     return;
   }
 
-  frameDoc.open();
-  frameDoc.write(html);
-  frameDoc.close();
+  let settled = false;
+  const finish = (fn: () => void) => {
+    if (settled) return;
+    settled = true;
+    fn();
+  };
 
-  window.setTimeout(() => {
+  const triggerPrint = () => {
     try {
-      printFrame.contentWindow?.focus();
-      printFrame.contentWindow?.print();
-      window.setTimeout(() => {
-        cleanup();
-        resolve();
-      }, 900);
+      printWindow.focus();
+      console.log('[PAY_PRINT_OPEN_BROWSER_PRINT]');
+      printWindow.print();
+      resolve();
     } catch (error) {
-      cleanup();
-      reject(error instanceof Error ? error : new Error('Browser print fallback failed.'));
+      finish(() => reject(error instanceof Error ? error : new Error('Browser print failed.')));
     }
-  }, 180);
+  };
+
+  try {
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.onload = () => {
+      window.setTimeout(() => finish(triggerPrint), 120);
+    };
+    window.setTimeout(() => finish(triggerPrint), 500);
+  } catch (error) {
+    finish(() => reject(error instanceof Error ? error : new Error('Browser print failed.')));
+  }
 });
 
 const isMeaningfulOptionValue = (value?: string, kind: 'variant' | 'color' = 'variant') => {
@@ -737,7 +730,7 @@ const buildThermalInvoiceHtml = (
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${escapeHtml(invoiceTitle)} ${escapeHtml(invoiceNo)}</title>
+  <title>${escapeHtml(`StockFlow Receipt ${invoiceNo}`)}</title>
   <style>
     :root {
       --paper-width: ${paperWidth};
@@ -1489,7 +1482,7 @@ export const printThermalInvoice = async (
   paymentDetails?: ReceiptPaymentDetails,
 ): Promise<ReceiptPrintResult> => {
   const html = buildThermalInvoiceHtml(transaction, customers, paymentDetails);
-  await printHtmlViaHiddenFrame(html);
+  await printHtmlViaBrowserWindow(html);
   return { mode: 'browser', usedFallback: false };
 };
 
@@ -1498,10 +1491,5 @@ export const printReceipt = async (
   customers: Customer[],
   paymentDetails?: ReceiptPaymentDetails,
 ): Promise<ReceiptPrintResult> => {
-  const { profile } = loadData();
-  if (profile.invoiceFormat === 'thermal') {
-    return printThermalInvoice(transaction, customers, paymentDetails);
-  }
-  generateReceiptPDF(transaction, customers, paymentDetails);
-  return { mode: 'download', usedFallback: false };
+  return printThermalInvoice(transaction, customers, paymentDetails);
 };

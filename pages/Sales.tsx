@@ -549,7 +549,10 @@ export default function Sales() {
     try {
       return await printReceipt(transaction, loadData().customers || customers, cashDetails || undefined);
     } catch (error) {
-      setReceiptPrintToast({ tone: 'error', message: failureMessage });
+      const message = error instanceof Error && error.message === 'PRINT_POPUP_BLOCKED'
+        ? 'Allow popups to print receipt.'
+        : failureMessage;
+      setReceiptPrintToast({ tone: 'error', message });
       throw error;
     }
   };
@@ -1171,7 +1174,7 @@ export default function Sales() {
   const handleExport = (format: 'pdf' | 'excel') => {
     if (!transactionComplete) return;
     if (format === 'pdf') {
-      void handlePrintReceipt();
+      generateReceiptPDF(transactionComplete, customers, transactionCashDetails || undefined);
     } else {
       exportInvoiceToExcel(transactionComplete);
     }
