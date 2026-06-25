@@ -17,7 +17,11 @@ import { downloadInventoryData, downloadInventoryTemplate, importInventoryFromFi
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { getProductAuditSample, getProductBarcode, getProductCategory, getProductName, safeLower, safeText } from '../utils/productText';
 import {
+  buildLegacyPurchaseHistoryConversionDryRun,
   LegacyProductPurchaseHistoryFallbackRow,
+  LegacyPurchaseHistoryConversionDryRun,
+  LegacyPurchaseHistoryConversionMatchConfidence,
+  LegacyPurchaseHistoryConversionReviewRow,
   PurchaseOrderDerivedHistoryRow,
   compareProductPurchaseHistoryForProduct,
   getBrokenPurchaseLinkRowsForProduct,
@@ -165,11 +169,15 @@ export default function Admin() {
   const [isPhotoUploading, setIsPhotoUploading] = useState(false);
   const photoFileInputRef = useRef<HTMLInputElement>(null);
 
-  const [inventoryViewTab, setInventoryViewTab] = useState<'inventory' | 'lost-damage' | 'purchase-history-reconciliation' | 'customer-balance-audit'>('inventory');
+  const [inventoryViewTab, setInventoryViewTab] = useState<'inventory' | 'lost-damage' | 'purchase-history-reconciliation' | 'purchase-history-conversion-dry-run' | 'customer-balance-audit'>('inventory');
   const [expandedBalanceAuditViolationIds, setExpandedBalanceAuditViolationIds] = useState<string[]>([]);
   const [expandedBalanceAuditOrderIds, setExpandedBalanceAuditOrderIds] = useState<string[]>([]);
   const [expandedBalanceAuditSourceKeys, setExpandedBalanceAuditSourceKeys] = useState<string[]>([]);
   const [expandedBalanceAuditSimulationIds, setExpandedBalanceAuditSimulationIds] = useState<string[]>([]);
+  const [purchaseHistoryReviewSearch, setPurchaseHistoryReviewSearch] = useState('');
+  const [purchaseHistoryReviewFilter, setPurchaseHistoryReviewFilter] = useState<'all' | 'matched' | 'legacy-only' | 'purchaseOrder-only' | 'duplicate-candidate' | 'needs-supplier-review' | 'needs-value-review'>('all');
+  const [purchaseHistoryReviewSort, setPurchaseHistoryReviewSort] = useState<'date' | 'product' | 'supplier' | 'amount' | 'match-confidence'>('date');
+  const [expandedPurchaseHistoryReviewIds, setExpandedPurchaseHistoryReviewIds] = useState<string[]>([]);
   const [openActionMenuProductId, setOpenActionMenuProductId] = useState<string | null>(null);
   const [editingLocationProductId, setEditingLocationProductId] = useState<string | null>(null);
   const [locationDraft, setLocationDraft] = useState({ locationZone: '', locationRow: '', locationRack: '', locationShelf: '' });
@@ -608,6 +616,54 @@ export default function Admin() {
     const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = `customer-balance-audit-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+  const handleExportLegacyPurchaseHistoryDryRunJson = () => {
+    const blob = new Blob([JSON.stringify(legacyPurchaseHistoryConversionDryRun, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `legacy-purchase-history-conversion-dry-run-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+  const handleExportLegacyPurchaseHistoryReviewCsv = () => {
+    const rows = purchaseHistoryReviewFilteredRows.map((row) => ({
+      Source: row.source,
+      ProductName: row.productName,
+      ProductId: row.productId || '',
+      ProductCode: row.productCode || '',
+      SupplierName: row.partyName || '',
+      SupplierId: row.partyId || '',
+      Date: row.date,
+      Quantity: row.quantity,
+      UnitCost: row.unitCost,
+      LineTotal: row.lineTotal,
+      PaymentStatus: row.paymentStatus,
+      PaidAmount: row.paidAmount ?? '',
+      RemainingAmount: row.remainingAmount ?? '',
+      PaymentMethod: row.paymentMethod || '',
+      PurchaseOrderId: row.purchaseOrderId || '',
+      LegacyHistoryId: row.legacyHistoryId || '',
+      Reference: row.reference || '',
+      Notes: row.notes || '',
+      MatchStatus: row.matchStatus,
+      MatchConfidence: row.matchConfidence,
+      DuplicateKey: row.duplicateKey,
+      SuggestedAction: row.suggestedAction,
+      ReviewReason: row.reviewReason || '',
+    }));
+    const headers = Object.keys(rows[0] || {
+      Source: '', ProductName: '', ProductId: '', ProductCode: '', SupplierName: '', SupplierId: '', Date: '', Quantity: '', UnitCost: '', LineTotal: '', PaymentStatus: '', PaidAmount: '', RemainingAmount: '', PaymentMethod: '', PurchaseOrderId: '', LegacyHistoryId: '', Reference: '', Notes: '', MatchStatus: '', MatchConfidence: '', DuplicateKey: '', SuggestedAction: '', ReviewReason: '',
+    });
+    const escapeCsv = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const csv = [headers.join(','), ...rows.map((row) => headers.map((header) => escapeCsv((row as Record<string, unknown>)[header])).join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `legacy-purchase-history-review-${new Date().toISOString().slice(0, 10)}.csv`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -1958,6 +2014,63 @@ export default function Admin() {
       })
       .slice(0, 30);
   }, [inventoryPurchaseHistoryAuditRows]);
+  const legacyPurchaseHistoryConversionDryRun = useMemo<LegacyPurchaseHistoryConversionDryRun>(() => {
+    return buildLegacyPurchaseHistoryConversionDryRun({
+      products: filteredProducts,
+      orders: purchaseOrders,
+      parties: getPurchaseParties(),
+    });
+  }, [filteredProducts, purchaseOrders]);
+  const purchaseHistoryReviewFilteredRows = useMemo(() => {
+    const confidenceOrder: Record<LegacyPurchaseHistoryConversionMatchConfidence, number> = {
+      exact: 5,
+      strong: 4,
+      possible: 3,
+      weak: 2,
+      none: 1,
+    };
+    const query = purchaseHistoryReviewSearch.trim().toLowerCase();
+    const matchesFilter = (row: LegacyPurchaseHistoryConversionReviewRow) => {
+      if (purchaseHistoryReviewFilter === 'all') return true;
+      if (purchaseHistoryReviewFilter === 'matched') return row.matchStatus === 'matched';
+      if (purchaseHistoryReviewFilter === 'legacy-only') return row.matchStatus === 'legacy-only';
+      if (purchaseHistoryReviewFilter === 'purchaseOrder-only') return row.matchStatus === 'purchaseOrder-only';
+      if (purchaseHistoryReviewFilter === 'duplicate-candidate') return row.matchStatus === 'duplicate-candidate';
+      if (purchaseHistoryReviewFilter === 'needs-supplier-review') return row.suggestedAction === 'review supplier';
+      if (purchaseHistoryReviewFilter === 'needs-value-review') return row.suggestedAction === 'review value';
+      return true;
+    };
+    return legacyPurchaseHistoryConversionDryRun.allReviewRows
+      .filter((row) => {
+        if (!matchesFilter(row)) return false;
+        if (!query) return true;
+        return [
+          row.source,
+          row.productName,
+          row.productId,
+          row.productCode,
+          row.partyName,
+          row.partyId,
+          row.purchaseOrderId,
+          row.legacyHistoryId,
+          row.reference,
+          row.notes,
+          row.matchStatus,
+          row.matchConfidence,
+          row.suggestedAction,
+          row.reviewReason,
+          row.duplicateKey,
+        ].join(' ').toLowerCase().includes(query);
+      })
+      .slice()
+      .sort((a, b) => {
+        if (purchaseHistoryReviewSort === 'product') return a.productName.localeCompare(b.productName);
+        if (purchaseHistoryReviewSort === 'supplier') return String(a.partyName || '').localeCompare(String(b.partyName || ''));
+        if (purchaseHistoryReviewSort === 'amount') return b.lineTotal - a.lineTotal;
+        if (purchaseHistoryReviewSort === 'match-confidence') return confidenceOrder[b.matchConfidence] - confidenceOrder[a.matchConfidence];
+        return new Date(b.date || '').getTime() - new Date(a.date || '').getTime();
+      });
+  }, [legacyPurchaseHistoryConversionDryRun, purchaseHistoryReviewFilter, purchaseHistoryReviewSearch, purchaseHistoryReviewSort]);
   const inventoryTotalPages = Math.max(1, Math.ceil(filteredProducts.length / INVENTORY_PAGE_SIZE));
   const paginatedProducts = useMemo(
     () => filteredProducts.slice((inventoryPage - 1) * INVENTORY_PAGE_SIZE, inventoryPage * INVENTORY_PAGE_SIZE),
@@ -2448,6 +2561,7 @@ export default function Admin() {
         <Button size="sm" variant={inventoryViewTab === 'inventory' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('inventory')}>Inventory</Button>
         <Button size="sm" variant={inventoryViewTab === 'lost-damage' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('lost-damage')}>Lost & Damage</Button>
         <Button size="sm" variant={inventoryViewTab === 'purchase-history-reconciliation' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('purchase-history-reconciliation')}>Purchase History Reconciliation Dashboard</Button>
+        <Button size="sm" variant={inventoryViewTab === 'purchase-history-conversion-dry-run' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('purchase-history-conversion-dry-run')}>Convert Legacy Purchase History to purchaseOrders</Button>
         <Button size="sm" variant={inventoryViewTab === 'customer-balance-audit' ? 'default' : 'outline'} onClick={() => setInventoryViewTab('customer-balance-audit')}>Customer Balance Audit</Button>
       </div>
       {inventoryViewTab === 'inventory' ? (
@@ -2935,6 +3049,231 @@ export default function Admin() {
                     })}
                     {customerBalanceAudit.simulationRows.length === 0 && (
                       <tr><td colSpan={9} className="p-4 text-center text-muted-foreground">No customers currently require simulation review from the loaded state.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+	      ) : inventoryViewTab === 'purchase-history-conversion-dry-run' ? (
+        <div className="space-y-4">
+          <Card className="border-slate-200 bg-slate-50/70">
+            <CardHeader className="pb-3">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <CardTitle className="text-lg">Convert Legacy Purchase History to purchaseOrders</CardTitle>
+                  <p className="text-sm text-muted-foreground">Admin-only migration dry-run. No writes, no conversion, no repair. Uses the currently filtered Inventory product set and loaded purchaseOrders state.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">{legacyPurchaseHistoryConversionDryRun.summary.totalLegacyRowsScanned} legacy rows scanned</Badge>
+                  <Button size="sm" variant="outline" onClick={handleExportLegacyPurchaseHistoryDryRunJson}>
+                    <Download className="mr-2 h-4 w-4" /> Export JSON
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+          </Card>
+
+          <Card className="border-slate-200 bg-white">
+            <CardContent className="grid gap-3 pt-6 md:grid-cols-3 xl:grid-cols-8">
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Legacy Rows</div><div className="mt-1 text-2xl font-black">{legacyPurchaseHistoryConversionDryRun.summary.totalLegacyRowsScanned}</div></div>
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Already Matched</div><div className="mt-1 text-2xl font-black text-emerald-700">{legacyPurchaseHistoryConversionDryRun.summary.alreadyMatchedRows}</div></div>
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Proposed purchaseOrders</div><div className="mt-1 text-2xl font-black text-blue-700">{legacyPurchaseHistoryConversionDryRun.summary.proposedNewPurchaseOrders}</div></div>
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Skipped Rows</div><div className="mt-1 text-2xl font-black text-amber-700">{legacyPurchaseHistoryConversionDryRun.summary.skippedRows}</div></div>
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Needs Supplier Review</div><div className="mt-1 text-2xl font-black text-amber-700">{legacyPurchaseHistoryConversionDryRun.summary.needsSupplierReviewRows}</div></div>
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Needs Value Review</div><div className="mt-1 text-2xl font-black text-rose-700">{legacyPurchaseHistoryConversionDryRun.summary.needsValueReviewRows}</div></div>
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Duplicate Candidates</div><div className="mt-1 text-2xl font-black text-amber-700">{legacyPurchaseHistoryConversionDryRun.summary.duplicateCandidateRows}</div></div>
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Proposed Amount</div><div className="mt-1 text-2xl font-black">₹{legacyPurchaseHistoryConversionDryRun.summary.totalProposedPurchaseAmount.toFixed(2)}</div></div>
+            </CardContent>
+          </Card>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <Card className="border-slate-200"><CardContent className="pt-6"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Affected Suppliers</div><div className="mt-1 text-xl font-black">{legacyPurchaseHistoryConversionDryRun.summary.affectedSuppliers}</div></CardContent></Card>
+            <Card className="border-slate-200"><CardContent className="pt-6"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Affected Products</div><div className="mt-1 text-xl font-black">{legacyPurchaseHistoryConversionDryRun.summary.affectedProducts}</div></CardContent></Card>
+            <Card className="border-slate-200"><CardContent className="pt-6"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">purchaseOrder-only Rows</div><div className="mt-1 text-xl font-black">{legacyPurchaseHistoryConversionDryRun.summary.purchaseOrderOnlyRows}</div></CardContent></Card>
+          </div>
+
+          {[
+            { title: 'Safe to Convert', rows: legacyPurchaseHistoryConversionDryRun.safeToConvertRows, empty: 'No safe legacy rows are ready for purchaseOrder conversion in the current filter set.' },
+            { title: 'Needs Supplier Review', rows: legacyPurchaseHistoryConversionDryRun.needsSupplierReviewRows, empty: 'No legacy rows require supplier review in the current filter set.' },
+            { title: 'Needs Value Review', rows: legacyPurchaseHistoryConversionDryRun.needsValueReviewRows, empty: 'No legacy rows require value review in the current filter set.' },
+            { title: 'Duplicate Candidates', rows: legacyPurchaseHistoryConversionDryRun.duplicateCandidateRows, empty: 'No duplicate legacy candidates found in the current filter set.' },
+            { title: 'Already Matched', rows: legacyPurchaseHistoryConversionDryRun.alreadyMatchedRows, empty: 'No already-matched legacy rows found in the current filter set.' },
+          ].map((section) => (
+            <Card key={section.title} className="border-slate-200">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between gap-3">
+                  <CardTitle className="text-base">{section.title}</CardTitle>
+                  <Badge variant="outline">{section.rows.length} rows</Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="pt-0">
+                {!section.rows.length ? (
+                  <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">{section.empty}</div>
+                ) : (
+                  <div className="overflow-x-auto rounded-lg border">
+                    <table className="w-full min-w-[980px] text-xs">
+                      <thead className="bg-slate-50 text-slate-600">
+                        <tr>
+                          <th className="p-2 text-left">Product</th>
+                          <th className="p-2 text-left">Supplier</th>
+                          <th className="p-2 text-left">Date</th>
+                          <th className="p-2 text-right">Qty</th>
+                          <th className="p-2 text-right">Unit Cost</th>
+                          <th className="p-2 text-right">Line Total</th>
+                          <th className="p-2 text-left">Reference</th>
+                          <th className="p-2 text-left">Suggested Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {section.rows.map((row) => (
+                          <tr key={row.id} className="border-t align-top">
+                            <td className="p-2"><div className="font-semibold">{row.productName}</div><div className="text-[11px] text-muted-foreground">{row.productCode || row.productId || 'No code'}</div></td>
+                            <td className="p-2"><div>{row.partyName || 'Unknown supplier'}</div><div className="text-[11px] text-muted-foreground">{row.suggestedPartyName && row.suggestedPartyName !== row.partyName ? `Suggested: ${row.suggestedPartyName}` : row.partyId || row.suggestedPartyId || ''}</div></td>
+                            <td className="p-2">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</td>
+                            <td className="p-2 text-right">{row.quantity}</td>
+                            <td className="p-2 text-right">₹{row.unitCost.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">₹{row.lineTotal.toFixed(2)}</td>
+                            <td className="p-2">{row.reference || row.purchaseOrderId || row.legacyHistoryId || '—'}</td>
+                            <td className="p-2"><div className="font-medium">{row.suggestedAction}</div><div className="text-[11px] text-muted-foreground">{row.reviewReason}</div></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+
+          <Card className="border-slate-200">
+            <CardHeader className="pb-3">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <CardTitle className="text-base">All Purchase History Rows Review</CardTitle>
+                  <p className="text-xs text-muted-foreground">Unified side-by-side review of purchaseOrders rows and legacy snapshot rows for manual migration inspection.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={handleExportLegacyPurchaseHistoryReviewCsv}>
+                    <Download className="mr-2 h-4 w-4" /> Export CSV
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={handleExportLegacyPurchaseHistoryDryRunJson}>
+                    <Download className="mr-2 h-4 w-4" /> Export JSON
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4 pt-0">
+              <div className="grid gap-2 md:grid-cols-4">
+                <Input value={purchaseHistoryReviewSearch} onChange={(e) => setPurchaseHistoryReviewSearch(e.target.value)} placeholder="Search product, supplier, PO id, legacy id, reference..." />
+                <Select value={purchaseHistoryReviewFilter} onChange={(e) => setPurchaseHistoryReviewFilter(e.target.value as typeof purchaseHistoryReviewFilter)}>
+                  <option value="all">All</option>
+                  <option value="matched">Matched</option>
+                  <option value="legacy-only">Legacy-only</option>
+                  <option value="purchaseOrder-only">purchaseOrder-only</option>
+                  <option value="duplicate-candidate">Duplicate candidates</option>
+                  <option value="needs-supplier-review">Needs supplier review</option>
+                  <option value="needs-value-review">Needs value review</option>
+                </Select>
+                <Select value={purchaseHistoryReviewSort} onChange={(e) => setPurchaseHistoryReviewSort(e.target.value as typeof purchaseHistoryReviewSort)}>
+                  <option value="date">Sort by date</option>
+                  <option value="product">Sort by product</option>
+                  <option value="supplier">Sort by supplier</option>
+                  <option value="amount">Sort by amount</option>
+                  <option value="match-confidence">Sort by match confidence</option>
+                </Select>
+                <div className="rounded-lg border bg-slate-50 px-3 py-2 text-sm text-slate-600">{purchaseHistoryReviewFilteredRows.length} review rows</div>
+              </div>
+
+              <div className="overflow-x-auto rounded-lg border">
+                <table className="w-full min-w-[1700px] text-xs">
+                  <thead className="bg-slate-50 text-slate-600">
+                    <tr>
+                      <th className="p-2 text-left">Source</th>
+                      <th className="p-2 text-left">Product</th>
+                      <th className="p-2 text-left">Product ID</th>
+                      <th className="p-2 text-left">Product Code</th>
+                      <th className="p-2 text-left">Supplier</th>
+                      <th className="p-2 text-left">Supplier ID</th>
+                      <th className="p-2 text-left">Date/Time</th>
+                      <th className="p-2 text-right">Qty</th>
+                      <th className="p-2 text-right">Unit Cost</th>
+                      <th className="p-2 text-right">Line Total</th>
+                      <th className="p-2 text-left">Payment</th>
+                      <th className="p-2 text-right">Paid</th>
+                      <th className="p-2 text-right">Remaining</th>
+                      <th className="p-2 text-left">Method</th>
+                      <th className="p-2 text-left">PO ID</th>
+                      <th className="p-2 text-left">Legacy ID</th>
+                      <th className="p-2 text-left">Match</th>
+                      <th className="p-2 text-left">Confidence</th>
+                      <th className="p-2 text-left">Suggested Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purchaseHistoryReviewFilteredRows.map((row) => {
+                      const expanded = expandedPurchaseHistoryReviewIds.includes(row.id);
+                      return (
+                        <React.Fragment key={row.id}>
+                          <tr className="cursor-pointer border-t align-top hover:bg-slate-50/70" onClick={() => toggleExpandedValue(row.id, setExpandedPurchaseHistoryReviewIds)}>
+                            <td className="p-2"><Badge variant="outline">{row.source}</Badge></td>
+                            <td className="p-2"><div className="font-semibold">{row.productName}</div><div className="text-[11px] text-muted-foreground">{row.reference || row.notes || '—'}</div></td>
+                            <td className="p-2">{row.productId || '—'}</td>
+                            <td className="p-2">{row.productCode || '—'}</td>
+                            <td className="p-2">{row.partyName || '—'}</td>
+                            <td className="p-2">{row.partyId || row.suggestedPartyId || '—'}</td>
+                            <td className="p-2">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</td>
+                            <td className="p-2 text-right">{row.quantity}</td>
+                            <td className="p-2 text-right">₹{row.unitCost.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">₹{row.lineTotal.toFixed(2)}</td>
+                            <td className="p-2">{row.paymentStatus}</td>
+                            <td className="p-2 text-right">{row.paidAmount == null ? '—' : `₹${row.paidAmount.toFixed(2)}`}</td>
+                            <td className="p-2 text-right">{row.remainingAmount == null ? '—' : `₹${row.remainingAmount.toFixed(2)}`}</td>
+                            <td className="p-2">{row.paymentMethod || '—'}</td>
+                            <td className="p-2">{row.purchaseOrderId || '—'}</td>
+                            <td className="p-2">{row.legacyHistoryId || '—'}</td>
+                            <td className="p-2"><Badge variant="outline">{row.matchStatus}</Badge></td>
+                            <td className="p-2">{row.matchConfidence}</td>
+                            <td className="p-2">{row.suggestedAction}</td>
+                          </tr>
+                          {expanded && (
+                            <tr className="border-t bg-slate-50/50">
+                              <td colSpan={19} className="p-3 text-xs">
+                                <div className="grid gap-3 md:grid-cols-3">
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Match Detail</div>
+                                    <div className="mt-1 text-muted-foreground">{row.reviewReason || 'No review reason.'}</div>
+                                    <div className="mt-2 text-muted-foreground">Duplicate key: {row.duplicateKey}</div>
+                                  </div>
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Reference Detail</div>
+                                    <div className="mt-1 text-muted-foreground">Reference: {row.reference || '—'}</div>
+                                    <div className="mt-1 text-muted-foreground">Notes: {row.notes || '—'}</div>
+                                    <div className="mt-1 text-muted-foreground">Matched row: {row.matchedRowId || '—'}</div>
+                                  </div>
+                                  <div className="rounded-lg border bg-white p-3">
+                                    <div className="font-semibold">Conversion Preview</div>
+                                    {row.proposedPurchaseOrder ? (
+                                      <div className="mt-1 space-y-1 text-muted-foreground">
+                                        <div>Proposed PO ID: {row.proposedPurchaseOrder.id}</div>
+                                        <div>Supplier: {row.proposedPurchaseOrder.partyName || '—'}</div>
+                                        <div>Total: ₹{Number(row.proposedPurchaseOrder.totalAmount || 0).toFixed(2)}</div>
+                                        <div>Created By: {row.proposedPurchaseOrder.createdBy || '—'}</div>
+                                      </div>
+                                    ) : (
+                                      <div className="mt-1 text-muted-foreground">No conversion preview for this row.</div>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                    {!purchaseHistoryReviewFilteredRows.length && (
+                      <tr><td colSpan={19} className="p-4 text-center text-muted-foreground">No rows match the current purchase-history review filters.</td></tr>
                     )}
                   </tbody>
                 </table>
