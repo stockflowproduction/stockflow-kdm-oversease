@@ -50,6 +50,7 @@ export default function Admin() {
   const navigate = useNavigate();
   const INVENTORY_PAGE_SIZE = 25;
   const [products, setProducts] = useState<Product[]>([]);
+  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>([]);
@@ -100,6 +101,7 @@ export default function Admin() {
   const [purchaseHistoryVariantFilter, setPurchaseHistoryVariantFilter] = useState('all');
   const [selectedPurchaseVariantKey, setSelectedPurchaseVariantKey] = useState('');
   const [viewingProduct, setViewingProduct] = useState<Product | null>(null);
+  const [viewingProductAuditMode, setViewingProductAuditMode] = useState(false);
   const barcodeCanvasRef = useRef<HTMLCanvasElement>(null);
 
   // Form State
@@ -185,7 +187,10 @@ export default function Admin() {
   useEscapeLayer(Boolean(purchaseTarget), () => setPurchaseTarget(null), { priority: 110 });
   useEscapeLayer(showAddSupplierPartyModal, () => setShowAddSupplierPartyModal(false), { priority: 110 });
   useEscapeLayer(showSupplierPartyModal, () => setShowSupplierPartyModal(false), { priority: 105 });
-  useEscapeLayer(Boolean(viewingProduct), () => setViewingProduct(null), { priority: 105 });
+  useEscapeLayer(Boolean(viewingProduct), () => {
+    setViewingProduct(null);
+    setViewingProductAuditMode(false);
+  }, { priority: 105 });
   useEscapeLayer(isModalOpen, () => {
     setEditingProduct(null);
     setError(null);
@@ -304,6 +309,7 @@ export default function Admin() {
   const refreshData = () => {
     const data = loadData();
     setProducts(data.products);
+    setPurchaseOrders(Array.isArray(data.purchaseOrders) ? data.purchaseOrders : []);
     setCustomers(Array.isArray(data.customers) ? data.customers : []);
     setTransactions(Array.isArray(data.transactions) ? data.transactions : []);
     setUpfrontOrders(Array.isArray(data.upfrontOrders) ? data.upfrontOrders : []);
@@ -1099,8 +1105,8 @@ export default function Admin() {
   );
 
   const canonicalPurchaseHistoryRows = useMemo(
-    () => getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(purchaseTarget, loadData().purchaseOrders || []),
-    [purchaseTarget]
+    () => getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(purchaseTarget, purchaseOrders),
+    [purchaseTarget, purchaseOrders]
   );
   const purchaseHistoryRows = useMemo(() => {
     if (!purchaseTarget) return [];
@@ -1125,20 +1131,20 @@ export default function Admin() {
 
   const viewingPurchaseHistoryRows = useMemo(() => {
     if (!viewingProduct) return [];
-    return getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(viewingProduct, loadData().purchaseOrders || [])
+    return getResolvedPurchaseHistoryRowsFromPurchaseOrdersForProduct(viewingProduct, purchaseOrders)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [viewingProduct]);
+  }, [viewingProduct, purchaseOrders]);
 
   const viewingBrokenPurchaseHistoryRows = useMemo(() => {
     if (!viewingProduct) return [];
-    return getBrokenPurchaseLinkRowsForProduct(viewingProduct, loadData().purchaseOrders || [])
+    return getBrokenPurchaseLinkRowsForProduct(viewingProduct, purchaseOrders)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [viewingProduct]);
+  }, [viewingProduct, purchaseOrders]);
 
   const viewingLegacyOnlyPurchaseHistoryRows = useMemo(() => {
     if (!viewingProduct) return [];
-    return getLegacyOnlyPurchaseHistoryRowsForProduct(viewingProduct, loadData().purchaseOrders || []);
-  }, [viewingProduct]);
+    return getLegacyOnlyPurchaseHistoryRowsForProduct(viewingProduct, purchaseOrders);
+  }, [viewingProduct, purchaseOrders]);
 
   useEffect(() => {
     if (!purchaseTarget || !productHasCombinationStock(purchaseTarget)) {
@@ -1896,8 +1902,8 @@ export default function Admin() {
     return result;
   }, [products, searchTerm, sortOption, categoryFilter]);
   const purchaseOrderRowsForAudit = useMemo(
-    () => loadData().purchaseOrders || [],
-    [products]
+    () => purchaseOrders,
+    [purchaseOrders]
   );
   const inventoryPurchaseHistoryAuditRows = useMemo(() => {
     return filteredProducts.map((product) => {
@@ -2541,7 +2547,7 @@ export default function Admin() {
                       <Button size="sm" variant="outline" onClick={() => setOpenActionMenuProductId(prev => prev === product.id ? null : product.id)}><MoreVertical className="w-4 h-4" /></Button>
                       {openActionMenuProductId === product.id && (
                         <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border bg-white shadow-lg p-1">
-                          <button type="button" className="w-full text-left px-2 py-1.5 text-sm hover:bg-muted rounded" onClick={() => { setViewingProduct(product); setOpenActionMenuProductId(null); }}>
+                          <button type="button" className="w-full text-left px-2 py-1.5 text-sm hover:bg-muted rounded" onClick={() => { setViewingProduct(product); setViewingProductAuditMode(false); setOpenActionMenuProductId(null); }}>
                             View Details
                           </button>
                           <button type="button" className="w-full text-left px-2 py-1.5 text-sm hover:bg-muted rounded" onClick={() => openLostDamageModal(product)}>
@@ -2943,7 +2949,7 @@ export default function Admin() {
               <div>
                 <CardTitle className="text-lg">Purchase History Reconciliation Dashboard</CardTitle>
                 <p className="text-sm text-muted-foreground">
-                  Read-only comparison of canonical purchase-order-derived rows vs embedded product.purchaseHistory rows for the current Inventory filter set.
+                  Read-only comparison for the current Inventory filter set. `purchaseOrders` is the canonical source, and embedded `product.purchaseHistory` is legacy snapshot data.
                 </p>
               </div>
               <Badge variant={inventoryPurchaseHistoryAuditSummary.totalIssues > 0 ? 'outline' : 'success'}>
@@ -2964,7 +2970,7 @@ export default function Admin() {
                 <div className="mt-1 text-2xl font-bold text-amber-700">{inventoryPurchaseHistoryAuditSummary.productsWithIssues}</div>
               </div>
               <div className="rounded-lg border bg-white p-3">
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Canonical Rows</div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">purchaseOrders Rows</div>
                 <div className="mt-1 text-2xl font-bold text-slate-900">{inventoryPurchaseHistoryAuditSummary.canonicalRows}</div>
               </div>
               <div className="rounded-lg border bg-white p-3">
@@ -2988,8 +2994,8 @@ export default function Admin() {
                 <thead className="bg-muted/40">
                   <tr>
                     <th className="p-3 text-left">Product</th>
-                    <th className="p-3 text-right">Canonical</th>
-                    <th className="p-3 text-right">Embedded</th>
+                    <th className="p-3 text-right">purchaseOrders</th>
+                    <th className="p-3 text-right">Legacy Snapshot</th>
                     <th className="p-3 text-right">Issues</th>
                     <th className="p-3 text-left">Primary Gap</th>
                     <th className="p-3 text-left">Implication</th>
@@ -3022,7 +3028,7 @@ export default function Admin() {
                         </td>
                         <td className="p-3 text-xs text-muted-foreground">{implication}</td>
                         <td className="p-3 text-right">
-                        <Button size="sm" variant="outline" onClick={() => setViewingProduct(product)}>
+                        <Button size="sm" variant="outline" onClick={() => { setViewingProduct(product); setViewingProductAuditMode(true); }}>
                           Open History
                         </Button>
                         </td>
@@ -3791,7 +3797,7 @@ export default function Admin() {
       {viewingProduct && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
           <Card className="w-full max-w-3xl max-h-[90vh] overflow-y-auto">
-            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Product Details - {viewingProduct.name}</CardTitle><Button variant="ghost" size="sm" onClick={() => setViewingProduct(null)}><X className="w-4 h-4"/></Button></CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between"><CardTitle>Product Details - {viewingProduct.name}</CardTitle><Button variant="ghost" size="sm" onClick={() => { setViewingProduct(null); setViewingProductAuditMode(false); }}><X className="w-4 h-4"/></Button></CardHeader>
             <CardContent className="space-y-3">
               <div className="text-sm">Created: {viewingProduct.createdAt ? new Date(viewingProduct.createdAt).toLocaleString() : 'N/A'}</div>
               {viewingVariantDetails.hasVariantRows ? (
@@ -3844,7 +3850,7 @@ export default function Admin() {
                   {renderPurchaseHistoryCards(viewingProduct.name, viewingPurchaseHistoryRows)}
                 </div>
               )}
-              {!!viewingBrokenPurchaseHistoryRows.length && (
+              {viewingProductAuditMode && !!viewingBrokenPurchaseHistoryRows.length && (
                 <div className="space-y-2">
                   <h4 className="font-semibold text-amber-800">Broken Purchase Links</h4>
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
@@ -3855,7 +3861,7 @@ export default function Admin() {
                   </div>
                 </div>
               )}
-              {!!viewingLegacyOnlyPurchaseHistoryRows.length && (
+              {viewingProductAuditMode && !!viewingLegacyOnlyPurchaseHistoryRows.length && (
                 <div className="space-y-2">
                   <h4 className="font-semibold text-amber-800">Legacy Snapshot Audit</h4>
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
