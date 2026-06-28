@@ -237,6 +237,8 @@ let legacyRootExpensesCache: Expense[] = [];
 let subcollectionExpensesCache: Array<Expense & { isDeleted?: boolean; deletedAt?: string }> = [];
 let legacyRootExpenseActivitiesCache: ExpenseActivity[] = [];
 let subcollectionExpenseActivitiesCache: Array<ExpenseActivity & { isDeleted?: boolean; deletedAt?: string }> = [];
+let legacyRootRepairHistoryEntriesCache: RepairHistoryEntry[] = [];
+let subcollectionRepairHistoryEntriesCache: RepairHistoryEntry[] = [];
 
 export const mergeByIdPreferPrimary = <T extends { id?: string }>(primaryRows: T[] = [], fallbackRows: T[] = []): T[] => {
   const primaryIds = new Set(primaryRows.map((row) => row?.id).filter((id): id is string => Boolean(id)));
@@ -276,6 +278,9 @@ const sortExpensesDesc = (expenses: Expense[] = []) => [...expenses]
 const sortExpenseActivitiesDesc = (activities: ExpenseActivity[] = []) => [...activities]
   .sort((a, b) => new Date(b.createdAt || '').getTime() - new Date(a.createdAt || '').getTime());
 
+const sortRepairHistoryEntriesDesc = (entries: RepairHistoryEntry[] = []) => [...entries]
+  .sort((a, b) => new Date(b.createdAt || '').getTime() - new Date(a.createdAt || '').getTime());
+
 const buildMergedExpenseHydrationState = () => ({
   expenses: sortExpensesDesc(mergeByIdPreferPrimaryRespectDeletes(subcollectionExpensesCache, legacyRootExpensesCache)),
   expenseActivities: sortExpenseActivitiesDesc(mergeByIdPreferPrimaryRespectDeletes(subcollectionExpenseActivitiesCache, legacyRootExpenseActivitiesCache)).slice(0, 500),
@@ -286,6 +291,19 @@ const applyMergedExpenseHydrationToMemory = () => {
   memoryState = { ...memoryState, ...mergedExpenseState };
   emitLocalStorageUpdate();
   return mergedExpenseState;
+};
+
+const buildMergedRepairHistoryHydrationState = () => ({
+  repairHistoryEntries: sortRepairHistoryEntriesDesc(
+    mergeByIdPreferPrimary(subcollectionRepairHistoryEntriesCache, legacyRootRepairHistoryEntriesCache),
+  ),
+});
+
+const applyMergedRepairHistoryHydrationToMemory = () => {
+  const mergedRepairHistoryState = buildMergedRepairHistoryHydrationState();
+  memoryState = { ...memoryState, ...mergedRepairHistoryState };
+  emitLocalStorageUpdate();
+  return mergedRepairHistoryState;
 };
 
 const logEmergencyPurchaseFallbackIfNeeded = (uid: string, source: string) => {
@@ -363,6 +381,7 @@ const shouldEmitFinanceSnapshot = (reason: string) => {
 const getProductsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'products');
 const getCustomersCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'customers');
 const getTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'transactions');
+const getRepairHistoryCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'repairHistoryEntries');
 const getDeletedTransactionsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'deletedTransactions');
 const getOperationCommitsCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'operationCommits');
 const getPurchaseOrdersCollectionRef = (uid: string) => collection(db!, 'stores', uid, 'purchaseOrders');
@@ -589,6 +608,11 @@ const deleteCustomerInSubcollection = async (customerId: string, reason: string)
 const upsertTransactionInSubcollection = async (transaction: Transaction, reason: string) => {
   const user = await assertCloudWriteReady(reason);
   await setDoc(doc(db!, 'stores', user.uid, 'transactions', transaction.id), sanitizeData(transaction), { merge: true });
+};
+
+const upsertRepairHistoryEntryInSubcollection = async (entry: RepairHistoryEntry, reason: string) => {
+  const user = await assertCloudWriteReady(reason);
+  await setDoc(doc(db!, 'stores', user.uid, 'repairHistoryEntries', entry.id), sanitizeData(entry), { merge: true });
 };
 
 const upsertPurchaseOrderInSubcollection = async (order: PurchaseOrder, reason: string) => {
@@ -2554,6 +2578,7 @@ let unsubscribePurchasePartiesSnapshot: any = null;
 let unsubscribeSupplierPaymentsSnapshot: any = null;
 let unsubscribePartyCreditLedgerSnapshot: any = null;
 let unsubscribeExpensesSnapshot: any = null;
+let unsubscribeRepairHistoryEntriesSnapshot: any = null;
 
 
 const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
@@ -2594,6 +2619,10 @@ const unsubscribeCloudListeners = (uid: string | null, reason: string) => {
     unsubscribeExpensesSnapshot();
     unsubscribeExpensesSnapshot = null;
   }
+  if (unsubscribeRepairHistoryEntriesSnapshot) {
+    unsubscribeRepairHistoryEntriesSnapshot();
+    unsubscribeRepairHistoryEntriesSnapshot = null;
+  }
 };
 
 const resetCloudStateForUser = (uid: string | null, reason: string) => {
@@ -2620,6 +2649,8 @@ const resetCloudStateForUser = (uid: string | null, reason: string) => {
   subcollectionExpensesCache = [];
   legacyRootExpenseActivitiesCache = [];
   subcollectionExpenseActivitiesCache = [];
+  legacyRootRepairHistoryEntriesCache = [];
+  subcollectionRepairHistoryEntriesCache = [];
   activeSyncUid = uid;
   syncGeneration += 1;
   syncInitInFlight = false;
@@ -2830,6 +2861,13 @@ const syncFromCloud = async (): Promise<void> => {
         }, (error) => {
             logStockFlowError('expenses.listener_error', error, { uid: user.uid });
         });
+        unsubscribeRepairHistoryEntriesSnapshot = onSnapshot(getRepairHistoryCollectionRef(user.uid), (repairHistorySnap) => {
+            subcollectionRepairHistoryEntriesCache = repairHistorySnap.docs
+              .map(docItem => ({ ...(docItem.data() as RepairHistoryEntry), id: docItem.id }));
+            applyMergedRepairHistoryHydrationToMemory();
+        }, (error) => {
+            logStockFlowError('repairHistory.listener_error', error, { uid: user.uid });
+        });
         // expenseActivities are non-critical and are fetched on Finance open or manual refresh.
         unsubscribeSnapshot = onSnapshot(docRef, async (docSnap) => {
             if (docSnap.exists()) {
@@ -2843,9 +2881,11 @@ const syncFromCloud = async (): Promise<void> => {
                 legacyRootPurchaseReceiptPostingsCache = Array.isArray(cloudData.purchaseReceiptPostings) ? cloudData.purchaseReceiptPostings : [];
                 legacyRootExpensesCache = Array.isArray(cloudData.expenses) ? cloudData.expenses.filter(expense => !isSoftDeletedRow(expense)) : [];
                 legacyRootExpenseActivitiesCache = Array.isArray(cloudData.expenseActivities) ? cloudData.expenseActivities.filter(activity => !isSoftDeletedRow(activity)) : [];
+                legacyRootRepairHistoryEntriesCache = Array.isArray(cloudData.repairHistoryEntries) ? cloudData.repairHistoryEntries : [];
                 const mergedProducts = mergeProductsForTransition(legacyRootProductsCache, subcollectionProductsCache);
                 const mergedPurchaseState = buildMergedPurchaseHydrationState(user.uid, 'root_snapshot');
                 const mergedExpenseState = buildMergedExpenseHydrationState();
+                const mergedRepairHistoryState = buildMergedRepairHistoryHydrationState();
                 logStockFlowDataAudit('root.snapshot.load', {
                   uid: user.uid,
                   rootProductsCount: legacyRootProductsCache.length,
@@ -2882,6 +2922,7 @@ const syncFromCloud = async (): Promise<void> => {
                     expenses: mergedExpenseState.expenses,
                     expenseCategories: cloudData.expenseCategories || ['General'],
                     expenseActivities: mergedExpenseState.expenseActivities,
+                    repairHistoryEntries: mergedRepairHistoryState.repairHistoryEntries,
                     cashAdjustments: cloudData.cashAdjustments || [],
                     freightInquiries: cloudData.freightInquiries ?? fallbackFreightInquiries,
                     freightConfirmedOrders: cloudData.freightConfirmedOrders ?? fallbackFreightConfirmedOrders,
@@ -4079,6 +4120,23 @@ export const saveData = async (data: AppState, options?: { throwOnError?: boolea
 };
 
 export const appendRepairHistoryEntry = async (entry: RepairHistoryEntry): Promise<RepairHistoryEntry[]> => {
+  if (db) {
+    await upsertRepairHistoryEntryInSubcollection(entry, 'appendRepairHistoryEntry');
+    subcollectionRepairHistoryEntriesCache = sortRepairHistoryEntriesDesc([
+      entry,
+      ...subcollectionRepairHistoryEntriesCache.filter((existing) => existing.id !== entry.id),
+    ]);
+    const next = applyMergedRepairHistoryHydrationToMemory().repairHistoryEntries || [];
+    void writeAuditEvent('CREATE', {
+      reason: 'appendRepairHistoryEntry_subcollection',
+      repairHistoryEntryId: entry.id,
+      entityType: entry.entityType,
+      entityId: entry.entityId,
+      repairKind: entry.repairKind,
+      targetTransactionId: entry.targetTransactionId || null,
+    });
+    return next;
+  }
   const data = loadData();
   const next = [entry, ...(data.repairHistoryEntries || [])]
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -4106,20 +4164,60 @@ export const requestStoreProvisioning = async (context?: string) => {
   throw new Error('Store is not provisioned. Use privileged admin provisioning only.');
 };
 
-export const updateStoreProfile = (profile: StoreProfile) => {
-    const data = loadData();
-    const safeProfile: StoreProfile = {
-      ...profile,
-      customerCatalogFirstPage: typeof profile.customerCatalogFirstPage === 'string' ? profile.customerCatalogFirstPage : '',
-      customerCatalogFirstPageName: typeof profile.customerCatalogFirstPageName === 'string' ? profile.customerCatalogFirstPageName : '',
-      customerCatalogFirstPageMimeType: typeof profile.customerCatalogFirstPageMimeType === 'string' ? profile.customerCatalogFirstPageMimeType : '',
-    };
-    void saveData({ ...data, profile: safeProfile }, { reason: 'updateStoreProfile', auditOperation: 'UPDATE' });
+const sanitizeStoreProfileForPersistence = (profile: StoreProfile): StoreProfile => ({
+  ...profile,
+  customerCatalogFirstPage: typeof profile.customerCatalogFirstPage === 'string' ? profile.customerCatalogFirstPage : '',
+  customerCatalogFirstPageName: typeof profile.customerCatalogFirstPageName === 'string' ? profile.customerCatalogFirstPageName : '',
+  customerCatalogFirstPageMimeType: typeof profile.customerCatalogFirstPageMimeType === 'string' ? profile.customerCatalogFirstPageMimeType : '',
+});
+
+export const updateStoreProfile = async (profile: StoreProfile): Promise<StoreProfile> => {
+  const safeProfile = sanitizeStoreProfileForPersistence(profile);
+  const nextState = { ...memoryState, profile: safeProfile };
+
+  if (!db || !auth?.currentUser || !isCloudSynced) {
+    memoryState = nextState;
+    emitLocalStorageUpdate();
+    return safeProfile;
+  }
+
+  const user = await assertCloudWriteReady('updateStoreProfile');
+  await setDoc(doc(db, 'stores', user.uid), sanitizeData({ profile: safeProfile }), { merge: true });
+  memoryState = nextState;
+  emitLocalStorageUpdate();
+  await writeAuditEvent('UPDATE', {
+    reason: 'updateStoreProfile_targeted',
+    fields: [
+      'storeName',
+      'ownerName',
+      'gstin',
+      'email',
+      'phone',
+      'addressLine1',
+      'addressLine2',
+      'state',
+      'bankName',
+      'bankAccount',
+      'bankIfsc',
+      'bankHolder',
+      'defaultTaxRate',
+      'defaultTaxLabel',
+      'signatureImage',
+      'logoImage',
+      'customerCatalogFirstPage',
+      'customerCatalogFirstPageName',
+      'customerCatalogFirstPageMimeType',
+      'invoiceFormat',
+      'thermalPaperWidth',
+      'autoSendInvoiceAfterCreation',
+      'adminPin',
+    ],
+  });
+  return safeProfile;
 };
 
 
-export const updateOperatorUsers = (operatorUsers: OperatorUser[]): OperatorUser[] => {
-  const data = loadData();
+export const updateOperatorUsers = async (operatorUsers: OperatorUser[]): Promise<OperatorUser[]> => {
   const safeOperators = operatorUsers.map((operator) => ({
     ...operator,
     id: String(operator.id || `operator-${Date.now()}`),
@@ -4128,7 +4226,21 @@ export const updateOperatorUsers = (operatorUsers: OperatorUser[]): OperatorUser
     active: operator.active !== false,
     updatedAt: new Date().toISOString(),
   }));
-  void saveData({ ...data, operatorUsers: safeOperators }, { reason: 'updateOperatorUsers', auditOperation: 'UPDATE' });
+
+  if (!db || !auth?.currentUser || !isCloudSynced) {
+    memoryState = { ...memoryState, operatorUsers: safeOperators };
+    emitLocalStorageUpdate();
+    return safeOperators;
+  }
+
+  const user = await assertCloudWriteReady('updateOperatorUsers');
+  await setDoc(doc(db, 'stores', user.uid), sanitizeData({ operatorUsers: safeOperators }), { merge: true });
+  memoryState = { ...memoryState, operatorUsers: safeOperators };
+  emitLocalStorageUpdate();
+  await writeAuditEvent('UPDATE', {
+    reason: 'updateOperatorUsers_targeted',
+    operatorCount: safeOperators.length,
+  });
   return safeOperators;
 };
 
@@ -5039,7 +5151,17 @@ export const updateUpfrontOrder = (order: UpfrontOrder): AppState => {
     return newState;
 };
 
-export const collectUpfrontPayment = (orderId: string, amount: number): AppState => {
+export const collectUpfrontPayment = (
+  orderId: string,
+  amount: number,
+  options?: {
+    paymentId?: string;
+    method?: 'Cash' | 'Online' | 'Advance' | string;
+    note?: string;
+    paidAt?: string;
+    effectiveAt?: string;
+  },
+): AppState => {
     const data = loadData();
     const order = data.upfrontOrders.find(o => o.id === orderId);
     if (!order) {
@@ -5057,37 +5179,44 @@ export const collectUpfrontPayment = (orderId: string, amount: number): AppState
       });
     }
 
-    const newAdvance = order.advancePaid + amount;
-    const newRemaining = order.totalCost - newAdvance;
-    const newStatus = newRemaining <= 0 ? 'cleared' : 'unpaid';
-
-    const updatedOrder: UpfrontOrder = {
-        ...order,
-        updatedAt: new Date().toISOString(),
-        advancePaid: newAdvance,
-        remainingAmount: Math.max(0, newRemaining),
-        status: newStatus,
-        paymentHistory: [
-          ...(Array.isArray(order.paymentHistory) ? order.paymentHistory : []),
-          {
-            id: `upfront-pay-${order.id}-${Date.now()}`,
-            paidAt: new Date().toISOString(),
-            effectiveAt: new Date().toISOString(),
-            amount,
-            method: 'Advance',
-            note: 'Additional payment',
-            kind: 'additional_payment',
-            remainingAfterPayment: Math.max(0, newRemaining),
-            advancePaidAfterPayment: newAdvance,
-          },
-        ],
+    const paymentTimestamp = options?.paidAt || new Date().toISOString();
+    const paymentEntry = {
+      id: options?.paymentId || `upfront-pay-${order.id}-${Date.now()}`,
+      paidAt: paymentTimestamp,
+      effectiveAt: options?.effectiveAt || paymentTimestamp,
+      amount,
+      method: options?.method || 'Advance',
+      note: options?.note || 'Additional payment',
+      kind: 'additional_payment' as const,
+      remainingAfterPayment: 0,
+      advancePaidAfterPayment: 0,
     };
+    const updatedOrder = recomputeUpfrontOrderPaymentState({
+      ...order,
+      paymentHistory: [
+        ...(Array.isArray(order.paymentHistory) ? order.paymentHistory : []),
+        paymentEntry,
+      ],
+    });
+    if (updatedOrder.advancePaid - (updatedOrder.totalCost || 0) > MONEY_EPSILON) {
+      failValidation('UPFRONT_PAYMENT_EXCEEDS_TOTAL', 'Total advance payments cannot exceed custom order total.', {
+        orderId,
+        advancePaid: updatedOrder.advancePaid,
+        totalCost: updatedOrder.totalCost,
+      });
+    }
 
     const newOrders = sanitizeUpfrontOrdersForPersist(data.upfrontOrders.map(o => o.id === orderId ? updatedOrder : o), 'collectUpfrontPayment');
     const newCustomers = applyCanonicalCustomerBalanceSnapshots(data.customers, data.transactions, newOrders, [order.customerId]);
     const newState = { ...data, customers: newCustomers, upfrontOrders: newOrders };
     void saveData(newState, { reason: 'collectUpfrontPayment', auditOperation: 'UPDATE' });
-    emitBehaviorStateChange({ type: 'payment_collected', entityId: orderId, from: order.status, to: newStatus, metadata: { amount, remainingAmount: Math.max(0, newRemaining) } });
+    emitBehaviorStateChange({
+      type: 'payment_collected',
+      entityId: orderId,
+      from: order.status,
+      to: updatedOrder.status,
+      metadata: { amount, remainingAmount: Math.max(0, Number(updatedOrder.remainingAmount || 0)) },
+    });
     return newState;
 };
 

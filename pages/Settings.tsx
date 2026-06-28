@@ -22,6 +22,8 @@ export default function Settings() {
   });
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [profileMessage, setProfileMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [uploadingField, setUploadingField] = useState<'logo' | 'signature' | 'catalog' | null>(null);
   const [currentPinInput, setCurrentPinInput] = useState('');
   const [newPinInput, setNewPinInput] = useState('');
@@ -86,17 +88,31 @@ export default function Settings() {
     };
   }, []);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const safeProfile: StoreProfile = {
       ...profile,
       customerCatalogFirstPage: typeof profile.customerCatalogFirstPage === 'string' ? profile.customerCatalogFirstPage : '',
       customerCatalogFirstPageName: typeof profile.customerCatalogFirstPageName === 'string' ? profile.customerCatalogFirstPageName : '',
       customerCatalogFirstPageMimeType: typeof profile.customerCatalogFirstPageMimeType === 'string' ? profile.customerCatalogFirstPageMimeType : '',
     };
-    updateStoreProfile(safeProfile);
-    setProfile(safeProfile);
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 3000);
+    setIsSavingProfile(true);
+    setSuccess(false);
+    setProfileMessage(null);
+    try {
+      const savedProfile = await updateStoreProfile(safeProfile);
+      setProfile(savedProfile);
+      setSuccess(true);
+      setProfileMessage({ type: 'success', text: 'Profile Saved!' });
+      window.setTimeout(() => {
+        setSuccess(false);
+        setProfileMessage((current) => current?.type === 'success' ? null : current);
+      }, 3000);
+    } catch (error) {
+      setSuccess(false);
+      setProfileMessage({ type: 'error', text: getFriendlyErrorMessage(error, 'settings.save_profile') });
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   const handleTaxChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -112,47 +128,59 @@ export default function Settings() {
     return saved || '1234';
   };
 
-  const handleChangePin = () => {
+  const handleChangePin = async () => {
     const requiredCurrent = getEffectiveManagerPin(profile.adminPin);
     if (currentPinInput.trim() !== requiredCurrent) return setPinMessage('Current PIN is incorrect.');
     if (!/^\d{4,6}$/.test(newPinInput)) return setPinMessage('New PIN must be 4 to 6 digits.');
     if (newPinInput !== confirmPinInput) return setPinMessage('New PIN and confirm PIN do not match.');
     const next = { ...profile, adminPin: newPinInput };
-    updateStoreProfile(next);
-    setProfile(next);
-    setCurrentPinInput('');
-    setNewPinInput('');
-    setConfirmPinInput('');
-    setPinMessage('PIN updated successfully.');
+    try {
+      const savedProfile = await updateStoreProfile(next);
+      setProfile(savedProfile);
+      setCurrentPinInput('');
+      setNewPinInput('');
+      setConfirmPinInput('');
+      setPinMessage('PIN updated successfully.');
+    } catch (error) {
+      setPinMessage(getFriendlyErrorMessage(error, 'settings.change_pin'));
+    }
   };
 
-  const handleClearAdminPin = () => {
+  const handleClearAdminPin = async () => {
     const requiredCurrent = getEffectiveManagerPin(profile.adminPin);
     if (currentPinInput.trim() !== requiredCurrent) return setPinMessage('Current ERP admin access PIN is incorrect.');
     const next = { ...profile, adminPin: '' };
-    updateStoreProfile(next);
-    setProfile(next);
-    setCurrentPinInput('');
-    setNewPinInput('');
-    setConfirmPinInput('');
-    setPinMessage('ERP admin access PIN cleared. Admin access will use the Firebase login password.');
+    try {
+      const savedProfile = await updateStoreProfile(next);
+      setProfile(savedProfile);
+      setCurrentPinInput('');
+      setNewPinInput('');
+      setConfirmPinInput('');
+      setPinMessage('ERP admin access PIN cleared. Admin access will use the Firebase login password.');
+    } catch (error) {
+      setPinMessage(getFriendlyErrorMessage(error, 'settings.clear_admin_pin'));
+    }
   };
 
-  const handleAddOperator = () => {
+  const handleAddOperator = async () => {
     const name = operatorNameInput.trim();
     const password = operatorPasswordInput.trim();
     if (!name) return setOperatorMessage('Operator name is required.');
     if (!password) return setOperatorMessage('Operator PIN is required.');
     if (!isValidOperatorPin(password)) return setOperatorMessage('Operator PIN must be numeric only and 6 to 8 digits long.');
     const now = new Date().toISOString();
-    const next = updateOperatorUsers([
-      ...operatorUsers,
-      { id: `operator-${Date.now()}`, name, password, active: true, createdAt: now, updatedAt: now },
-    ]);
-    setOperatorUsers(next);
-    setOperatorNameInput('');
-    setOperatorPasswordInput('');
-    setOperatorMessage('Operator added.');
+    try {
+      const next = await updateOperatorUsers([
+        ...operatorUsers,
+        { id: `operator-${Date.now()}`, name, password, active: true, createdAt: now, updatedAt: now },
+      ]);
+      setOperatorUsers(next);
+      setOperatorNameInput('');
+      setOperatorPasswordInput('');
+      setOperatorMessage('Operator added.');
+    } catch (error) {
+      setOperatorMessage(getFriendlyErrorMessage(error, 'settings.add_operator'));
+    }
   };
 
 
@@ -162,40 +190,56 @@ export default function Settings() {
     setEditingOperatorPassword(operator.password || '');
   };
 
-  const handleSaveOperator = (operatorId: string) => {
+  const handleSaveOperator = async (operatorId: string) => {
     const name = editingOperatorName.trim();
     const password = editingOperatorPassword.trim();
     if (!name) return setOperatorMessage('Operator name is required.');
     if (!password) return setOperatorMessage('Operator PIN is required.');
     if (!isValidOperatorPin(password)) return setOperatorMessage('Operator PIN must be numeric only and 6 to 8 digits long.');
-    const next = updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, name, password } : operator));
-    setOperatorUsers(next);
-    setEditingOperatorId(null);
-    setEditingOperatorName('');
-    setEditingOperatorPassword('');
-    setOperatorMessage('Operator updated.');
+    try {
+      const next = await updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, name, password } : operator));
+      setOperatorUsers(next);
+      setEditingOperatorId(null);
+      setEditingOperatorName('');
+      setEditingOperatorPassword('');
+      setOperatorMessage('Operator updated.');
+    } catch (error) {
+      setOperatorMessage(getFriendlyErrorMessage(error, 'settings.save_operator'));
+    }
   };
 
-  const handleRemoveOperator = (operatorId: string) => {
+  const handleRemoveOperator = async (operatorId: string) => {
     if (!window.confirm('Remove this operator?\nThis will not delete sales, transactions, or reports.')) return;
-    const next = updateOperatorUsers(operatorUsers.filter((operator) => operator.id !== operatorId));
-    setOperatorUsers(next);
-    setOperatorMessage('Operator removed. Historical records were not changed.');
+    try {
+      const next = await updateOperatorUsers(operatorUsers.filter((operator) => operator.id !== operatorId));
+      setOperatorUsers(next);
+      setOperatorMessage('Operator removed. Historical records were not changed.');
+    } catch (error) {
+      setOperatorMessage(getFriendlyErrorMessage(error, 'settings.remove_operator'));
+    }
   };
 
-  const handleToggleOperator = (operatorId: string) => {
-    const next = updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, active: operator.active === false } : operator));
-    setOperatorUsers(next);
-    setOperatorMessage('Operator updated.');
+  const handleToggleOperator = async (operatorId: string) => {
+    try {
+      const next = await updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, active: operator.active === false } : operator));
+      setOperatorUsers(next);
+      setOperatorMessage('Operator updated.');
+    } catch (error) {
+      setOperatorMessage(getFriendlyErrorMessage(error, 'settings.toggle_operator'));
+    }
   };
 
-  const handleResetOperatorPassword = (operatorId: string) => {
+  const handleResetOperatorPassword = async (operatorId: string) => {
     const nextPassword = window.prompt('Enter new 6–8 digit operator PIN');
     if (!nextPassword) return;
     if (!isValidOperatorPin(nextPassword)) return setOperatorMessage('Operator PIN must be numeric only and 6 to 8 digits long.');
-    const next = updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, password: nextPassword.trim() } : operator));
-    setOperatorUsers(next);
-    setOperatorMessage('Operator password updated.');
+    try {
+      const next = await updateOperatorUsers(operatorUsers.map((operator) => operator.id === operatorId ? { ...operator, password: nextPassword.trim() } : operator));
+      setOperatorUsers(next);
+      setOperatorMessage('Operator password updated.');
+    } catch (error) {
+      setOperatorMessage(getFriendlyErrorMessage(error, 'settings.reset_operator_password'));
+    }
   };
 
   const handleSignatureUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -642,9 +686,14 @@ export default function Settings() {
       </div>
       
       <div className="flex items-center gap-4 border-t pt-6">
-         <Button onClick={handleSave} className="min-w-[200px] h-11"><Save className="w-4 h-4 mr-2" /> Save Profile</Button>
+         <Button onClick={() => void handleSave()} disabled={isSavingProfile} className="min-w-[200px] h-11"><Save className="w-4 h-4 mr-2" /> {isSavingProfile ? 'Saving...' : 'Save Profile'}</Button>
          {success && <span className="text-green-600 font-medium">Profile Saved!</span>}
       </div>
+      {profileMessage && (
+        <div className={`rounded-md border px-3 py-2 text-sm ${profileMessage.type === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+          {profileMessage.text}
+        </div>
+      )}
 
       {waModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">

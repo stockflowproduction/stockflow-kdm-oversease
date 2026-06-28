@@ -10,9 +10,10 @@ import { auth } from '../services/firebase';
 import { getDeleteTransactionPreview, getSaleSettlementBreakdown, getCanonicalReturnPreviewForDraft, getTransactionUpdateAuditPreview, loadData, deleteTransaction, updateTransaction, loadTransactionsPage, loadDeletedTransactionsPage, refreshDeletedTransactionsFromCloud, TransactionPageCursor } from '../services/storage';
 import { generateReceiptPDF, generateReceiptPDFDataUrl } from '../services/pdf';
 import { shareTransactionInvoiceViaWhatsApp } from '../services/whatsappShare';
+import { shareTransactionInvoiceViaMetaWhatsApp } from '../services/metaWhatsAppShare';
 import { appendWhatsAppLog } from '../services/whatsappLogs';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Select, Input, Button, LightweightLoader } from '../components/ui';
-import { TrendingUp, TrendingDown, IndianRupee, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, Percent, FileText, Edit, Trash2 } from 'lucide-react';
+import { TrendingDown, TrendingUp, Calendar, X, Eye, ArrowUpRight, ArrowDownLeft, User, Package, Clock, Download, CreditCard, IndianRupee, Percent, FileText, Edit, Trash2 } from 'lucide-react';
 import { ExportModal } from '../components/ExportModal';
 import { exportTransactionsToExcel, exportInvoiceToExcel } from '../services/excel';
 import { UploadImportModal } from '../components/UploadImportModal';
@@ -1189,14 +1190,52 @@ export default function Transactions() {
           }
       });
 
-      return {
-          totalRevenue,
-          totalReturns,
-          netSales: totalRevenue - totalReturns,
-          grossProfit,
-          totalDiscount
-      };
+       return {
+           totalRevenue,
+           totalReturns,
+           netSales: totalRevenue - totalReturns,
+           grossProfit,
+           totalDiscount
+       };
   }, [filteredTransactions, products]);
+
+  const kpiStats = useMemo(() => {
+      let totalReturns = 0;
+      let totalCash = 0;
+      let totalCredit = 0;
+      let totalOnline = 0;
+
+      filteredTransactions.forEach((tx) => {
+          const amount = Math.abs(Number(tx.total || 0));
+          const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
+
+          if (txType === 'return') {
+              totalReturns += amount;
+              return;
+          }
+
+          if (txType === 'sale' || txType === 'historical_reference') {
+              const settlement = getSaleSettlementBreakdown(tx);
+              totalCash += Math.max(0, Number(settlement.cashPaid || 0));
+              totalCredit += Math.max(0, Number(settlement.creditDue || 0));
+              totalOnline += Math.max(0, Number(settlement.onlinePaid || 0));
+              return;
+          }
+
+          if (txType === 'payment') {
+              const paymentMethod = String(tx.paymentMethod || '').toLowerCase();
+              if (paymentMethod === 'online') totalOnline += amount;
+              else if (paymentMethod === 'cash') totalCash += amount;
+          }
+      });
+
+      return {
+          totalReturns,
+          totalCash,
+          totalCredit,
+          totalOnline,
+      };
+  }, [filteredTransactions]);
 
   const getSaleSettlementText = (tx: Transaction) => {
     if (tx.id.startsWith('upfront-')) {
@@ -1231,6 +1270,48 @@ export default function Transactions() {
       setWaSendingStage(`Failed: ${getFriendlyErrorMessage(error, 'transactions.prepare_invoice')}`);
     } finally {
       setTimeout(() => setWaSendingStage(null), 1200);
+    }
+  };
+
+  const handleShareInvoiceOfficialWhatsApp = async (tx: Transaction) => {
+    const customerPhone = String(tx.customerPhone || customers.find((customer) => customer.id === tx.customerId)?.phone || '').trim();
+    if (!customerPhone) return setWaSendingStage('Failed: Customer phone number is missing.');
+
+    try {
+      setWaSendingStage('Preparing invoice data...');
+      const { profile } = loadData();
+      setWaSendingStage('Sending via Official WhatsApp...');
+      const result = await shareTransactionInvoiceViaMetaWhatsApp(
+        { ...tx, customerPhone, customerName: tx.customerName || customers.find((customer) => customer.id === tx.customerId)?.name || 'Customer' },
+        customers,
+        profile,
+      );
+      const uid = auth?.currentUser?.uid || '';
+      await appendWhatsAppLog(uid, {
+        type: 'invoice',
+        customerId: tx.customerId || '',
+        customerName: tx.customerName || customers.find((customer) => customer.id === tx.customerId)?.name || '',
+        customerPhone,
+        invoiceId: tx.id,
+        invoiceNumber: tx.invoiceNo || tx.id,
+        pdfUrl: '',
+        status: result.ok ? 'sent' : 'failed',
+        error: result.ok ? null : result.message,
+        sentAt: result.ok ? new Date().toISOString() : null,
+        createdBy: uid,
+        meta: {
+          provider: 'meta-cloud-api',
+          transactionId: tx.id,
+          whatsappMessageId: result.whatsappMessageId || null,
+          whatsappMediaId: result.whatsappMediaId || null,
+          backendUrl: result.backendUrl || String(import.meta.env.VITE_META_WHATSAPP_SERVER_URL || '').trim(),
+        },
+      });
+      setWaSendingStage(result.ok ? 'Message accepted by WhatsApp' : `Failed: ${result.message}`);
+    } catch (error) {
+      setWaSendingStage(`Failed: ${getFriendlyErrorMessage(error, 'transactions.send_invoice_meta')}`);
+    } finally {
+      setTimeout(() => setWaSendingStage(null), 1500);
     }
   };
 
@@ -1457,7 +1538,69 @@ export default function Transactions() {
       )}
 
       {/* Stats Cards - Redesigned for Mobile Overflow & Aesthetics */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-red-50 to-rose-100/50">
+              <div className="absolute right-0 top-0 p-3 opacity-10">
+                  <ArrowDownLeft className="w-16 h-16 text-red-600" />
+              </div>
+              <CardContent className="p-4 relative z-10">
+                   <p className="text-[10px] md:text-xs font-bold text-red-700/70 uppercase tracking-wider">Returns</p>
+                   <div className="mt-2 flex items-baseline gap-1">
+                      <span className="text-sm md:text-lg font-bold text-red-700">â‚¹</span>
+                      <span className="text-lg sm:text-2xl font-extrabold text-red-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalReturns)}>
+                          {formatMoneyWhole(kpiStats.totalReturns)}
+                      </span>
+                   </div>
+              </CardContent>
+          </Card>
+
+          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-green-50 to-emerald-100/50">
+              <div className="absolute right-0 top-0 p-3 opacity-10">
+                  <ArrowUpRight className="w-16 h-16 text-green-600" />
+              </div>
+              <CardContent className="p-4 relative z-10">
+                   <p className="text-[10px] md:text-xs font-bold text-green-700/70 uppercase tracking-wider">Total Cash</p>
+                   <div className="mt-2 flex items-baseline gap-1">
+                      <span className="text-sm md:text-lg font-bold text-green-700">â‚¹</span>
+                      <span className="text-lg sm:text-2xl font-extrabold text-green-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalCash)}>
+                          {formatMoneyWhole(kpiStats.totalCash)}
+                      </span>
+                   </div>
+              </CardContent>
+          </Card>
+
+          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-blue-50 to-indigo-100/50">
+              <div className="absolute right-0 top-0 p-3 opacity-10">
+                  <CreditCard className="w-16 h-16 text-blue-600" />
+              </div>
+              <CardContent className="p-4 relative z-10">
+                   <p className="text-[10px] md:text-xs font-bold text-blue-700/70 uppercase tracking-wider">Total Credit</p>
+                   <div className="mt-2 flex items-baseline gap-1">
+                      <span className="text-sm md:text-lg font-bold text-blue-700">â‚¹</span>
+                      <span className="text-lg sm:text-2xl font-extrabold text-blue-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalCredit)}>
+                          {formatMoneyWhole(kpiStats.totalCredit)}
+                      </span>
+                   </div>
+              </CardContent>
+          </Card>
+
+          <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-amber-50 to-orange-100/50">
+              <div className="absolute right-0 top-0 p-3 opacity-10">
+                  <TrendingDown className="w-16 h-16 text-amber-600" />
+              </div>
+              <CardContent className="p-4 relative z-10">
+                   <p className="text-[10px] md:text-xs font-bold text-amber-700/70 uppercase tracking-wider">Total Online</p>
+                   <div className="mt-2 flex items-baseline gap-1">
+                      <span className="text-sm md:text-lg font-bold text-amber-700">â‚¹</span>
+                      <span className="text-lg sm:text-2xl font-extrabold text-amber-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalOnline)}>
+                          {formatMoneyWhole(kpiStats.totalOnline)}
+                      </span>
+                   </div>
+              </CardContent>
+          </Card>
+      </div>
+
+      <div className="hidden grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
           {/* Revenue */}
           <Card className="relative overflow-hidden border-none shadow-md bg-gradient-to-br from-green-50 to-emerald-100/50">
               <div className="absolute right-0 top-0 p-3 opacity-10">
@@ -1701,6 +1844,7 @@ export default function Transactions() {
                                                 {can('transactionDelete') && !tx.id.startsWith('upfront-') && !isSupplierPaymentVirtualTransaction(tx) && <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => void openDeleteModal(tx)}><X className="w-3.5 h-3.5" /></Button>}
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setTxToExport(tx); setExportType('invoice'); setIsExportModalOpen(true); }}><FileText className="w-3.5 h-3.5" /></Button>
                                                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleShareInvoiceWhatsApp(tx)}><Download className="w-3.5 h-3.5" /></Button>
+                                                <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={() => void handleShareInvoiceOfficialWhatsApp(tx)}>Send via Official WhatsApp</Button>
                                             </div>
                                         </td>
                                     </tr>

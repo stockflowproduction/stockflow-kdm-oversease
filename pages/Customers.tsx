@@ -260,6 +260,7 @@ const parseDateTimeInput = (value: string) => {
 const roundRepairMoney = (value: unknown) => Math.round((Number(value || 0) || 0) * 100) / 100;
 const getUpfrontOrderFinancialDate = (order?: UpfrontOrder | null) => order?.effectiveAt || order?.date || order?.createdAt || order?.updatedAt || new Date().toISOString();
 const getUpfrontPaymentFinancialDate = (payment?: UpfrontOrderPaymentEntry | null, order?: UpfrontOrder | null) => payment?.effectiveAt || payment?.paidAt || getUpfrontOrderFinancialDate(order);
+const ADVANCE_ORDER_DUE_REPAIR_PREFIX = 'advance_order_remaining_due_repair:';
 
 const getRepairKindLabel = (type: RepairTransactionType) => {
   switch (type) {
@@ -1501,6 +1502,22 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
           deleteUpfrontOrder(upfrontRepairDraft.oldOrder!.id);
           break;
         case 'add_advance_payment':
+          if (!upfrontRepairDraft.newOrder || !upfrontRepairDraft.targetPaymentId) {
+            throw new Error('Advance payment preview is missing its target payment.');
+          }
+          {
+            const nextOrder = upfrontRepairDraft.newOrder as UpfrontOrder;
+            const payment = (nextOrder.paymentHistory || []).find((entry) => entry.id === upfrontRepairDraft.targetPaymentId);
+            if (!payment) throw new Error('Advance payment preview is missing its target payment.');
+            collectUpfrontPayment(nextOrder.id, Number(payment.amount || 0), {
+              paymentId: upfrontRepairDraft.targetPaymentId,
+              method: payment.method || 'Advance',
+              note: payment.note,
+              paidAt: payment.paidAt,
+              effectiveAt: payment.effectiveAt || payment.paidAt,
+            });
+          }
+          break;
         case 'edit_advance_payment': {
           const nextOrder = upfrontRepairDraft.newOrder as UpfrontOrder;
           const payment = (nextOrder.paymentHistory || []).find((entry) => entry.id === upfrontRepairDraft.targetPaymentId);
@@ -3878,8 +3895,12 @@ const buildCustomerLedgerRows = (transactions: Transaction[], upfrontEffects: Ar
       listDescription = `Return ${allocation.mode.replace('_', ' ')} • Cash ${formatINRPrecise(allocation.cashRefund)} • Online ${formatINRPrecise(allocation.onlineRefund)} • Due -${formatINRPrecise(allocation.dueReduction)}${allocation.storeCreditIncrease > 0 ? ` • SC +${formatINRPrecise(allocation.storeCreditIncrease)}` : ''}`;
     } else if (txKind === 'customer_credit') {
       runningDue = Math.max(0, runningDue + amount);
-      statementDescription = `Credit Created #${tx.receiptNo || tx.id.slice(-6)} (${formatINRPrecise(amount)})`;
-      listDescription = `Credit Created • Due +${formatINRPrecise(amount)}`;
+      statementDescription = String(tx.sourceRef || '').startsWith(ADVANCE_ORDER_DUE_REPAIR_PREFIX)
+        ? `Advance Order Due Repair #${String(tx.sourceTransactionId || tx.sourceRef.replace(ADVANCE_ORDER_DUE_REPAIR_PREFIX, '')).slice(-6)} (+${formatINRPrecise(amount)})`
+        : `Credit Created #${tx.receiptNo || tx.id.slice(-6)} (${formatINRPrecise(amount)})`;
+      listDescription = String(tx.sourceRef || '').startsWith(ADVANCE_ORDER_DUE_REPAIR_PREFIX)
+        ? `Advance Order Due Repair • Due +${formatINRPrecise(amount)}`
+        : `Credit Created • Due +${formatINRPrecise(amount)}`;
     } else if (txKind === 'customer_cash_out') {
       const explicitStoreCreditUsed = Math.max(0, Number((tx as any).storeCreditUsed || 0));
       const storeCreditUsed = Math.min(explicitStoreCreditUsed, amount, runningStoreCredit);

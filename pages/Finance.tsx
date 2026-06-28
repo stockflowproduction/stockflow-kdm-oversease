@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { appendRepairHistoryEntry, buildUpfrontOrderLedgerEffects, getCanonicalCustomerBalanceSnapshot, getCanonicalReturnAllocation, loadData, safeFinancePersistState, processTransaction, getSaleSettlementBreakdown, saveExpenseToSubcollection, saveExpenseActivityToSubcollection, deleteExpenseFromSubcollection, isExpenseStoredInSubcollection, refreshDeletedTransactionsFromCloud, refreshExpenseActivitiesFromCloud } from '../services/storage';
@@ -116,6 +117,25 @@ const monthKeyOf = (iso: string) => {
 const getExpenseEffectiveDate = (expense: CanonicalExpense) => expense.effectiveAt || expense.createdAt;
 const formatINR = (value: number) => formatINRPrecise(value);
 const formatINRSummary = (value: number) => formatINRWhole(value);
+const PDF_CURRENCY_PREFIX = 'Rs. ';
+const PDF_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+const PDF_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+const formatPdfAmount = (value: number) => `${PDF_CURRENCY_PREFIX}${Number(value || 0).toLocaleString('en-IN', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})}`;
+const forcePdfStandardText = (doc: jsPDF) => {
+  doc.setFont('helvetica', 'normal');
+  (doc as any).setCharSpace?.(0);
+};
+const formatExpenseDateHeading = (iso: string) => {
+  const date = new Date(iso);
+  return `${PDF_WEEKDAYS[date.getDay()]}, ${String(date.getDate()).padStart(2, '0')} ${PDF_MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+};
+const formatExpenseDateCell = (iso: string) => {
+  const date = new Date(iso);
+  return `${String(date.getDate()).padStart(2, '0')} ${PDF_MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+};
 const toFiniteMoney = (value: unknown) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : 0;
@@ -1323,6 +1343,14 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
   }, [expenses, expensePreset, expenseCustomFrom, expenseCustomTo]);
 
   const expensesTotalForDate = useMemo(() => filteredExpenses.reduce((sum, e) => sum + e.amount, 0), [filteredExpenses]);
+  const expenseReportFilterLabel = useMemo(() => {
+    if (expensePreset === 'today') return `Today (${todayISO()})`;
+    if (expensePreset === '7d') return 'Last 7 Days';
+    if (expensePreset === '15d') return 'Last 15 Days';
+    if (expensePreset === 'month') return `This Month (${new Date().toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })})`;
+    if (expensePreset === 'custom' && expenseCustomFrom && expenseCustomTo) return `${expenseCustomFrom} to ${expenseCustomTo}`;
+    return expenseDateFilter || 'All Dates';
+  }, [expenseCustomFrom, expenseCustomTo, expenseDateFilter, expensePreset]);
 
 
   const canonicalCustomerBalanceById = useMemo(() => {
@@ -2793,11 +2821,179 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
   }
 
   const exportExpensePDF = () => {
-    const doc = new jsPDF();
-    doc.setFontSize(16);
-    doc.text('Daily Expense Report', 14, 18);
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    (doc as any).setCharSpace?.(0);
+    const reportRows = [...filteredExpenses].sort((a, b) => (
+      new Date(getExpenseEffectiveDate(a)).getTime() - new Date(getExpenseEffectiveDate(b)).getTime()
+    ));
+    const groupedRows = reportRows.reduce((map, expense) => {
+      const dateKey = new Date(getExpenseEffectiveDate(expense)).toISOString().slice(0, 10);
+      map.set(dateKey, [...(map.get(dateKey) || []), expense]);
+      return map;
+    }, new Map<string, Expense[]>());
+    const dateKeys = Array.from(groupedRows.keys()).sort();
+    const dateRangeLabel = dateKeys.length
+      ? `${formatExpenseDateCell(`${dateKeys[0]}T00:00:00`)} to ${formatExpenseDateCell(`${dateKeys[dateKeys.length - 1]}T00:00:00`)}`
+      : 'No entries';
+
+    doc.setFillColor(15, 23, 42);
+    doc.rect(0, 0, pageWidth, 26, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(20);
+    doc.text('Expense Report', 14, 16);
+    doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
-    doc.text(`Date: ${expenseDateFilter}`, 14, 26);
+    doc.text(`Filter: ${expenseReportFilterLabel}`, 14, 22);
+    doc.setTextColor(15, 23, 42);
+
+    forcePdfStandardText(doc);
+    autoTable(doc, {
+      startY: 32,
+      theme: 'grid',
+      margin: { left: 14, right: 14 },
+      styles: {
+        font: 'helvetica',
+        fontStyle: 'normal',
+        fontSize: 10,
+        cellPadding: 3,
+        lineColor: [226, 232, 240],
+        lineWidth: 0.2,
+        textColor: [15, 23, 42],
+        overflow: 'linebreak',
+        valign: 'middle',
+      },
+      body: [[
+        { content: 'Total Expenses', styles: { fontStyle: 'normal', fillColor: [248, 250, 252] } },
+        { content: formatPdfAmount(expensesTotalForDate), styles: { halign: 'right', fontStyle: 'normal', overflow: 'visible' } },
+        { content: 'Number of Entries', styles: { fontStyle: 'normal', fillColor: [248, 250, 252] } },
+        { content: String(filteredExpenses.length), styles: { halign: 'center' } },
+        { content: 'Date Range', styles: { fontStyle: 'normal', fillColor: [248, 250, 252] } },
+        { content: dateRangeLabel, styles: { halign: 'center' } },
+      ]],
+      columnStyles: {
+        0: { cellWidth: 34 },
+        1: { cellWidth: 38, halign: 'right' },
+        2: { cellWidth: 34 },
+        3: { cellWidth: 24 },
+        4: { cellWidth: 28 },
+        5: { cellWidth: 69 },
+      },
+    });
+
+    const bodyRows: any[] = [];
+    groupedRows.forEach((entries, dateKey) => {
+      const subtotal = entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+      bodyRows.push([{
+        content: `${formatExpenseDateHeading(`${dateKey}T00:00:00`)} | Subtotal ${formatPdfAmount(subtotal)}`,
+        colSpan: 6,
+        styles: {
+          fillColor: [226, 232, 240],
+          textColor: [15, 23, 42],
+          fontStyle: 'normal',
+          halign: 'left',
+          overflow: 'visible',
+        },
+      }]);
+      entries.forEach((expense) => {
+        bodyRows.push([
+          formatExpenseDateCell(getExpenseEffectiveDate(expense)),
+          expense.category || '—',
+          expense.title || '—',
+          expense.note || '—',
+          'Cash',
+          formatPdfAmount(expense.amount),
+        ]);
+      });
+    });
+    bodyRows.push([{
+      content: `Grand Total ${formatPdfAmount(expensesTotalForDate)}`,
+      colSpan: 6,
+      styles: {
+        fillColor: [15, 23, 42],
+        textColor: [255, 255, 255],
+        fontStyle: 'normal',
+        halign: 'right',
+        overflow: 'visible',
+      },
+    }]);
+    const normalizedBodyRows = bodyRows.map((row) => {
+      if (!Array.isArray(row)) return row;
+      return row.map((cell) => {
+        if (typeof cell === 'string') return cell.replaceAll('â€”', '--');
+        if (cell && typeof cell === 'object' && 'content' in cell && typeof (cell as { content?: unknown }).content === 'string') {
+          return { ...cell, content: String((cell as { content: string }).content).replaceAll('â€”', '--') };
+        }
+        return cell;
+      });
+    });
+
+    forcePdfStandardText(doc);
+    autoTable(doc, {
+      startY: (doc as any).lastAutoTable.finalY + 8,
+      theme: 'grid',
+      margin: { left: 14, right: 14, bottom: 14 },
+      head: [[
+        'Date',
+        'Category',
+        'Title / Description',
+        'Note',
+        'Payment Method / Party',
+        'Amount',
+      ]],
+      body: normalizedBodyRows,
+      styles: {
+        font: 'helvetica',
+        fontStyle: 'normal',
+        fontSize: 9,
+        cellPadding: 3,
+        lineColor: [226, 232, 240],
+        lineWidth: 0.2,
+        textColor: [15, 23, 42],
+        overflow: 'linebreak',
+        valign: 'top',
+      },
+      headStyles: {
+        font: 'helvetica',
+        fillColor: [30, 41, 59],
+        textColor: [255, 255, 255],
+        fontStyle: 'normal',
+        halign: 'center',
+      },
+      columnStyles: {
+        0: { cellWidth: 26 },
+        1: { cellWidth: 34 },
+        2: { cellWidth: 64 },
+        3: { cellWidth: 74 },
+        4: { cellWidth: 38 },
+        5: { cellWidth: 38, halign: 'right', overflow: 'visible' },
+      },
+      didParseCell: (hookData) => {
+        if (hookData.section === 'body' && hookData.column.index === 5) {
+          hookData.cell.styles.halign = 'right';
+          hookData.cell.styles.overflow = 'visible';
+          hookData.cell.styles.fontStyle = 'normal';
+        }
+        if (hookData.section === 'body' && hookData.row.raw?.[0]?.colSpan === 6) {
+          hookData.cell.styles.fontSize = 10;
+          hookData.cell.styles.fontStyle = 'normal';
+        }
+      },
+      didDrawPage: () => {
+        forcePdfStandardText(doc);
+        const pageNumber = (doc as any).internal.getCurrentPageInfo().pageNumber;
+        const pageCount = doc.getNumberOfPages();
+        doc.setFontSize(9);
+        doc.setTextColor(100);
+        doc.text(`Generated: ${new Date().toLocaleString('en-IN')}`, 14, pageHeight - 6);
+        doc.text(`Page ${pageNumber} of ${pageCount}`, pageWidth - 32, pageHeight - 6);
+      },
+    });
+
+    doc.save(`expenses-${expensePreset === 'custom' ? `${expenseCustomFrom || 'from'}-to-${expenseCustomTo || 'to'}` : expensePreset}.pdf`);
+    return;
 
     let y = 36;
     filteredExpenses.forEach((e, idx) => {

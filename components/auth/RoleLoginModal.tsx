@@ -124,7 +124,7 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
           return;
         }
         const freshData = loadData();
-        updateStoreProfile({ ...freshData.profile, adminPin: nextPin });
+        await updateStoreProfile({ ...freshData.profile, adminPin: nextPin });
         setPassword('');
         setRecoveryFirebasePassword('');
         setRecoveryNewPin('');
@@ -134,7 +134,7 @@ export default function RoleLoginModal({ onLogin }: { onLogin: (session: RoleSes
         return;
       }
       const freshData = loadData();
-      updateStoreProfile({ ...freshData.profile, adminPin: '' });
+      await updateStoreProfile({ ...freshData.profile, adminPin: '' });
       setPassword('');
       setRecoveryFirebasePassword('');
       setRecoveryNewPin('');

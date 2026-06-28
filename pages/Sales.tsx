@@ -12,6 +12,8 @@ import { getStockBucketKey } from '../services/stockBuckets';
 import { loadData, processTransaction, addCustomer, updateCustomer, clampCreditDueAmount, getCanonicalReturnPreviewForDraft } from '../services/storage';
 import { generateReceiptPDF, generateReceiptPDFDataUrl, printReceipt } from '../services/pdf';
 import { shareTransactionInvoiceViaWhatsApp } from '../services/whatsappShare';
+import { shareTransactionInvoiceViaMetaWhatsApp } from '../services/metaWhatsAppShare';
+import { appendWhatsAppLog } from '../services/whatsappLogs';
 import { ExportModal } from '../components/ExportModal';
 import { exportInvoiceToExcel } from '../services/excel';
 import { Button, Input, Card, CardContent, CardHeader, CardTitle, Badge, Label } from '../components/ui';
@@ -1168,6 +1170,58 @@ export default function Sales() {
       setSendInvoiceMessage(getFriendlyErrorMessage(error, 'sales.send_invoice'));
     } finally {
       setTimeout(() => setWaSendingStage(null), 1000);
+    }
+  };
+
+  const sendInvoiceViaOfficialWhatsApp = async (tx: Transaction) => {
+    const customer = customers.find((entry) => entry.id === tx.customerId);
+    const customerPhone = (tx.customerPhone || customer?.phone || '').trim();
+    const customerName = (tx.customerName || customer?.name || 'Walk-in customer').trim();
+    if (!customerPhone) {
+      const msg = 'Customer WhatsApp number is missing, so invoice cannot be sent.';
+      setSendInvoiceMessage(msg);
+      setCheckoutError(msg);
+      return;
+    }
+
+    try {
+      setWaSendingStage('Preparing invoice data...');
+      const { profile } = loadData();
+      setWaSendingStage('Sending via Official WhatsApp...');
+      const result = await shareTransactionInvoiceViaMetaWhatsApp(
+        { ...tx, customerPhone, customerName },
+        customers,
+        profile,
+      );
+      const uid = auth?.currentUser?.uid || '';
+      await appendWhatsAppLog(uid, {
+        type: 'invoice',
+        customerId: tx.customerId || '',
+        customerName,
+        customerPhone,
+        invoiceId: tx.id,
+        invoiceNumber: ((tx as any).invoiceNumber || tx.invoiceNo || tx.id).toString(),
+        pdfUrl: '',
+        status: result.ok ? 'sent' : 'failed',
+        error: result.ok ? null : result.message,
+        sentAt: result.ok ? new Date().toISOString() : null,
+        createdBy: uid,
+        meta: {
+          provider: 'meta-cloud-api',
+          transactionId: tx.id,
+          whatsappMessageId: result.whatsappMessageId || null,
+          whatsappMediaId: result.whatsappMediaId || null,
+          backendUrl: result.backendUrl || String(import.meta.env.VITE_META_WHATSAPP_SERVER_URL || '').trim(),
+        },
+      });
+      setWaSendingStage(result.ok ? 'Message accepted by WhatsApp' : `Failed: ${result.message}`);
+      setSendInvoiceMessage(result.message);
+    } catch (error) {
+      const message = getFriendlyErrorMessage(error, 'sales.send_invoice_meta');
+      setWaSendingStage(`Failed: ${message}`);
+      setSendInvoiceMessage(message);
+    } finally {
+      setTimeout(() => setWaSendingStage(null), 1200);
     }
   };
 
@@ -2723,9 +2777,10 @@ export default function Sales() {
                       {sendInvoiceMessage && (
                         <div className="text-xs rounded border border-blue-200 bg-blue-50 text-blue-700 px-3 py-2">{sendInvoiceMessage}</div>
                       )}
-                      <div className="flex gap-3 pt-4">
+                      <div className="flex flex-col sm:flex-row gap-3 pt-4">
                           <Button variant="outline" className="flex-1" onClick={() => { setTransactionComplete(null); setTransactionCashDetails(null); setSendInvoiceMessage(null); }}>Close</Button>
                           <Button variant="outline" className="flex-1" onClick={() => transactionComplete && sendInvoicePreview(transactionComplete, 'manual')}><MessageCircle className="w-4 h-4 mr-2" /> Send Invoice</Button>
+                          <Button variant="outline" className="flex-1" onClick={() => transactionComplete && void sendInvoiceViaOfficialWhatsApp(transactionComplete)}>Send via Official WhatsApp</Button>
                           <Button className="flex-1" onClick={handlePrintReceipt}><Printer className="w-4 h-4 mr-2" /> Download</Button>
                       </div>
                   </CardContent>
