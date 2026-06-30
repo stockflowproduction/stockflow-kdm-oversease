@@ -117,7 +117,7 @@ const monthKeyOf = (iso: string) => {
 const getExpenseEffectiveDate = (expense: CanonicalExpense) => expense.effectiveAt || expense.createdAt;
 const formatINR = (value: number) => formatINRPrecise(value);
 const formatINRSummary = (value: number) => formatINRWhole(value);
-const PDF_CURRENCY_PREFIX = 'Rs. ';
+const PDF_CURRENCY_PREFIX = '';
 const PDF_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
 const PDF_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
 const formatPdfAmount = (value: number) => `${PDF_CURRENCY_PREFIX}${Number(value || 0).toLocaleString('en-IN', {
@@ -1568,7 +1568,7 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
           isSynthetic: true,
           sourceTxId: deleted.originalTransactionId,
           customer: deleted.customerName || '—',
-          notes: `Deleted ${deleted.type} • Reason: ${deleted.deleteReason || '—'}${deleted.deleteReasonNote ? ` • Note: ${deleted.deleteReasonNote}` : ''}${deleteCompensationAmount > 0 ? ` • Compensation: ${deleteCompensationMode || 'cash_refund'} ₹${formatINRPrecise(deleteCompensationAmount)}` : ''}`,
+          notes: `Deleted ${deleted.type} • Reason: ${deleted.deleteReason || '—'}${deleted.deleteReasonNote ? ` • Note: ${deleted.deleteReasonNote}` : ''}${deleteCompensationAmount > 0 ? ` • Compensation: ${deleteCompensationMode || 'cash_refund'} ${formatINRPrecise(deleteCompensationAmount)}` : ''}`,
           grossSales: saleReversal ? -amount : 0,
           salesReturn: returnReversal ? -amount : 0,
           netSales: saleReversal ? -amount : returnReversal ? amount : 0,
@@ -1667,7 +1667,7 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
           isSynthetic: false,
           sourceTxId: tx.id,
           customer: tx.customerName || 'Walk-in customer',
-          notes: `Cash ₹${settlement.cashPaid.toFixed(2)} • Online ₹${settlement.onlinePaid.toFixed(2)} • Credit Due ₹${settlement.creditDue.toFixed(2)}`,
+          notes: `Cash ${settlement.cashPaid.toFixed(2)} • Online ${settlement.onlinePaid.toFixed(2)} • Credit Due ${settlement.creditDue.toFixed(2)}`,
           grossSales: txAmount,
           salesReturn: 0,
           netSales: txAmount,
@@ -3406,7 +3406,7 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
 
     let y = 36;
     filteredExpenses.forEach((e, idx) => {
-      doc.text(`${idx + 1}. ${e.title} (${e.category}) - ₹${e.amount.toFixed(2)}`, 14, y);
+      doc.text(`${idx + 1}. ${e.title} (${e.category}) - ${e.amount.toFixed(2)}`, 14, y);
       y += 7;
       if (e.note) {
         doc.setTextColor(110);
@@ -3421,7 +3421,7 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
     });
 
     doc.setFontSize(12);
-    doc.text(`Total Expenses: ₹${expensesTotalForDate.toFixed(2)}`, 14, y + 8);
+    doc.text(`Total Expenses: ${expensesTotalForDate.toFixed(2)}`, 14, y + 8);
     doc.save(`expenses-${expenseDateFilter}.pdf`);
   };
 
@@ -3811,7 +3811,7 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
                       <Label>Enter opening amount</Label>
                       <div className="flex items-center gap-2">
                         <div className="flex w-full items-center rounded-xl border bg-background px-3">
-                          <span className="text-muted-foreground">₹</span>
+                          <span className="text-muted-foreground"></span>
                           <Input
                             type="text"
                             inputMode="numeric"
@@ -3843,7 +3843,7 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
                       <Label>Edit opening amount</Label>
                       <div className="flex items-center gap-2">
                         <div className="flex w-full items-center rounded-xl border bg-background px-3">
-                          <span className="text-muted-foreground">₹</span>
+                          <span className="text-muted-foreground"></span>
                           <Input type="text" inputMode="numeric" className="border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 outline-none" value={openingBalanceEditValue} onChange={e => setOpeningBalanceEditValue(e.target.value.replace(/[^\d]/g, ''))} placeholder="0" />
                         </div>
                         <Button size="sm" onClick={saveOpeningBalanceEdit}>Save</Button>
@@ -3878,7 +3878,7 @@ export default function Finance({ repairMode = false, initialTab = 'cash', locke
                               const qty = closingCounts[denom] || 0;
                               return (
                                 <div key={denom} className="flex items-center justify-between gap-1.5">
-                                  <div className="text-xs font-semibold min-w-[36px]">₹{denom}</div>
+                                  <div className="text-xs font-semibold min-w-[36px]">{denom}</div>
                                   <div className="flex items-center gap-1">
                                     <Button type="button" size="sm" variant="outline" className="h-7 w-7 px-0" onClick={() => updateClosingCount(denom, qty - 1)} disabled={qty <= 0}>-</Button>
                                     <Input

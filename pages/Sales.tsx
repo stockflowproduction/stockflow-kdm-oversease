@@ -142,7 +142,7 @@ const ProductGridItem: React.FC<{ product: Product, isReturnMode: boolean, cartQ
                 )}
 
                 <div className="absolute bottom-2 left-2 bg-black/70 backdrop-blur-sm text-white text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded-full shadow-sm">
-                    ₹{formatMoneyPrecise(product.sellPrice)}
+                    {formatMoneyPrecise(product.sellPrice)}
                 </div>
                 <div className="absolute bottom-2 right-2">
                     <Badge variant={isOutOfStock && !isReturnMode ? "outline" : "secondary"} className="text-[10px] h-5 bg-white/90 backdrop-blur-md shadow-sm border-0">
@@ -1027,7 +1027,7 @@ export default function Sales() {
       const splitTotal = roundMoneyWhole(settlementCashPaid + settlementOnlinePaid + creditDue);
       const splitMismatch = Math.abs(splitTotal - payableAfterCreditWhole) > 0.001;
       if (!isReturnMode && splitMismatch) {
-          setCheckoutError(`Payment split mismatch. Payable after store credit is ₹${formatMoneyWhole(payableAfterCreditWhole)}, but Cash + Online + Credit is ₹${formatMoneyWhole(splitTotal)}. Please adjust the split.`);
+          setCheckoutError(`Payment split mismatch. Payable after store credit is ${formatMoneyWhole(payableAfterCreditWhole)}, but Cash + Online + Credit is ${formatMoneyWhole(splitTotal)}. Please adjust the split.`);
           return;
       }
       if (!isReturnMode && creditDue > 0 && !finalCustomer) {
@@ -1780,7 +1780,7 @@ export default function Sales() {
                       <div className="text-xs font-semibold truncate">#{tx.id}</div>
                       <div className="font-semibold text-xs truncate">{tx.customerName || 'Walk-in customer'}</div>
                       <div className="text-xs font-semibold">Qty {totalQty}</div>
-                      <div className="text-xs font-semibold">₹{formatMoneyWhole(Math.abs(tx.total))}</div>
+                      <div className="text-xs font-semibold">{formatMoneyWhole(Math.abs(tx.total))}</div>
                       <Button size="sm" className="h-8 bg-orange-600 hover:bg-orange-700" onClick={() => openReturnPopup(tx.id)}>Make Return</Button>
                     </div>
                   );
@@ -1872,7 +1872,7 @@ export default function Sales() {
                   <div key={`${row.variant}-${row.color}-${idx}`} className={`grid grid-cols-[1fr_80px_90px_116px] items-center gap-3 border rounded-xl p-3 ${disabled ? 'opacity-60 bg-muted/40' : ''}`}>
                     <div className="font-semibold text-sm">{label}</div>
                     <div className="text-xs text-muted-foreground text-center">{isReturnMode ? 'Sold left' : 'Stock'}: {row.stock}</div>
-                    <div className={`text-sm font-semibold text-center ${isReturnMode ? 'text-orange-600' : ''}`}>₹{formatMoneyPrecise(row.sellPrice)}</div>
+                    <div className={`text-sm font-semibold text-center ${isReturnMode ? 'text-orange-600' : ''}`}>{formatMoneyPrecise(row.sellPrice)}</div>
                     <div className="flex items-center gap-2 justify-end">
                       <Button type="button" size="icon" variant="outline" className="h-7 w-7" disabled={disabled || row.qty <= 0} onClick={() => setVariantPicker(prev => ({ ...prev, rows: prev.rows.map((r, i) => i === idx ? { ...r, qty: Math.max(0, r.qty - 1) } : r) }))}><Minus className="w-3 h-3" /></Button>
                       <div className="w-8 text-center text-sm font-bold">{row.qty}</div>
@@ -1987,7 +1987,7 @@ export default function Sales() {
               <div className="space-y-1 min-w-0">
                 <p className="text-sm font-semibold truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
                 <p className="text-[11px] text-muted-foreground">
-                  Stock left: {Math.max(0, getLineAvailableStock(item, item.selectedVariant, item.selectedColor) + (isReturnMode ? item.quantity : -item.quantity))}{can('inventoryBuyPrice') ? ` · Buy: ₹${formatMoneyPrecise(item.buyPrice)}` : ''}
+                  Stock left: {Math.max(0, getLineAvailableStock(item, item.selectedVariant, item.selectedColor) + (isReturnMode ? item.quantity : -item.quantity))}{can('inventoryBuyPrice') ? ` · Buy: ${formatMoneyPrecise(item.buyPrice)}` : ''}
                 </p>
                 <div className="grid grid-cols-[92px_80px_1fr] gap-2 items-center">
                   <div className="flex items-center border rounded-md h-7 overflow-hidden">
@@ -1996,7 +1996,7 @@ export default function Sales() {
                     <button className="px-1.5 h-full border-l" onClick={() => updateQuantity(String(item.id), 1, item.selectedVariant, item.selectedColor)}><Plus className="w-3 h-3" /></button>
                   </div>
                   <Input className="h-7 text-xs" value={item.sellPrice ?? ''} type="number" onChange={(e) => updatePrice(String(item.id), e.target.value, item.selectedVariant, item.selectedColor)} />
-                  <p className="text-right font-bold text-sm">₹{formatMoneyPrecise(item.sellPrice * item.quantity)}</p>
+                  <p className="text-right font-bold text-sm">{formatMoneyPrecise(item.sellPrice * item.quantity)}</p>
                 </div>
               </div>
               <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => updateQuantity(String(item.id), -item.quantity, item.selectedVariant, item.selectedColor)}>
@@ -2016,14 +2016,14 @@ export default function Sales() {
               {transactionSyncStatus.phase === 'pending' ? 'Pending:' : transactionSyncStatus.phase === 'committing' ? 'Committing:' : transactionSyncStatus.phase === 'success' ? 'Committed:' : 'Commit failed:'} {transactionSyncStatus.message}
             </div>
           )}
-          <div className="flex justify-between text-sm"><span className="text-muted-foreground">Subtotal</span><span>₹{formatMoneyPrecise(subtotal)}</span></div>
-          {totalDiscount > 0 && <div className="flex justify-between text-sm text-green-600"><span>Discount</span><span>-₹{formatMoneyPrecise(totalDiscount)}</span></div>}
+          <div className="flex justify-between text-sm"><span className="text-muted-foreground">Subtotal</span><span>{formatMoneyPrecise(subtotal)}</span></div>
+          {totalDiscount > 0 && <div className="flex justify-between text-sm text-green-600"><span>Discount</span><span>-{formatMoneyPrecise(totalDiscount)}</span></div>}
           <button className="w-full flex justify-between text-sm p-1 rounded hover:bg-muted" onClick={() => setIsTaxModalOpen(true)}>
             <span className="text-muted-foreground">Tax ({selectedTax.label})</span>
-            <span>₹{formatMoneyPrecise(taxVal)}</span>
+            <span>{formatMoneyPrecise(taxVal)}</span>
           </button>
           <div className="h-px bg-border" />
-          <div className="flex justify-between items-center"><span className="text-lg font-bold">Total</span><span className={`text-xl font-extrabold ${isReturnMode ? 'text-orange-600' : ''}`}>{isReturnMode ? '-' : ''}₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+          <div className="flex justify-between items-center"><span className="text-lg font-bold">Total</span><span className={`text-xl font-extrabold ${isReturnMode ? 'text-orange-600' : ''}`}>{isReturnMode ? '-' : ''}{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
           <Button className={`w-full h-10 font-semibold ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''}`} disabled={cart.length === 0} onClick={() => initiateCheckout()}>
             {isReturnMode ? 'Create Return Invoice' : 'Create Invoice'}
           </Button>
@@ -2082,33 +2082,33 @@ export default function Sales() {
                 </div>
               </div>
               <div className="rounded border bg-white p-2 text-xs space-y-1">
-                <div className="flex justify-between"><span>Cash Tendered</span><span className="font-semibold">₹{formatMoneyPrecise(cashPaidValue)}</span></div>
-                <div className="flex justify-between"><span>Applied to Sale</span><span className="font-semibold">₹{formatMoneyPrecise(cashAppliedToSaleValue)}</span></div>
+                <div className="flex justify-between"><span>Cash Tendered</span><span className="font-semibold">{formatMoneyPrecise(cashPaidValue)}</span></div>
+                <div className="flex justify-between"><span>Applied to Sale</span><span className="font-semibold">{formatMoneyPrecise(cashAppliedToSaleValue)}</span></div>
                 {cashChangeValue > 0 && (
-                  <div className="flex justify-between rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"><span>Change Given</span><span>₹{formatMoneyPrecise(cashChangeValue)}</span></div>
+                  <div className="flex justify-between rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"><span>Change Given</span><span>{formatMoneyPrecise(cashChangeValue)}</span></div>
                 )}
                 {storeCreditToCreate > 0 && (
-                  <div className="flex justify-between rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"><span>Saved as Store Credit</span><span>₹{formatMoneyPrecise(storeCreditToCreate)}</span></div>
+                  <div className="flex justify-between rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"><span>Saved as Store Credit</span><span>{formatMoneyPrecise(storeCreditToCreate)}</span></div>
                 )}
               </div>
               <div className="text-xs space-y-1 border-t pt-2">
-                <div className="flex justify-between"><span>Original Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
-                <div className="flex justify-between"><span>Store Credit Used</span><span>₹{formatMoneyPrecise(storeCreditUsed)}</span></div>
-                <div className="flex justify-between"><span>Actual Cash Applied</span><span>₹{formatMoneyWhole(cashAppliedToSaleValue)}</span></div>
-                <div className="flex justify-between"><span>Online Applied</span><span>₹{formatMoneyWhole(onlineAppliedValue)}</span></div>
-                <div className="flex justify-between font-semibold"><span>Credit Due</span><span>₹{formatMoneyWhole(autoCreditDueValue)}</span></div>
-                <div className="flex justify-between font-semibold"><span>Total Settled</span><span>₹{formatMoneyWhole(totalSettledValue)}</span></div>
+                <div className="flex justify-between"><span>Original Invoice Total</span><span>{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+                <div className="flex justify-between"><span>Store Credit Used</span><span>{formatMoneyPrecise(storeCreditUsed)}</span></div>
+                <div className="flex justify-between"><span>Actual Cash Applied</span><span>{formatMoneyWhole(cashAppliedToSaleValue)}</span></div>
+                <div className="flex justify-between"><span>Online Applied</span><span>{formatMoneyWhole(onlineAppliedValue)}</span></div>
+                <div className="flex justify-between font-semibold"><span>Credit Due</span><span>{formatMoneyWhole(autoCreditDueValue)}</span></div>
+                <div className="flex justify-between font-semibold"><span>Total Settled</span><span>{formatMoneyWhole(totalSettledValue)}</span></div>
 
                 {cashChangeRawValue > 0 && resolvedSelectedCustomer && (
                   <div className="mt-2 rounded border border-emerald-200 bg-emerald-50 p-2">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium text-emerald-800">
-                        Change Given ₹{formatMoneyPrecise(cashChangeValue)}
+                        Change Given {formatMoneyPrecise(cashChangeValue)}
                       </span>
                     </div>
                     <div className="mt-1 space-y-1 text-xs">
-                      <div className="flex items-center justify-between"><span>Cash tendered above sale payable</span><span className="font-semibold">₹{formatMoneyPrecise(cashChangeRawValue)}</span></div>
-                      <div className="flex items-center justify-between"><span>Saved as store credit</span><span className="font-semibold text-emerald-700">₹{formatMoneyPrecise(storeCreditToCreate)}</span></div>
+                      <div className="flex items-center justify-between"><span>Cash tendered above sale payable</span><span className="font-semibold">{formatMoneyPrecise(cashChangeRawValue)}</span></div>
+                      <div className="flex items-center justify-between"><span>Saved as store credit</span><span className="font-semibold text-emerald-700">{formatMoneyPrecise(storeCreditToCreate)}</span></div>
                     </div>
                     <label className="mt-2 flex items-center gap-2 text-sm">
                       <input
@@ -2143,7 +2143,7 @@ export default function Sales() {
                         <p className="text-xs text-muted-foreground">{selectedCustomerDisplayRecord?.phone || (selectedCustomerId || '')}</p>
                         {selectedCustomerDue > 0 && (
                           <p className="mt-1 text-xs font-semibold text-orange-700">
-                            Existing Due: ₹{formatMoneyPrecise(selectedCustomerDue)}
+                            Existing Due: {formatMoneyPrecise(selectedCustomerDue)}
                           </p>
                         )}
                       </div>
@@ -2171,9 +2171,9 @@ export default function Sales() {
             {!isReturnMode && hasResolvedSelectedCustomer && (
               <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
                 <div className="text-xs space-y-1">
-                  <div className="flex items-center justify-between"><span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span><span className="font-bold">₹{formatMoneyPrecise(normalizedAvailableStoreCredit)}</span></div>
-                  <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to this invoice</span><span className="font-semibold">₹{formatMoneyPrecise(appliedStoreCredit)}</span></div>
-                  <div className="flex items-center justify-between"><span className="text-muted-foreground">Remaining after invoice</span><span className="font-semibold text-emerald-700">₹{formatMoneyPrecise(remainingStoreCreditAfterInvoice)}</span></div>
+                  <div className="flex items-center justify-between"><span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span><span className="font-bold">{formatMoneyPrecise(normalizedAvailableStoreCredit)}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to this invoice</span><span className="font-semibold">{formatMoneyPrecise(appliedStoreCredit)}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-muted-foreground">Remaining after invoice</span><span className="font-semibold text-emerald-700">{formatMoneyPrecise(remainingStoreCreditAfterInvoice)}</span></div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <Button size="sm" variant={useStoreCreditApplied ? 'default' : 'outline'} disabled={maxUsableStoreCredit <= 0} onClick={handleToggleStoreCredit}>
@@ -2187,18 +2187,18 @@ export default function Sales() {
                 </div>
                 {useStoreCreditApplied && (
                   <div className="space-y-1">
-                    <Label className="text-[11px] font-bold uppercase text-muted-foreground">Store Credit to Apply (Max ₹{formatMoneyPrecise(maxUsableStoreCredit)})</Label>
+                    <Label className="text-[11px] font-bold uppercase text-muted-foreground">Store Credit to Apply (Max {formatMoneyPrecise(maxUsableStoreCredit)})</Label>
                     <Input type="number" min="0" step="0.01" value={storeCreditInput} onChange={(e) => setStoreCreditInput(e.target.value)} />
                   </div>
                 )}
                 <div className="text-xs space-y-1 border-t pt-2">
-                  <div className="flex justify-between"><span>Original Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
-                  <div className="flex justify-between"><span>Store Credit Used</span><span>-₹{formatMoneyPrecise(storeCreditUsed)}</span></div>
-                  <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
-                  <div className="flex justify-between"><span>Actual Cash Applied</span><span>₹{formatMoneyWhole(cashAppliedToSaleValue)}</span></div>
-                  <div className="flex justify-between"><span>Online Applied</span><span>₹{formatMoneyWhole(onlineAppliedValue)}</span></div>
-                  <div className="flex justify-between font-semibold"><span>Total Settled</span><span>₹{formatMoneyWhole(totalSettledValue)}</span></div>
-                  <div className={`flex justify-between ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}><span>Credit Due to Create</span><span>₹{formatMoneyWhole(autoCreditDueValue)}</span></div>
+                  <div className="flex justify-between"><span>Original Invoice Total</span><span>{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+                  <div className="flex justify-between"><span>Store Credit Used</span><span>-{formatMoneyPrecise(storeCreditUsed)}</span></div>
+                  <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
+                  <div className="flex justify-between"><span>Actual Cash Applied</span><span>{formatMoneyWhole(cashAppliedToSaleValue)}</span></div>
+                  <div className="flex justify-between"><span>Online Applied</span><span>{formatMoneyWhole(onlineAppliedValue)}</span></div>
+                  <div className="flex justify-between font-semibold"><span>Total Settled</span><span>{formatMoneyWhole(totalSettledValue)}</span></div>
+                  <div className={`flex justify-between ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}><span>Credit Due to Create</span><span>{formatMoneyWhole(autoCreditDueValue)}</span></div>
                 </div>
               </div>
             )}
@@ -2207,8 +2207,8 @@ export default function Sales() {
             <Button className="h-12 text-base font-bold" onClick={() => void completeCheckout()} disabled={transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing'}>
               {transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing' ? 'Processing…' : (
                 <span className="flex flex-col items-center leading-tight">
-                  <span>Confirm & Pay ₹{formatMoneyWhole(tenderedPaymentAppliedValue)}</span>
-                  {cashChangeValue > 0 && <span className="text-[10px] font-semibold opacity-90">Change to give: ₹{formatMoneyPrecise(cashChangeValue)}</span>}
+                  <span>Confirm & Pay {formatMoneyWhole(tenderedPaymentAppliedValue)}</span>
+                  {cashChangeValue > 0 && <span className="text-[10px] font-semibold opacity-90">Change to give: {formatMoneyPrecise(cashChangeValue)}</span>}
                 </span>
               )}
             </Button>
@@ -2216,7 +2216,7 @@ export default function Sales() {
               {transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing' ? 'Processingâ€¦' : (
                 <span className="flex flex-col items-center leading-tight">
                   <span>Pay & Print</span>
-                  <span className="text-[10px] font-semibold opacity-90">₹{formatMoneyWhole(tenderedPaymentAppliedValue)}</span>
+                  <span className="text-[10px] font-semibold opacity-90">{formatMoneyWhole(tenderedPaymentAppliedValue)}</span>
                 </span>
               )}
             </Button>
@@ -2238,13 +2238,13 @@ export default function Sales() {
               <div className="space-y-1.5 text-[13px] rounded-lg border p-2.5 bg-muted/10">
                 <div className="grid gap-1.5 md:grid-cols-5">
                 <div><span className="text-muted-foreground">Phone:</span> <span className="font-semibold">{selectedReturnCustomer?.phone || '—'}</span></div>
-                <div><span className="text-muted-foreground">Due:</span> <span className="font-semibold">₹{formatMoneyPrecise(returnPreview.dueBefore)}</span></div>
-                <div><span className="text-muted-foreground">Store Credit:</span> <span className="font-semibold">₹{formatMoneyPrecise(returnPreview.storeCreditBefore)}</span></div>
-                <div><span className="text-muted-foreground">Original Total:</span> <span className="font-semibold">₹{formatMoneyPrecise(Math.abs(selectedReturnTx.total || 0))}</span></div>
+                <div><span className="text-muted-foreground">Due:</span> <span className="font-semibold">{formatMoneyPrecise(returnPreview.dueBefore)}</span></div>
+                <div><span className="text-muted-foreground">Store Credit:</span> <span className="font-semibold">{formatMoneyPrecise(returnPreview.storeCreditBefore)}</span></div>
+                <div><span className="text-muted-foreground">Original Total:</span> <span className="font-semibold">{formatMoneyPrecise(Math.abs(selectedReturnTx.total || 0))}</span></div>
                 <div><span className="text-muted-foreground">Total Qty:</span> <span className="font-semibold">{selectedReturnSoldQty}</span></div>
                 </div>
                 <div className="grid md:grid-cols-1 items-center">
-                  <div><span className="text-muted-foreground">Settlement:</span> <span className="font-semibold">Cash ₹{formatMoneyPrecise(Number(selectedSettlement.cashPaid || 0))} • Online ₹{formatMoneyPrecise(Number(selectedSettlement.onlinePaid || 0))} • Credit ₹{formatMoneyPrecise(Number(selectedSettlement.creditDue || 0))}</span></div>
+                  <div><span className="text-muted-foreground">Settlement:</span> <span className="font-semibold">Cash {formatMoneyPrecise(Number(selectedSettlement.cashPaid || 0))} • Online {formatMoneyPrecise(Number(selectedSettlement.onlinePaid || 0))} • Credit {formatMoneyPrecise(Number(selectedSettlement.creditDue || 0))}</span></div>
                 </div>
               </div>
 
@@ -2264,7 +2264,7 @@ export default function Sales() {
                           <div className="truncate">{line.name}</div>
                           {variantParts && <div className="text-[11px] text-muted-foreground truncate">{variantParts}</div>}
                         </div>
-                        <div className="text-right font-semibold">₹{formatMoneyPrecise(line.unitPrice)}</div>
+                        <div className="text-right font-semibold">{formatMoneyPrecise(line.unitPrice)}</div>
                         <div className="text-right text-muted-foreground">Sold: {line.originalQty}<span className="block text-[10px]">Ret: {line.returnedQty} • Left: {line.returnableQty}</span></div>
                         <div>
                           <Input
@@ -2280,7 +2280,7 @@ export default function Sales() {
                             }}
                           />
                         </div>
-                        <div className="text-right font-semibold">₹{formatMoneyPrecise(line.selectedSubtotal)}</div>
+                        <div className="text-right font-semibold">{formatMoneyPrecise(line.selectedSubtotal)}</div>
                       </div>
                     </div>
                   )})}
@@ -2291,7 +2291,7 @@ export default function Sales() {
                     <div className="rounded-md border p-2.5 bg-amber-50/50 space-y-2 text-[13px]">
                       <div className="font-semibold text-[14px]">Refund Choice Needed</div>
                       <p className="text-muted-foreground">
-                        After reducing due, ₹{formatMoneyPrecise(refundableAfterDue)} remains refundable. Choose what to do with this amount.
+                        After reducing due, {formatMoneyPrecise(refundableAfterDue)} remains refundable. Choose what to do with this amount.
                       </p>
                       <div className="grid grid-cols-1 gap-2">
                         <Button
@@ -2299,14 +2299,14 @@ export default function Sales() {
                           size="sm"
                           onClick={() => setMixedReturnChoice('refund_paid_method')}
                         >
-                          Refund to {originalPaidMethodKind === 'online' ? 'Online' : 'Cash'} ₹{formatMoneyPrecise(refundableAfterDue)}
+                          Refund to {originalPaidMethodKind === 'online' ? 'Online' : 'Cash'} {formatMoneyPrecise(refundableAfterDue)}
                         </Button>
                         <Button
                           variant={mixedReturnChoice === 'store_credit' ? 'default' : 'outline'}
                           size="sm"
                           onClick={() => setMixedReturnChoice('store_credit')}
                         >
-                          Save as Store Credit ₹{formatMoneyPrecise(refundableAfterDue)}
+                          Save as Store Credit {formatMoneyPrecise(refundableAfterDue)}
                         </Button>
                       </div>
                     </div>
@@ -2314,17 +2314,17 @@ export default function Sales() {
                   <div className="rounded-md border p-2.5 bg-orange-50/40 space-y-1.5 text-[13px]">
                     <div className="font-semibold text-[14px]">Return Preview Summary</div>
                     <div className="space-y-1.5">
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Due Before → After</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.dueBefore)} → ₹{formatMoneyPrecise(returnPreview.dueAfter)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit Before → After</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.storeCreditBefore)} → ₹{formatMoneyPrecise(returnPreview.storeCreditAfter)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Due Reduction</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.dueReduction)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Cash Outflow</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.cashRefund)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Online Outflow</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.onlineRefund)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit to be Created</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.storeCreditCreated)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Due Before → After</span><span className="font-semibold">{formatMoneyPrecise(returnPreview.dueBefore)} → {formatMoneyPrecise(returnPreview.dueAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit Before → After</span><span className="font-semibold">{formatMoneyPrecise(returnPreview.storeCreditBefore)} → {formatMoneyPrecise(returnPreview.storeCreditAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Due Reduction</span><span className="font-semibold">{formatMoneyPrecise(returnPreview.dueReduction)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Cash Outflow</span><span className="font-semibold">{formatMoneyPrecise(returnPreview.cashRefund)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Estimated Online Outflow</span><span className="font-semibold">{formatMoneyPrecise(returnPreview.onlineRefund)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit to be Created</span><span className="font-semibold">{formatMoneyPrecise(returnPreview.storeCreditCreated)}</span></div>
                     </div>
                   </div>
                   <div className="rounded-md border p-2.5 text-[14px] space-y-1.5">
-                    <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.subtotal)}</span></div>
-                    <div className="flex justify-between"><span className="text-muted-foreground">Grand Total</span><span className="font-semibold">₹{formatMoneyPrecise(returnPreview.total)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="font-semibold">{formatMoneyPrecise(returnPreview.subtotal)}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Grand Total</span><span className="font-semibold">{formatMoneyPrecise(returnPreview.total)}</span></div>
                   </div>
                 </div>
               </div>
@@ -2441,34 +2441,34 @@ export default function Sales() {
                       </div>
                     </div>
                     <div className="rounded border bg-white p-2 text-xs space-y-1">
-                      <div className="flex justify-between"><span>Cash Tendered</span><span className="font-semibold">₹{formatMoneyPrecise(cashPaidValue)}</span></div>
-                      <div className="flex justify-between"><span>Applied to Sale</span><span className="font-semibold">₹{formatMoneyPrecise(cashAppliedToSaleValue)}</span></div>
+                      <div className="flex justify-between"><span>Cash Tendered</span><span className="font-semibold">{formatMoneyPrecise(cashPaidValue)}</span></div>
+                      <div className="flex justify-between"><span>Applied to Sale</span><span className="font-semibold">{formatMoneyPrecise(cashAppliedToSaleValue)}</span></div>
                       {cashChangeValue > 0 && (
-                        <div className="flex justify-between rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"><span>Change Given</span><span>₹{formatMoneyPrecise(cashChangeValue)}</span></div>
+                        <div className="flex justify-between rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"><span>Change Given</span><span>{formatMoneyPrecise(cashChangeValue)}</span></div>
                       )}
                       {storeCreditToCreate > 0 && (
-                        <div className="flex justify-between rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"><span>Saved as Store Credit</span><span>₹{formatMoneyPrecise(storeCreditToCreate)}</span></div>
+                        <div className="flex justify-between rounded-md bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"><span>Saved as Store Credit</span><span>{formatMoneyPrecise(storeCreditToCreate)}</span></div>
                       )}
                     </div>
                     <div className="text-xs space-y-1 border-t pt-2">
-                      <div className="flex justify-between"><span>Original Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
-                      <div className="flex justify-between"><span>Store Credit Used</span><span>₹{formatMoneyPrecise(storeCreditUsed)}</span></div>
-                      <div className="flex justify-between"><span>Actual Cash Applied</span><span>₹{formatMoneyWhole(cashAppliedToSaleValue)}</span></div>
-                      <div className="flex justify-between"><span>Online Applied</span><span>₹{formatMoneyWhole(onlineAppliedValue)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Credit Due</span><span>₹{formatMoneyWhole(autoCreditDueValue)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Total Settled</span><span>₹{formatMoneyWhole(totalSettledValue)}</span></div>
+                      <div className="flex justify-between"><span>Original Invoice Total</span><span>{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+                      <div className="flex justify-between"><span>Store Credit Used</span><span>{formatMoneyPrecise(storeCreditUsed)}</span></div>
+                      <div className="flex justify-between"><span>Actual Cash Applied</span><span>{formatMoneyWhole(cashAppliedToSaleValue)}</span></div>
+                      <div className="flex justify-between"><span>Online Applied</span><span>{formatMoneyWhole(onlineAppliedValue)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Credit Due</span><span>{formatMoneyWhole(autoCreditDueValue)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Total Settled</span><span>{formatMoneyWhole(totalSettledValue)}</span></div>
 
 
                 {cashChangeRawValue > 0 && resolvedSelectedCustomer && (
                   <div className="mt-2 rounded border border-emerald-200 bg-emerald-50 p-2">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium text-emerald-800">
-                        Change Given ₹{formatMoneyPrecise(cashChangeValue)}
+                        Change Given {formatMoneyPrecise(cashChangeValue)}
                       </span>
                     </div>
                     <div className="mt-1 space-y-1 text-xs">
-                      <div className="flex items-center justify-between"><span>Cash tendered above sale payable</span><span className="font-semibold">₹{formatMoneyPrecise(cashChangeRawValue)}</span></div>
-                      <div className="flex items-center justify-between"><span>Saved as store credit</span><span className="font-semibold text-emerald-700">₹{formatMoneyPrecise(storeCreditToCreate)}</span></div>
+                      <div className="flex items-center justify-between"><span>Cash tendered above sale payable</span><span className="font-semibold">{formatMoneyPrecise(cashChangeRawValue)}</span></div>
+                      <div className="flex items-center justify-between"><span>Saved as store credit</span><span className="font-semibold text-emerald-700">{formatMoneyPrecise(storeCreditToCreate)}</span></div>
                     </div>
                     <label className="mt-2 flex items-center gap-2 text-sm">
                       <input
@@ -2510,7 +2510,7 @@ export default function Sales() {
                             <p className="text-xs text-muted-foreground">{selectedCustomerDisplayRecord?.phone || (selectedCustomerId || '')}</p>
                             {selectedCustomerDue > 0 && (
                               <p className="mt-1 text-xs font-semibold text-orange-700">
-                                Existing Due: ₹{formatMoneyPrecise(selectedCustomerDue)}
+                                Existing Due: {formatMoneyPrecise(selectedCustomerDue)}
                               </p>
                             )}
                           </div>
@@ -2574,9 +2574,9 @@ export default function Sales() {
                 {!isReturnMode && hasResolvedSelectedCustomer && (
                   <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
                     <div className="text-xs space-y-1">
-                      <div className="flex items-center justify-between"><span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span><span className="font-bold">₹{formatMoneyPrecise(normalizedAvailableStoreCredit)}</span></div>
-                      <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to this invoice</span><span className="font-semibold">₹{formatMoneyPrecise(appliedStoreCredit)}</span></div>
-                      <div className="flex items-center justify-between"><span className="text-muted-foreground">Remaining after invoice</span><span className="font-semibold text-emerald-700">₹{formatMoneyPrecise(remainingStoreCreditAfterInvoice)}</span></div>
+                      <div className="flex items-center justify-between"><span className="font-semibold text-muted-foreground uppercase">Available Store Credit</span><span className="font-bold">{formatMoneyPrecise(normalizedAvailableStoreCredit)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-muted-foreground">Applied to this invoice</span><span className="font-semibold">{formatMoneyPrecise(appliedStoreCredit)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-muted-foreground">Remaining after invoice</span><span className="font-semibold text-emerald-700">{formatMoneyPrecise(remainingStoreCreditAfterInvoice)}</span></div>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <Button size="sm" variant={useStoreCreditApplied ? 'default' : 'outline'} disabled={maxUsableStoreCredit <= 0} onClick={handleToggleStoreCredit}>
@@ -2590,18 +2590,18 @@ export default function Sales() {
                     </div>
                     {useStoreCreditApplied && (
                       <div className="space-y-1">
-                        <Label className="text-[11px] font-bold uppercase text-muted-foreground">Store Credit to Apply (Max ₹{formatMoneyPrecise(maxUsableStoreCredit)})</Label>
+                        <Label className="text-[11px] font-bold uppercase text-muted-foreground">Store Credit to Apply (Max {formatMoneyPrecise(maxUsableStoreCredit)})</Label>
                         <Input type="number" min="0" step="0.01" value={storeCreditInput} onChange={(e) => setStoreCreditInput(e.target.value)} />
                       </div>
                     )}
                     <div className="text-xs space-y-1 border-t pt-2">
-                      <div className="flex justify-between"><span>Original Invoice Total</span><span>₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
-                      <div className="flex justify-between"><span>Store Credit Used</span><span>-₹{formatMoneyPrecise(storeCreditUsed)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>₹{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
-                      <div className="flex justify-between"><span>Actual Cash Applied</span><span>₹{formatMoneyWhole(cashAppliedToSaleValue)}</span></div>
-                      <div className="flex justify-between"><span>Online Applied</span><span>₹{formatMoneyWhole(onlineAppliedValue)}</span></div>
-                      <div className="flex justify-between font-semibold"><span>Total Settled</span><span>₹{formatMoneyWhole(totalSettledValue)}</span></div>
-                      <div className={`flex justify-between ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}><span>Credit Due to Create</span><span>₹{formatMoneyWhole(autoCreditDueValue)}</span></div>
+                      <div className="flex justify-between"><span>Original Invoice Total</span><span>{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+                      <div className="flex justify-between"><span>Store Credit Used</span><span>-{formatMoneyPrecise(storeCreditUsed)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Remaining Payable</span><span>{formatMoneyWhole(checkoutPreview.remainingPayableWhole)}</span></div>
+                      <div className="flex justify-between"><span>Actual Cash Applied</span><span>{formatMoneyWhole(cashAppliedToSaleValue)}</span></div>
+                      <div className="flex justify-between"><span>Online Applied</span><span>{formatMoneyWhole(onlineAppliedValue)}</span></div>
+                      <div className="flex justify-between font-semibold"><span>Total Settled</span><span>{formatMoneyWhole(totalSettledValue)}</span></div>
+                      <div className={`flex justify-between ${getPaymentStatusColorClass('credit due').replace('bg-orange-50 border-orange-200 ', '')}`}><span>Credit Due to Create</span><span>{formatMoneyWhole(autoCreditDueValue)}</span></div>
                     </div>
                   </div>
                 )}
@@ -2628,8 +2628,8 @@ export default function Sales() {
                   <Button className={`h-12 text-base font-bold ${isReturnMode ? 'bg-orange-600 hover:bg-orange-700' : ''}`} onClick={() => void completeCheckout()} disabled={transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing'}>
                     {transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing' ? 'Processing…' : (
                       <span className="flex flex-col items-center leading-tight">
-                        <span>Confirm & Pay ₹{formatMoneyWhole(tenderedPaymentAppliedValue)}</span>
-                        {cashChangeValue > 0 && <span className="text-[10px] font-semibold opacity-90">Change to give: ₹{formatMoneyPrecise(cashChangeValue)}</span>}
+                        <span>Confirm & Pay {formatMoneyWhole(tenderedPaymentAppliedValue)}</span>
+                        {cashChangeValue > 0 && <span className="text-[10px] font-semibold opacity-90">Change to give: {formatMoneyPrecise(cashChangeValue)}</span>}
                       </span>
                     )}
                   </Button>
@@ -2637,7 +2637,7 @@ export default function Sales() {
                     {transactionSyncStatus.phase === 'pending' || transactionSyncStatus.phase === 'committing' ? 'Processingâ€¦' : (
                       <span className="flex flex-col items-center leading-tight">
                         <span>Pay & Print</span>
-                        <span className="text-[10px] font-semibold opacity-90">₹{formatMoneyWhole(tenderedPaymentAppliedValue)}</span>
+                        <span className="text-[10px] font-semibold opacity-90">{formatMoneyWhole(tenderedPaymentAppliedValue)}</span>
                       </span>
                     )}
                   </Button>
@@ -2660,16 +2660,16 @@ export default function Sales() {
                       </div>
                       <p className="text-sm font-semibold truncate">{formatItemNameWithVariant(item.name, item.selectedVariant, item.selectedColor)}</p>
                       <p className="text-center text-sm">{item.quantity}</p>
-                      <p className="text-right text-sm">₹{formatMoneyPrecise(item.sellPrice)}</p>
-                      <p className={`text-right font-bold text-sm ${isReturnMode ? 'text-orange-600' : ''}`}>₹{formatMoneyPrecise(item.sellPrice * item.quantity)}</p>
+                      <p className="text-right text-sm">{formatMoneyPrecise(item.sellPrice)}</p>
+                      <p className={`text-right font-bold text-sm ${isReturnMode ? 'text-orange-600' : ''}`}>{formatMoneyPrecise(item.sellPrice * item.quantity)}</p>
                     </div>
                   ))}
                 </div>
                 <div className="px-4 py-3 border-t bg-muted/20 space-y-1.5">
-                  <div className="flex justify-between text-sm"><span>Sub Total</span><span>₹{formatMoneyPrecise(subtotal)}</span></div>
-                  <div className="flex justify-between text-sm"><span>Tax ({selectedTax.label})</span><span>₹{formatMoneyPrecise(taxVal)}</span></div>
+                  <div className="flex justify-between text-sm"><span>Sub Total</span><span>{formatMoneyPrecise(subtotal)}</span></div>
+                  <div className="flex justify-between text-sm"><span>Tax ({selectedTax.label})</span><span>{formatMoneyPrecise(taxVal)}</span></div>
                   <div className="h-px bg-border my-1" />
-                  <div className="flex justify-between text-base font-bold"><span>Total</span><span>{isReturnMode ? '-' : ''}₹{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
+                  <div className="flex justify-between text-base font-bold"><span>Total</span><span>{isReturnMode ? '-' : ''}{formatMoneyWhole(Math.abs(grandTotal))}</span></div>
                 </div>
               </div>
             </CardContent>

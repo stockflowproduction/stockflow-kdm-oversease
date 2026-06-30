@@ -150,7 +150,7 @@ export default function Transactions() {
         customerName: payment.partyName || 'Supplier',
         paymentMethod: method,
         receiptNo: payment.voucherNo || undefined,
-        notes: `Supplier Payment Ã¢â‚¬â€ ${payment.partyName || 'Supplier'} Ã¢â‚¬â€ ${method.toLowerCase()}${payableReduced > 0 ? ` Ã¢â‚¬Â¢ Payable reduced Ã¢â€šÂ¹${formatMoneyWhole(payableReduced)}` : ''}${partyCreditAdded > 0 ? ` Ã¢â‚¬Â¢ Party credit added Ã¢â€šÂ¹${formatMoneyWhole(partyCreditAdded)}` : ''}${payment.note ? ` Ã¢â‚¬Â¢ Note: ${payment.note}` : ''}`,
+        notes: `Supplier Payment Ã¢â‚¬â€ ${payment.partyName || 'Supplier'} Ã¢â‚¬â€ ${method.toLowerCase()}${payableReduced > 0 ? ` Ã¢â‚¬Â¢ Payable reduced ${formatMoneyWhole(payableReduced)}` : ''}${partyCreditAdded > 0 ? ` Ã¢â‚¬Â¢ Party credit added ${formatMoneyWhole(partyCreditAdded)}` : ''}${payment.note ? ` Ã¢â‚¬Â¢ Note: ${payment.note}` : ''}`,
         sourceTransactionDate: selectedDate || undefined,
       } as Transaction;
     }), [supplierPayments]);
@@ -187,8 +187,8 @@ export default function Transactions() {
         customerName,
         paymentMethod: 'Credit',
         notes: isCompleted
-          ? `Legacy paid order Ã¢â‚¬Â¢ Product: ${order.productName || 'Unknown Product'} Ã¢â‚¬Â¢ Total: Ã¢â€šÂ¹${formatMoneyWhole(total)} Ã¢â‚¬Â¢ Paid: Ã¢â€šÂ¹${formatMoneyWhole(advancePaid)} Ã¢â‚¬Â¢ Remaining: Ã¢â€šÂ¹${formatMoneyWhole(remaining)} Ã¢â‚¬Â¢ Legacy order Ã¢â‚¬â€ payment split not available. Ã¢â‚¬Â¢ Ref: ${order.id}`
-          : `Advance Customer Order Ã¢â‚¬Â¢ Product: ${order.productName || 'Unknown Product'} Ã¢â‚¬Â¢ Total: Ã¢â€šÂ¹${formatMoneyWhole(total)} Ã¢â‚¬Â¢ Advance Paid: Ã¢â€šÂ¹${formatMoneyWhole(advancePaid)} Ã¢â‚¬Â¢ Remaining: Ã¢â€šÂ¹${formatMoneyWhole(remaining)} Ã¢â‚¬Â¢ Ref: ${order.id}`,
+          ? `Legacy paid order Ã¢â‚¬Â¢ Product: ${order.productName || 'Unknown Product'} Ã¢â‚¬Â¢ Total: ${formatMoneyWhole(total)} Ã¢â‚¬Â¢ Paid: ${formatMoneyWhole(advancePaid)} Ã¢â‚¬Â¢ Remaining: ${formatMoneyWhole(remaining)} Ã¢â‚¬Â¢ Legacy order Ã¢â‚¬â€ payment split not available. Ã¢â‚¬Â¢ Ref: ${order.id}`
+          : `Advance Customer Order Ã¢â‚¬Â¢ Product: ${order.productName || 'Unknown Product'} Ã¢â‚¬Â¢ Total: ${formatMoneyWhole(total)} Ã¢â‚¬Â¢ Advance Paid: ${formatMoneyWhole(advancePaid)} Ã¢â‚¬Â¢ Remaining: ${formatMoneyWhole(remaining)} Ã¢â‚¬Â¢ Ref: ${order.id}`,
         source: 'historical_import',
         isHistorical: true,
         legacyRef: order.id,
@@ -205,7 +205,7 @@ export default function Transactions() {
       customerId: order.customerId,
       customerName,
       paymentMethod: initial.some((p) => String(p.method || '').toLowerCase().includes('cash')) && initial.some((p) => String(p.method || '').toLowerCase().includes('online')) ? 'Online' : (initial[0]?.method as any) || 'Advance',
-      notes: `Advance Customer Order Ã¢â‚¬Â¢ Product: ${order.productName || 'Unknown Product'} Ã¢â‚¬Â¢ Total: Ã¢â€šÂ¹${formatMoneyWhole(order.totalCost || 0)} Ã¢â‚¬Â¢ Cash: Ã¢â€šÂ¹${formatMoneyWhole(initial.filter((p) => String(p.method || '').toLowerCase().includes('cash')).reduce((s, p) => s + Number(p.amount || 0), 0))} Ã¢â‚¬Â¢ Online: Ã¢â€šÂ¹${formatMoneyWhole(initial.filter((p) => String(p.method || '').toLowerCase().includes('online')).reduce((s, p) => s + Number(p.amount || 0), 0))} Ã¢â‚¬Â¢ Advance: Ã¢â€šÂ¹${formatMoneyWhole(initial.reduce((s, p) => s + Number(p.amount || 0), 0))} Ã¢â‚¬Â¢ Remaining: Ã¢â€šÂ¹${formatMoneyWhole(Math.max(0, Number(order.remainingAmount || 0)))} Ã¢â‚¬Â¢ Ref: ${order.id}`,
+      notes: `Advance Customer Order Ã¢â‚¬Â¢ Product: ${order.productName || 'Unknown Product'} Ã¢â‚¬Â¢ Total: ${formatMoneyWhole(order.totalCost || 0)} Ã¢â‚¬Â¢ Cash: ${formatMoneyWhole(initial.filter((p) => String(p.method || '').toLowerCase().includes('cash')).reduce((s, p) => s + Number(p.amount || 0), 0))} Ã¢â‚¬Â¢ Online: ${formatMoneyWhole(initial.filter((p) => String(p.method || '').toLowerCase().includes('online')).reduce((s, p) => s + Number(p.amount || 0), 0))} Ã¢â‚¬Â¢ Advance: ${formatMoneyWhole(initial.reduce((s, p) => s + Number(p.amount || 0), 0))} Ã¢â‚¬Â¢ Remaining: ${formatMoneyWhole(Math.max(0, Number(order.remainingAmount || 0)))} Ã¢â‚¬Â¢ Ref: ${order.id}`,
       source: 'historical_import',
       isHistorical: true,
       legacyRef: order.id,
@@ -219,7 +219,7 @@ export default function Transactions() {
       customerId: order.customerId,
       customerName,
       paymentMethod: (payment.method as any) || 'Advance',
-      notes: `Custom Order Payment Ã¢â‚¬Â¢ Product: ${order.productName || 'Unknown Product'} Ã¢â‚¬Â¢ Order Ref: ${order.id} Ã¢â‚¬Â¢ Paid: Ã¢â€šÂ¹${formatMoneyWhole(payment.amount || 0)} Ã¢â‚¬Â¢ Remaining: Ã¢â€šÂ¹${formatMoneyWhole(payment.remainingAfterPayment || 0)}${payment.note ? ` Ã¢â‚¬Â¢ Note: ${payment.note}` : ''}`,
+      notes: `Custom Order Payment Ã¢â‚¬Â¢ Product: ${order.productName || 'Unknown Product'} Ã¢â‚¬Â¢ Order Ref: ${order.id} Ã¢â‚¬Â¢ Paid: ${formatMoneyWhole(payment.amount || 0)} Ã¢â‚¬Â¢ Remaining: ${formatMoneyWhole(payment.remainingAfterPayment || 0)}${payment.note ? ` Ã¢â‚¬Â¢ Note: ${payment.note}` : ''}`,
       source: 'historical_import',
       isHistorical: true,
       legacyRef: order.id,
@@ -1240,12 +1240,12 @@ export default function Transactions() {
   const getSaleSettlementText = (tx: Transaction) => {
     if (tx.id.startsWith('upfront-')) {
       const note = String(tx.notes || '');
-      const totalMatch = note.match(/Total: Ã¢â€šÂ¹([0-9,]+)/i);
-      const advanceMatch = note.match(/Advance Paid: Ã¢â€šÂ¹([0-9,]+)/i);
-      const paidMatch = note.match(/Paid: Ã¢â€šÂ¹([0-9,]+)/i);
-      const remainingMatch = note.match(/Remaining: Ã¢â€šÂ¹([0-9,]+)/i);
-      if (paidMatch) return `Paid Ã¢â€šÂ¹${paidMatch[1]} Ã¢â‚¬Â¢ Remaining Ã¢â€šÂ¹${remainingMatch?.[1] || '0'}`;
-      return `Total Ã¢â€šÂ¹${totalMatch?.[1] || '0'} Ã¢â‚¬Â¢ Advance Ã¢â€šÂ¹${advanceMatch?.[1] || '0'} Ã¢â‚¬Â¢ Remaining Ã¢â€šÂ¹${remainingMatch?.[1] || '0'}`;
+      const totalMatch = note.match(/Total: ([0-9,]+)/i);
+      const advanceMatch = note.match(/Advance Paid: ([0-9,]+)/i);
+      const paidMatch = note.match(/Paid: ([0-9,]+)/i);
+      const remainingMatch = note.match(/Remaining: ([0-9,]+)/i);
+      if (paidMatch) return `Paid ${paidMatch[1]} Ã¢â‚¬Â¢ Remaining ${remainingMatch?.[1] || '0'}`;
+      return `Total ${totalMatch?.[1] || '0'} Ã¢â‚¬Â¢ Advance ${advanceMatch?.[1] || '0'} Ã¢â‚¬Â¢ Remaining ${remainingMatch?.[1] || '0'}`;
     }
     const txType = String((tx as Transaction & { type?: string }).type || '').toLowerCase();
     if (txType !== 'sale' && txType !== 'historical_reference') return null;
@@ -1341,7 +1341,7 @@ export default function Transactions() {
     doc.setFontSize(12);
     doc.setTextColor(22, 163, 74); // Green
     doc.setFont("helvetica", "bold");
-    doc.text(`Rs. ${formatMoneyWhole(stats.totalRevenue)}`, 20, 62);
+    doc.text(`${formatMoneyWhole(stats.totalRevenue)}`, 20, 62);
 
     doc.setFontSize(9);
     doc.setTextColor(100);
@@ -1350,7 +1350,7 @@ export default function Transactions() {
     doc.setFontSize(12);
     doc.setTextColor(220, 38, 38); // Red
     doc.setFont("helvetica", "bold");
-    doc.text(`Rs. ${formatMoneyWhole(stats.totalReturns)}`, 65, 62);
+    doc.text(`${formatMoneyWhole(stats.totalReturns)}`, 65, 62);
 
     doc.setFontSize(9);
     doc.setTextColor(100);
@@ -1359,7 +1359,7 @@ export default function Transactions() {
     doc.setFontSize(12);
     doc.setTextColor(16, 185, 129); // Emerald
     doc.setFont("helvetica", "bold");
-    doc.text(`Rs. ${formatMoneyWhole(stats.totalDiscount)}`, 110, 62);
+    doc.text(`${formatMoneyWhole(stats.totalDiscount)}`, 110, 62);
 
     doc.setFontSize(9);
     doc.setTextColor(100);
@@ -1368,7 +1368,7 @@ export default function Transactions() {
     doc.setFontSize(12);
     doc.setTextColor(30, 41, 59); // Dark
     doc.setFont("helvetica", "bold");
-    doc.text(`Rs. ${formatMoneyWhole(stats.grossProfit)}`, 155, 62);
+    doc.text(`${formatMoneyWhole(stats.grossProfit)}`, 155, 62);
 
     // Table
     const tableBody = filteredTransactions.map(tx => [
@@ -1377,7 +1377,7 @@ export default function Transactions() {
         tx.type.toUpperCase(),
         tx.customerName || 'Walk-in',
         getDisplayPaymentMethod(tx),
-        `Rs. ${formatMoneyPrecise(Math.abs(tx.total))}`
+        `${formatMoneyPrecise(Math.abs(tx.total))}`
     ]);
 
     autoTable(doc, {
@@ -1546,7 +1546,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                    <p className="text-[10px] md:text-xs font-bold text-red-700/70 uppercase tracking-wider">Returns</p>
                    <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-red-700">{"\u20B9"}</span>
+                      <span className="text-sm md:text-lg font-bold text-red-700"></span>
                       <span className="text-lg sm:text-2xl font-extrabold text-red-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalReturns)}>
                           {formatMoneyWhole(kpiStats.totalReturns)}
                       </span>
@@ -1561,7 +1561,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                    <p className="text-[10px] md:text-xs font-bold text-green-700/70 uppercase tracking-wider">Total Cash</p>
                    <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-green-700">{"\u20B9"}</span>
+                      <span className="text-sm md:text-lg font-bold text-green-700"></span>
                       <span className="text-lg sm:text-2xl font-extrabold text-green-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalCash)}>
                           {formatMoneyWhole(kpiStats.totalCash)}
                       </span>
@@ -1576,7 +1576,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                    <p className="text-[10px] md:text-xs font-bold text-blue-700/70 uppercase tracking-wider">Total Credit</p>
                    <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-blue-700">{"\u20B9"}</span>
+                      <span className="text-sm md:text-lg font-bold text-blue-700"></span>
                       <span className="text-lg sm:text-2xl font-extrabold text-blue-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalCredit)}>
                           {formatMoneyWhole(kpiStats.totalCredit)}
                       </span>
@@ -1591,7 +1591,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                    <p className="text-[10px] md:text-xs font-bold text-amber-700/70 uppercase tracking-wider">Total Online</p>
                    <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-amber-700">{"\u20B9"}</span>
+                      <span className="text-sm md:text-lg font-bold text-amber-700"></span>
                       <span className="text-lg sm:text-2xl font-extrabold text-amber-800 tracking-tight truncate w-full" title={formatINRWhole(kpiStats.totalOnline)}>
                           {formatMoneyWhole(kpiStats.totalOnline)}
                       </span>
@@ -1609,7 +1609,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                    <p className="text-[10px] md:text-xs font-bold text-green-700/70 uppercase tracking-wider">Total Revenue</p>
                    <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-green-700">Ã¢â€šÂ¹</span>
+                      <span className="text-sm md:text-lg font-bold text-green-700"></span>
                       <span className="text-lg sm:text-2xl font-extrabold text-green-800 tracking-tight truncate w-full" title={formatINRWhole(stats.totalRevenue)}>
                           {formatMoneyWhole(stats.totalRevenue)}
                       </span>
@@ -1625,7 +1625,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                    <p className="text-[10px] md:text-xs font-bold text-red-700/70 uppercase tracking-wider">Returns</p>
                    <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-red-700">Ã¢â€šÂ¹</span>
+                      <span className="text-sm md:text-lg font-bold text-red-700"></span>
                       <span className="text-lg sm:text-2xl font-extrabold text-red-800 tracking-tight truncate w-full" title={formatINRWhole(stats.totalReturns)}>
                           {formatMoneyWhole(stats.totalReturns)}
                       </span>
@@ -1641,7 +1641,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                    <p className="text-[10px] md:text-xs font-bold text-emerald-700/70 uppercase tracking-wider">Total Discount</p>
                    <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-emerald-700">Ã¢â€šÂ¹</span>
+                      <span className="text-sm md:text-lg font-bold text-emerald-700"></span>
                       <span className="text-lg sm:text-2xl font-extrabold text-emerald-800 tracking-tight truncate w-full" title={formatINRWhole(stats.totalDiscount)}>
                           {formatMoneyWhole(stats.totalDiscount)}
                       </span>
@@ -1657,7 +1657,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                    <p className="text-[10px] md:text-xs font-bold text-blue-700/70 uppercase tracking-wider">Net Sales</p>
                    <div className="mt-2 flex items-baseline gap-1">
-                      <span className="text-sm md:text-lg font-bold text-blue-700">Ã¢â€šÂ¹</span>
+                      <span className="text-sm md:text-lg font-bold text-blue-700"></span>
                       <span className="text-lg sm:text-2xl font-extrabold text-blue-800 tracking-tight truncate w-full" title={formatINRWhole(stats.netSales)}>
                           {formatMoneyWhole(stats.netSales)}
                       </span>
@@ -1673,7 +1673,7 @@ export default function Transactions() {
               <CardContent className="p-4 relative z-10">
                 <p className="text-[10px] md:text-xs font-bold text-amber-700/70 uppercase tracking-wider">Gross Profit</p>
                 <div className="mt-2 flex items-baseline gap-1">
-                  <span className="text-sm md:text-lg font-bold text-amber-700">Ã¢â€šÂ¹</span>
+                  <span className="text-sm md:text-lg font-bold text-amber-700"></span>
                   <span className="text-lg sm:text-2xl font-extrabold text-amber-800 tracking-tight truncate w-full" title={formatINRWhole(stats.grossProfit)}>
                     {formatMoneyWhole(stats.grossProfit)}
                   </span>
@@ -1721,7 +1721,7 @@ export default function Transactions() {
                           <td className="px-4 py-3 uppercase font-semibold text-xs">{record.type}</td>
                           <td className="px-4 py-3">{record.customerName || 'Walk-in'}</td>
                           <td className="px-4 py-3">{record.paymentMethod || 'N/A'}</td>
-                          <td className="px-4 py-3 text-right font-bold">Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(record.amount || 0))}</td>
+                          <td className="px-4 py-3 text-right font-bold">{formatMoneyWhole(Math.abs(record.amount || 0))}</td>
                           <td className="px-4 py-3">
                             <div className="text-xs">
                               <div>{formatDeletedByName(record)}</div>
@@ -1832,7 +1832,7 @@ export default function Transactions() {
                                             <span className="text-xs font-medium text-muted-foreground">{getDisplayPaymentMethod(tx)}</span>
                                         </td>
                                         <td className={`px-4 py-3 text-right font-bold ${amountClass}`}>
-                                            <div>Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(tx.total))}</div>
+                                            <div>{formatMoneyWhole(Math.abs(tx.total))}</div>
                                             {getSaleSettlementText(tx) && (
                                               <div className="text-[10px] font-medium text-muted-foreground">{getSaleSettlementText(tx)}</div>
                                             )}
@@ -1891,7 +1891,7 @@ export default function Transactions() {
                                         <div className="flex justify-between items-end">
                                             <div>
                                                 <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-0.5">{tx.customerName || 'Walk-in'}</p>
-                                                <p className={`text-xl font-black ${amountClass}`}>Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(tx.total))}</p>
+                                                <p className={`text-xl font-black ${amountClass}`}>{formatMoneyWhole(Math.abs(tx.total))}</p>
                                             </div>
                                             <div className="text-right">
                                                 <Badge variant={badgeVariant} className="text-[8px] font-black h-4 px-1 mb-1">
@@ -1970,7 +1970,7 @@ export default function Transactions() {
                                 <div>
                                     <div className={`text-2xl font-bold flex items-center ${amountClass}`}>
                                         {isSale ? <ArrowUpRight className="w-5 h-5 mr-1" /> : isReturn ? <ArrowDownLeft className="w-5 h-5 mr-1" /> : <CreditCard className="w-5 h-5 mr-1" />}
-                                        Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(tx.total))}
+                                        {formatMoneyWhole(Math.abs(tx.total))}
                                     </div>
                                 </div>
 
@@ -2066,7 +2066,7 @@ export default function Transactions() {
                                   {(() => {
                                     const note = String(selectedTx.notes || '');
                                     const read = (label: string) => {
-                                      const m = note.match(new RegExp(`${label}: Ã¢â€šÂ¹([\\d,]+)`));
+                                      const m = note.match(new RegExp(`${label}: ([\\d,]+)`));
                                       return m ? Number(m[1].replace(/,/g, '')) : 0;
                                     };
                                     const total = read('Total') || Math.abs(Number(selectedTx.total || 0));
@@ -2077,13 +2077,13 @@ export default function Transactions() {
                                     const remaining = read('Remaining');
                                     return (
                                       <>
-                                        <p className="text-xs">Order Subtotal: Ã¢â€šÂ¹{formatMoneyWhole(Math.max(0, total - expense))}</p>
-                                        {expense > 0 && <p className="text-xs">Expense: Ã¢â€šÂ¹{formatMoneyWhole(expense)}</p>}
-                                        <p className="text-xs font-semibold">Order Total: Ã¢â€šÂ¹{formatMoneyWhole(total)}</p>
-                                        <p className="text-xs">Paid Cash: Ã¢â€šÂ¹{formatMoneyWhole(cashPaid)}</p>
-                                        <p className="text-xs">Paid Online: Ã¢â€šÂ¹{formatMoneyWhole(onlinePaid)}</p>
-                                        <p className="text-xs">Total Paid: Ã¢â€šÂ¹{formatMoneyWhole(Math.max(advance, cashPaid + onlinePaid, isCustomOrderPaymentRow(selectedTx) ? Math.abs(Number(selectedTx.total || 0)) : 0))}</p>
-                                        <p className="text-xs font-semibold">Remaining Amount: Ã¢â€šÂ¹{formatMoneyWhole(remaining)}</p>
+                                        <p className="text-xs">Order Subtotal: {formatMoneyWhole(Math.max(0, total - expense))}</p>
+                                        {expense > 0 && <p className="text-xs">Expense: {formatMoneyWhole(expense)}</p>}
+                                        <p className="text-xs font-semibold">Order Total: {formatMoneyWhole(total)}</p>
+                                        <p className="text-xs">Paid Cash: {formatMoneyWhole(cashPaid)}</p>
+                                        <p className="text-xs">Paid Online: {formatMoneyWhole(onlinePaid)}</p>
+                                        <p className="text-xs">Total Paid: {formatMoneyWhole(Math.max(advance, cashPaid + onlinePaid, isCustomOrderPaymentRow(selectedTx) ? Math.abs(Number(selectedTx.total || 0)) : 0))}</p>
+                                        <p className="text-xs font-semibold">Remaining Amount: {formatMoneyWhole(remaining)}</p>
                                       </>
                                     );
                                   })()}
@@ -2092,11 +2092,11 @@ export default function Transactions() {
                               {selectedTx.type === 'sale' && (
                                 <div className="col-span-2 rounded-lg border bg-muted/10 p-2">
                                   <p className="text-xs text-muted-foreground uppercase tracking-wider font-semibold mb-1">Settlement</p>
-                                  <p className="text-xs">Total Sale: Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(selectedTx.total))}</p>
-                                  <p className="text-xs">Store Credit Used: Ã¢â€šÂ¹{formatMoneyWhole(Number(selectedTx.storeCreditUsed || 0))}</p>
-                                  <p className="text-xs">Cash Paid: Ã¢â€šÂ¹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).cashPaid)}</p>
-                                  <p className="text-xs">Online Paid: Ã¢â€šÂ¹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).onlinePaid)}</p>
-                                  <p className="text-xs font-semibold">Credit Due Created: Ã¢â€šÂ¹{formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).creditDue)}</p>
+                                  <p className="text-xs">Total Sale: {formatMoneyWhole(Math.abs(selectedTx.total))}</p>
+                                  <p className="text-xs">Store Credit Used: {formatMoneyWhole(Number(selectedTx.storeCreditUsed || 0))}</p>
+                                  <p className="text-xs">Cash Paid: {formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).cashPaid)}</p>
+                                  <p className="text-xs">Online Paid: {formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).onlinePaid)}</p>
+                                  <p className="text-xs font-semibold">Credit Due Created: {formatMoneyWhole(getSaleSettlementBreakdown(selectedTx).creditDue)}</p>
                                 </div>
                               )}
                           </div>
@@ -2119,17 +2119,17 @@ export default function Transactions() {
                                       <div className="flex-1">
                                           <div className="flex justify-between items-start">
                                               <p className="font-medium text-sm leading-tight">{item.name}</p>
-                                              <p className="font-medium text-sm">Ã¢â€šÂ¹{formatMoneyWhole((item.sellPrice * item.quantity) - (item.discountAmount || 0))}</p>
+                                              <p className="font-medium text-sm">{formatMoneyWhole((item.sellPrice * item.quantity) - (item.discountAmount || 0))}</p>
                                           </div>
                                           <div className="flex justify-between items-center mt-1">
                                               <p className="text-xs text-muted-foreground">SKU: {item.barcode} Ã¢â‚¬Â¢ {item.selectedVariant || NO_VARIANT} / {item.selectedColor || NO_COLOR}</p>
                                               <div className="flex flex-col items-end">
                                                   <Badge variant="secondary" className="text-[10px] h-4 px-1.5 font-normal">
-                                                      {item.quantity} x Ã¢â€šÂ¹{item.sellPrice}
+                                                      {item.quantity} x {item.sellPrice}
                                                   </Badge>
                                                   {item.discountAmount !== undefined && item.discountAmount > 0 ? (
                                                       <span className="text-[9px] font-bold text-emerald-600 mt-0.5">
-                                                          -Ã¢â€šÂ¹{item.discountAmount.toFixed(2)} ({item.discountPercent}%)
+                                                          -{item.discountAmount.toFixed(2)} ({item.discountPercent}%)
                                                       </span>
                                                   ) : null}
                                               </div>
@@ -2144,14 +2144,14 @@ export default function Transactions() {
                               {/* Subtotal */}
                               <div className="flex justify-between text-xs text-muted-foreground">
                                   <span>Subtotal</span>
-                                  <span>Ã¢â€šÂ¹{formatMoneyWhole(selectedTx.subtotal ? selectedTx.subtotal : Math.abs(selectedTx.total))}</span>
+                                  <span>{formatMoneyWhole(selectedTx.subtotal ? selectedTx.subtotal : Math.abs(selectedTx.total))}</span>
                               </div>
                               
                               {/* Discount */}
                               <div className="flex justify-between text-xs text-green-600">
                                   <span>Discount</span>
                                   {selectedTx.discount && selectedTx.discount > 0 ? (
-                                      <span>-Ã¢â€šÂ¹{formatMoneyWhole(selectedTx.discount)}</span>
+                                      <span>-{formatMoneyWhole(selectedTx.discount)}</span>
                                   ) : (
                                       <span className="text-muted-foreground font-medium">No discount</span>
                                   )}
@@ -2161,7 +2161,7 @@ export default function Transactions() {
                               <div className="flex justify-between text-xs text-muted-foreground">
                                   <span>Tax {selectedTx.tax && selectedTx.tax > 0 ? `(${selectedTx.taxLabel})` : ''}</span>
                                   {selectedTx.tax && selectedTx.tax > 0 ? (
-                                      <span>+Ã¢â€šÂ¹{formatMoneyWhole(selectedTx.tax)}</span>
+                                      <span>+{formatMoneyWhole(selectedTx.tax)}</span>
                                   ) : (
                                       <span className="text-muted-foreground font-medium">No tax applied</span>
                                   )}
@@ -2170,7 +2170,7 @@ export default function Transactions() {
                               <div className="border-t pt-2 mt-2 flex justify-between items-center font-bold text-xl">
                                   <span>Total</span>
                                   <span className={selectedTx.type === 'sale' ? 'text-green-700' : selectedTx.type === 'return' ? 'text-red-700' : 'text-emerald-700'}>
-                                      {selectedTx.type === 'return' ? '-' : ''}Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(selectedTx.total))}
+                                      {selectedTx.type === 'return' ? '-' : ''}{formatMoneyWhole(Math.abs(selectedTx.total))}
                                   </span>
                               </div>
                           </div>
@@ -2192,7 +2192,7 @@ export default function Transactions() {
                   </CardTitle>
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <Badge variant="outline" className="uppercase">{selectedDeletedTx.type}</Badge>
-                    <Badge variant="destructive">Ã¢â€šÂ¹{Math.abs(selectedDeletedTx.amount || 0).toLocaleString()}</Badge>
+                    <Badge variant="destructive">{Math.abs(selectedDeletedTx.amount || 0).toLocaleString()}</Badge>
                     <span className="text-muted-foreground">{selectedDeletedTx.customerName || 'Walk-in'}</span>
                     <span className="text-muted-foreground">Ã¢â‚¬Â¢</span>
                     <span className="text-muted-foreground">{new Date(selectedDeletedTx.deletedAt).toLocaleString()}</span>
@@ -2221,15 +2221,15 @@ export default function Transactions() {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                   <div className="rounded-md border bg-background p-2 space-y-1">
                     <p className="font-semibold text-muted-foreground">Customer impact</p>
-                    <p>Due: Ã¢â€šÂ¹{selectedDeletedTx.beforeImpact.customerDue.toLocaleString()} Ã¢â€ â€™ Ã¢â€šÂ¹{selectedDeletedTx.afterImpact.customerDue.toLocaleString()}</p>
-                    <p className="text-muted-foreground">Change: Ã¢â€šÂ¹{(selectedDeletedTx.afterImpact.customerDue - selectedDeletedTx.beforeImpact.customerDue).toLocaleString()}</p>
-                    <p>Store credit: Ã¢â€šÂ¹{selectedDeletedTx.beforeImpact.customerStoreCredit.toLocaleString()} Ã¢â€ â€™ Ã¢â€šÂ¹{selectedDeletedTx.afterImpact.customerStoreCredit.toLocaleString()}</p>
-                    <p className="text-muted-foreground">Change: Ã¢â€šÂ¹{(selectedDeletedTx.afterImpact.customerStoreCredit - selectedDeletedTx.beforeImpact.customerStoreCredit).toLocaleString()}</p>
+                    <p>Due: {selectedDeletedTx.beforeImpact.customerDue.toLocaleString()} Ã¢â€ â€™ {selectedDeletedTx.afterImpact.customerDue.toLocaleString()}</p>
+                    <p className="text-muted-foreground">Change: {(selectedDeletedTx.afterImpact.customerDue - selectedDeletedTx.beforeImpact.customerDue).toLocaleString()}</p>
+                    <p>Store credit: {selectedDeletedTx.beforeImpact.customerStoreCredit.toLocaleString()} Ã¢â€ â€™ {selectedDeletedTx.afterImpact.customerStoreCredit.toLocaleString()}</p>
+                    <p className="text-muted-foreground">Change: {(selectedDeletedTx.afterImpact.customerStoreCredit - selectedDeletedTx.beforeImpact.customerStoreCredit).toLocaleString()}</p>
                   </div>
                   <div className="rounded-md border bg-background p-2 space-y-1">
                     <p className="font-semibold text-muted-foreground">Cash impact</p>
-                    <p>Cash estimate: Ã¢â€šÂ¹{selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions.toLocaleString()} Ã¢â€ â€™ Ã¢â€šÂ¹{selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions.toLocaleString()}</p>
-                    <p className="text-muted-foreground">Change: Ã¢â€šÂ¹{(selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions - selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions).toLocaleString()}</p>
+                    <p>Cash estimate: {selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions.toLocaleString()} Ã¢â€ â€™ {selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions.toLocaleString()}</p>
+                    <p className="text-muted-foreground">Change: {(selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions - selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions).toLocaleString()}</p>
                   </div>
                   <div className="rounded-md border bg-background p-2 space-y-1">
                     <p className="font-semibold text-muted-foreground">Activity impact</p>
@@ -2242,8 +2242,8 @@ export default function Transactions() {
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
                 <p className="font-semibold text-amber-900 mb-1">Financial effect summary</p>
                 <p className="text-amber-800">
-                  Deleting this {selectedDeletedTx.type} changed due by Ã¢â€šÂ¹{formatMoneyWhole(selectedDeletedTx.afterImpact.customerDue - selectedDeletedTx.beforeImpact.customerDue)}
-                  {' '}and cash estimate by Ã¢â€šÂ¹{formatMoneyWhole(selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions - selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions)}.
+                  Deleting this {selectedDeletedTx.type} changed due by {formatMoneyWhole(selectedDeletedTx.afterImpact.customerDue - selectedDeletedTx.beforeImpact.customerDue)}
+                  {' '}and cash estimate by {formatMoneyWhole(selectedDeletedTx.afterImpact.estimatedCashFromActiveTransactions - selectedDeletedTx.beforeImpact.estimatedCashFromActiveTransactions)}.
                 </p>
               </div>
 
@@ -2255,9 +2255,9 @@ export default function Transactions() {
                   <div><span className="text-muted-foreground">Date:</span> {new Date(selectedDeletedTx.originalTransaction.date).toLocaleString()}</div>
                   <div><span className="text-muted-foreground">Customer:</span> {selectedDeletedTx.originalTransaction.customerName || 'Walk-in'}</div>
                   <div><span className="text-muted-foreground">Payment method:</span> {selectedDeletedTx.originalTransaction.paymentMethod || 'N/A'}</div>
-                  <div><span className="text-muted-foreground">Total:</span> Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.total || 0))}</div>
-                  <div><span className="text-muted-foreground">Discount:</span> Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.discount || 0))}</div>
-                  <div><span className="text-muted-foreground">Tax:</span> Ã¢â€šÂ¹{formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.tax || 0))}</div>
+                  <div><span className="text-muted-foreground">Total:</span> {formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.total || 0))}</div>
+                  <div><span className="text-muted-foreground">Discount:</span> {formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.discount || 0))}</div>
+                  <div><span className="text-muted-foreground">Tax:</span> {formatMoneyWhole(Math.abs(selectedDeletedTx.originalTransaction.tax || 0))}</div>
                   <div className="md:col-span-2"><span className="text-muted-foreground">Notes:</span> {selectedDeletedTx.originalTransaction.notes || 'Ã¢â‚¬â€'}</div>
                 </div>
               </div>
@@ -2286,8 +2286,8 @@ export default function Transactions() {
                               <td className="py-1 pr-2">{item.quantity}</td>
                               <td className="py-1 pr-2">{item.selectedVariant || NO_VARIANT}</td>
                               <td className="py-1 pr-2">{item.selectedColor || NO_COLOR}</td>
-                              <td className="py-1 pr-2">Ã¢â€šÂ¹{formatMoneyWhole(item.sellPrice || 0)}</td>
-                              <td className="py-1 text-right">Ã¢â€šÂ¹{formatMoneyWhole(subtotal)}</td>
+                              <td className="py-1 pr-2">{formatMoneyWhole(item.sellPrice || 0)}</td>
+                              <td className="py-1 text-right">{formatMoneyWhole(subtotal)}</td>
                             </tr>
                           );
                         })}
@@ -2443,8 +2443,8 @@ export default function Transactions() {
                 <div className="grid gap-1.5 md:grid-cols-4">
                   <div><span className="text-muted-foreground">Type:</span> <span className="font-semibold uppercase">{editingTx.type}</span></div>
                   <div><span className="text-muted-foreground">Customer:</span> <span className="font-semibold">{editingTx.customerName || 'Walk-in'}</span></div>
-                  <div><span className="text-muted-foreground">Original Total:</span> <span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs(editingTx.total || 0))}</span></div>
-                  <div><span className="text-muted-foreground">Edited Total:</span> <span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs(editingDraftTransaction?.total || 0))}</span></div>
+                  <div><span className="text-muted-foreground">Original Total:</span> <span className="font-semibold">{formatMoneyPrecise(Math.abs(editingTx.total || 0))}</span></div>
+                  <div><span className="text-muted-foreground">Edited Total:</span> <span className="font-semibold">{formatMoneyPrecise(Math.abs(editingDraftTransaction?.total || 0))}</span></div>
                 </div>
               </div>
               <div className={`rounded-md border px-3 py-2 text-[13px] ${editRiskBanner.tone}`}>
@@ -2485,7 +2485,7 @@ export default function Transactions() {
                               </div>
                               <Input type="number" min="1" className="h-8 px-2 text-right text-[13px]" value={item.quantity} onChange={e => updateEditingItem(index, { quantity: Math.max(1, Number(e.target.value || 1)) })} />
                               <Input type="number" min="0" step="0.01" disabled={editingTx.type === 'return' || isProtectedReturnLinkedSaleLine} className="h-8 px-2 text-right text-[13px]" value={item.sellPrice} onChange={e => updateEditingItem(index, { sellPrice: toSafeMoney(e.target.value) })} />
-                              <div className="text-right font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(toSafeMoney(item.quantity) * toSafeMoney(item.sellPrice))}</div>
+                              <div className="text-right font-semibold">{formatMoneyPrecise(toSafeMoney(item.quantity) * toSafeMoney(item.sellPrice))}</div>
                               <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={() => removeEditingItem(index)} disabled={editingTx.type === 'sale' && isProtectedReturnLinkedSaleLine}>Ã¢Å“â€¢</Button>
                             </div>
                           </div>
@@ -2540,12 +2540,12 @@ export default function Transactions() {
                   {editingTx.type === 'sale' && (
                     <div className="rounded-md border p-2.5 space-y-1.5 text-[13px]">
                       <div className="font-semibold text-[14px]">Sale Edit Summary</div>
-                      <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(getEditedSubtotal())}</span></div>
-                      <div className="flex justify-between"><span className="text-muted-foreground">Grand Total</span><span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs(getEditedTotal()))}</span></div>
+                      <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="font-semibold">{formatMoneyPrecise(getEditedSubtotal())}</span></div>
+                      <div className="flex justify-between"><span className="text-muted-foreground">Grand Total</span><span className="font-semibold">{formatMoneyPrecise(Math.abs(getEditedTotal()))}</span></div>
                       <div className="rounded border bg-muted/20 p-2 space-y-1">
-                        <div className="flex justify-between"><span>Cash</span><span>Ã¢â€šÂ¹{formatMoneyPrecise(toSafeMoney(editingCashPaid))}</span></div>
-                        <div className="flex justify-between"><span>Online</span><span>Ã¢â€šÂ¹{formatMoneyPrecise(toSafeMoney(editingOnlinePaid))}</span></div>
-                        <div className="flex justify-between"><span>Credit Due</span><span>Ã¢â€šÂ¹{formatMoneyPrecise(toSafeMoney(editingCreditDue))}</span></div>
+                        <div className="flex justify-between"><span>Cash</span><span>{formatMoneyPrecise(toSafeMoney(editingCashPaid))}</span></div>
+                        <div className="flex justify-between"><span>Online</span><span>{formatMoneyPrecise(toSafeMoney(editingOnlinePaid))}</span></div>
+                        <div className="flex justify-between"><span>Credit Due</span><span>{formatMoneyPrecise(toSafeMoney(editingCreditDue))}</span></div>
                       </div>
                       {editingTx.type === 'sale' && (() => {
                         const before = getSaleSettlementBreakdown(editingTx);
@@ -2553,9 +2553,9 @@ export default function Transactions() {
                         return (
                           <div className="rounded border bg-white p-2 space-y-1">
                             <div className="font-medium">Settlement change</div>
-                            <div className="text-[12px]">Before: Cash Ã¢â€šÂ¹{formatMoneyPrecise(before.cashPaid)} Ã¢â‚¬Â¢ Online Ã¢â€šÂ¹{formatMoneyPrecise(before.onlinePaid)} Ã¢â‚¬Â¢ Credit Ã¢â€šÂ¹{formatMoneyPrecise(before.creditDue)}</div>
-                            <div className="text-[12px]">After: Cash Ã¢â€šÂ¹{formatMoneyPrecise(after.cashPaid)} Ã¢â‚¬Â¢ Online Ã¢â€šÂ¹{formatMoneyPrecise(after.onlinePaid)} Ã¢â‚¬Â¢ Credit Ã¢â€šÂ¹{formatMoneyPrecise(after.creditDue)}</div>
-                            <div className="text-[12px]">Impact: Cash {before.cashPaid === after.cashPaid ? 'Ã¢â€šÂ¹0.00' : `${after.cashPaid > before.cashPaid ? '+' : '-'}Ã¢â€šÂ¹${formatMoneyPrecise(Math.abs(after.cashPaid - before.cashPaid))}`} Ã¢â‚¬Â¢ Online {before.onlinePaid === after.onlinePaid ? 'Ã¢â€šÂ¹0.00' : `${after.onlinePaid > before.onlinePaid ? '+' : '-'}Ã¢â€šÂ¹${formatMoneyPrecise(Math.abs(after.onlinePaid - before.onlinePaid))}`} Ã¢â‚¬Â¢ Due {before.creditDue === after.creditDue ? 'Ã¢â€šÂ¹0.00' : `${after.creditDue > before.creditDue ? '+' : '-'}Ã¢â€šÂ¹${formatMoneyPrecise(Math.abs(after.creditDue - before.creditDue))}`}</div>
+                            <div className="text-[12px]">Before: Cash {formatMoneyPrecise(before.cashPaid)} Ã¢â‚¬Â¢ Online {formatMoneyPrecise(before.onlinePaid)} Ã¢â‚¬Â¢ Credit {formatMoneyPrecise(before.creditDue)}</div>
+                            <div className="text-[12px]">After: Cash {formatMoneyPrecise(after.cashPaid)} Ã¢â‚¬Â¢ Online {formatMoneyPrecise(after.onlinePaid)} Ã¢â‚¬Â¢ Credit {formatMoneyPrecise(after.creditDue)}</div>
+                            <div className="text-[12px]">Impact: Cash {before.cashPaid === after.cashPaid ? '0.00' : `${after.cashPaid > before.cashPaid ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.cashPaid - before.cashPaid))}`} Ã¢â‚¬Â¢ Online {before.onlinePaid === after.onlinePaid ? '0.00' : `${after.onlinePaid > before.onlinePaid ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.onlinePaid - before.onlinePaid))}`} Ã¢â‚¬Â¢ Due {before.creditDue === after.creditDue ? '0.00' : `${after.creditDue > before.creditDue ? '+' : '-'}${formatMoneyPrecise(Math.abs(after.creditDue - before.creditDue))}`}</div>
                           </div>
                         );
                       })()}
@@ -2564,33 +2564,33 @@ export default function Transactions() {
                   {editingTx.type === 'return' && editingReturnPreview && (
                     <div className="rounded-md border p-2.5 bg-orange-50/40 space-y-1.5 text-[13px]">
                       <div className="font-semibold text-[14px]">Return Preview Summary</div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Due Before Ã¢â€ â€™ After</span><span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(editingReturnPreview.dueBefore)} Ã¢â€ â€™ Ã¢â€šÂ¹{formatMoneyPrecise(editingReturnPreview.dueAfter)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit Before Ã¢â€ â€™ After</span><span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(editingReturnPreview.storeCreditBefore)} Ã¢â€ â€™ Ã¢â€šÂ¹{formatMoneyPrecise(editingReturnPreview.storeCreditAfter)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Cash Outflow</span><span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(editingReturnPreview.cashRefund)}</span></div>
-                      <div className="rounded border bg-white p-2 flex justify-between"><span>Online Outflow</span><span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(editingReturnPreview.onlineRefund)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Due Before Ã¢â€ â€™ After</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.dueBefore)} Ã¢â€ â€™ {formatMoneyPrecise(editingReturnPreview.dueAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Store Credit Before Ã¢â€ â€™ After</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.storeCreditBefore)} Ã¢â€ â€™ {formatMoneyPrecise(editingReturnPreview.storeCreditAfter)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Cash Outflow</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.cashRefund)}</span></div>
+                      <div className="rounded border bg-white p-2 flex justify-between"><span>Online Outflow</span><span className="font-semibold">{formatMoneyPrecise(editingReturnPreview.onlineRefund)}</span></div>
                     </div>
                   )}
                   {editingTx.type === 'payment' && (
                     <div className="rounded-md border p-2.5 space-y-1.5 text-[13px]">
                       <div className="font-semibold text-[14px]">Payment Impact Preview</div>
-                      <div>Collection: Ã¢â€šÂ¹{formatMoneyPrecise(Number(editingAmount || 0))} via {editingTxPaymentMethod}</div>
+                      <div>Collection: {formatMoneyPrecise(Number(editingAmount || 0))} via {editingTxPaymentMethod}</div>
                       {editingCustomerId && (() => {
                         const currentDue = editingCustomerBalance.currentDue;
                         const dueAfter = Math.max(0, currentDue - Math.max(0, Number(editingAmount || 0)));
-                        return <div>Due: Ã¢â€šÂ¹{formatMoneyPrecise(currentDue)} Ã¢â€ â€™ Ã¢â€šÂ¹{formatMoneyPrecise(dueAfter)}</div>;
+                        return <div>Due: {formatMoneyPrecise(currentDue)} Ã¢â€ â€™ {formatMoneyPrecise(dueAfter)}</div>;
                       })()}
                     </div>
                   )}
                   {editingAuditPreview && (
                     <div className="rounded-md border p-2.5 space-y-1.5 text-[13px] bg-muted/10">
                       <div className="font-semibold text-[14px]">Edit impact (audit preview)</div>
-                      <div>Stock effect: {editingAuditPreview.cashbookDelta.cogsEffect === 0 ? 'No stock-value change' : `${editingAuditPreview.cashbookDelta.cogsEffect > 0 ? '+' : '-'}Ã¢â€šÂ¹${formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.cogsEffect))} COGS delta`}</div>
-                      <div>Current due: {editingAuditPreview.cashbookDelta.currentDueEffect >= 0 ? '+' : '-'}Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.currentDueEffect))}</div>
-                      <div>Store credit: {editingAuditPreview.cashbookDelta.currentStoreCreditEffect >= 0 ? '+' : '-'}Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.currentStoreCreditEffect))}</div>
-                      <div>Cash movement: {editingAuditPreview.cashbookDelta.netCashEffect >= 0 ? '+' : '-'}Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.netCashEffect))}</div>
-                      <div>Online movement: {((editingAuditPreview.cashbookDelta.onlineIn || 0) - (editingAuditPreview.cashbookDelta.onlineOut || 0)) >= 0 ? '+' : '-'}Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs((editingAuditPreview.cashbookDelta.onlineIn || 0) - (editingAuditPreview.cashbookDelta.onlineOut || 0)))}</div>
-                      <div>Revenue delta: {editingAuditPreview.cashbookDelta.netSales >= 0 ? '+' : '-'}Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.netSales))}</div>
-                      <div>Gross profit delta: {editingAuditPreview.cashbookDelta.grossProfitEffect >= 0 ? '+' : '-'}Ã¢â€šÂ¹{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.grossProfitEffect))}</div>
+                      <div>Stock effect: {editingAuditPreview.cashbookDelta.cogsEffect === 0 ? 'No stock-value change' : `${editingAuditPreview.cashbookDelta.cogsEffect > 0 ? '+' : '-'}${formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.cogsEffect))} COGS delta`}</div>
+                      <div>Current due: {editingAuditPreview.cashbookDelta.currentDueEffect >= 0 ? '+' : '-'}{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.currentDueEffect))}</div>
+                      <div>Store credit: {editingAuditPreview.cashbookDelta.currentStoreCreditEffect >= 0 ? '+' : '-'}{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.currentStoreCreditEffect))}</div>
+                      <div>Cash movement: {editingAuditPreview.cashbookDelta.netCashEffect >= 0 ? '+' : '-'}{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.netCashEffect))}</div>
+                      <div>Online movement: {((editingAuditPreview.cashbookDelta.onlineIn || 0) - (editingAuditPreview.cashbookDelta.onlineOut || 0)) >= 0 ? '+' : '-'}{formatMoneyPrecise(Math.abs((editingAuditPreview.cashbookDelta.onlineIn || 0) - (editingAuditPreview.cashbookDelta.onlineOut || 0)))}</div>
+                      <div>Revenue delta: {editingAuditPreview.cashbookDelta.netSales >= 0 ? '+' : '-'}{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.netSales))}</div>
+                      <div>Gross profit delta: {editingAuditPreview.cashbookDelta.grossProfitEffect >= 0 ? '+' : '-'}{formatMoneyPrecise(Math.abs(editingAuditPreview.cashbookDelta.grossProfitEffect))}</div>
                       {!!editingAuditPreview.changeSummary && <div className="text-[12px] text-muted-foreground">{editingAuditPreview.changeSummary}</div>}
                       {editingTx.customerId !== editingCustomerId && (
                         <div className="rounded border bg-white p-2 text-[12px]">
@@ -2650,7 +2650,7 @@ export default function Transactions() {
                           </div>
                         </div>
                         <div className="flex items-center justify-between text-sm">
-                          <span className="font-semibold">Ã¢â€šÂ¹{formatMoneyPrecise(product.sellPrice || 0)}</span>
+                          <span className="font-semibold">{formatMoneyPrecise(product.sellPrice || 0)}</span>
                           <span className={isOutOfStock ? 'text-red-600 text-xs font-medium' : 'text-muted-foreground text-xs'}>{isOutOfStock ? 'Out of Stock' : `Stock: ${product.stock || 0}`}</span>
                         </div>
                         <div className="grid grid-cols-[auto_60px_auto_1fr] gap-1.5 items-center">

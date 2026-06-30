@@ -658,8 +658,8 @@ export default function Dashboard() {
           },
         },
         chain: {
-          payableChain: `Payable â‚¹${Number(row.payable || 0)} <- row.payable <- buildPurchasePartyLedger.summary.currentPayable <- canonical supplier ledger replay`,
-          partyCreditChain: `Party Credit â‚¹${Number(row.partyCredit || 0)} <- row.partyCredit <- buildPurchasePartyLedger.summary.currentCredit <- canonical supplier ledger replay`,
+          payableChain: `Payable ${Number(row.payable || 0)} <- row.payable <- buildPurchasePartyLedger.summary.currentPayable <- canonical supplier ledger replay`,
+          partyCreditChain: `Party Credit ${Number(row.partyCredit || 0)} <- row.partyCredit <- buildPurchasePartyLedger.summary.currentCredit <- canonical supplier ledger replay`,
         },
       };
       console.log('[PAYABLE_TRACE_JSON] ' + JSON.stringify(payload, null, 2));

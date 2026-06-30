@@ -2393,11 +2393,11 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                             <div className="text-xs text-slate-500">{party.location || 'No location'}</div>
                           </td>
                           <td className="p-3 text-slate-600">{party.phone || '\u2014'}</td>
-                          <td className="p-3 text-right">{'\u20B9'}{formatNumber(partyFinancials.get(party.id)?.totalPurchase || 0)}</td>
-                          <td className="p-3 text-right">{'\u20B9'}{formatNumber(partySummary?.actualPayments || 0)}</td>
-                          <td className="p-3 text-right">{'\u20B9'}{formatNumber(partySummary?.currentPayable || partySummary?.grossPayable || partySummary?.remainingPayable || 0)}</td>
-                          <td className="p-3 text-right">{'\u20B9'}{formatNumber(partySummary?.currentCredit || partySummary?.ourCredit || 0)}</td>
-                          <td className="p-3 text-right font-semibold">{'\u20B9'}{formatNumber(partySummary?.netPayable || 0)}</td>
+                          <td className="p-3 text-right">{formatNumber(partyFinancials.get(party.id)?.totalPurchase || 0)}</td>
+                          <td className="p-3 text-right">{formatNumber(partySummary?.actualPayments || 0)}</td>
+                          <td className="p-3 text-right">{formatNumber(partySummary?.currentPayable || partySummary?.grossPayable || partySummary?.remainingPayable || 0)}</td>
+                          <td className="p-3 text-right">{formatNumber(partySummary?.currentCredit || partySummary?.ourCredit || 0)}</td>
+                          <td className="p-3 text-right font-semibold">{formatNumber(partySummary?.netPayable || 0)}</td>
                           <td className="p-3 text-right">
                             <Button
                               type="button"
@@ -2445,10 +2445,10 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
               </div>
 
               <div className="grid gap-3 md:grid-cols-4">
-                <SummaryCard label="Total Purchase" value={`\u20B9${formatNumber(partyFinancials.get(selectedRepairParty.id)?.totalPurchase || 0)}`} />
-                <SummaryCard label="Total Payments" value={`\u20B9${formatNumber(partyLedgers.get(selectedRepairParty.id)?.summary.actualPayments || 0)}`} />
-                <SummaryCard label="Current Payable" value={`\u20B9${formatNumber(partyLedgers.get(selectedRepairParty.id)?.summary.currentPayable || partyLedgers.get(selectedRepairParty.id)?.summary.grossPayable || partyLedgers.get(selectedRepairParty.id)?.summary.remainingPayable || 0)}`} />
-                <SummaryCard label="Net Payable" value={`\u20B9${formatNumber(partyLedgers.get(selectedRepairParty.id)?.summary.netPayable || 0)}`} />
+                <SummaryCard label="Total Purchase" value={`${formatNumber(partyFinancials.get(selectedRepairParty.id)?.totalPurchase || 0)}`} />
+                <SummaryCard label="Total Payments" value={`${formatNumber(partyLedgers.get(selectedRepairParty.id)?.summary.actualPayments || 0)}`} />
+                <SummaryCard label="Current Payable" value={`${formatNumber(partyLedgers.get(selectedRepairParty.id)?.summary.currentPayable || partyLedgers.get(selectedRepairParty.id)?.summary.grossPayable || partyLedgers.get(selectedRepairParty.id)?.summary.remainingPayable || 0)}`} />
+                <SummaryCard label="Net Payable" value={`${formatNumber(partyLedgers.get(selectedRepairParty.id)?.summary.netPayable || 0)}`} />
               </div>
 
               <div className="flex flex-wrap gap-2 border-b pb-2">
@@ -2520,9 +2520,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                                     <div className="mt-1 text-xs text-slate-500">{order.notes || '—'}</div>
                                   </td>
                                   <td className="p-3 text-right font-medium">{formatNumber(Number(order.totalQuantity || 0))}</td>
-                                  <td className="p-3 text-right font-semibold">{`₹${formatNumber(Number(order.totalAmount || 0))}`}</td>
-                                  <td className="p-3 text-right font-semibold text-emerald-700">{`₹${formatNumber(Number(order.totalPaid || 0))}`}</td>
-                                  <td className="p-3 text-right font-semibold text-amber-700">{`₹${formatNumber(Number(order.remainingAmount || 0))}`}</td>
+                                  <td className="p-3 text-right font-semibold">{`${formatNumber(Number(order.totalAmount || 0))}`}</td>
+                                  <td className="p-3 text-right font-semibold text-emerald-700">{`${formatNumber(Number(order.totalPaid || 0))}`}</td>
+                                  <td className="p-3 text-right font-semibold text-amber-700">{`${formatNumber(Number(order.remainingAmount || 0))}`}</td>
                                   <td className="p-3 text-slate-600">{order.status}</td>
                                   <td className="p-3">
                                     <div className="flex justify-end gap-2">
@@ -2574,9 +2574,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                                     <div className="text-[11px] text-slate-400">{payment.id}</div>
                                   </td>
                                   <td className="p-3 text-slate-600">{payment.method || '—'}</td>
-                                  <td className="p-3 text-right font-semibold">{`₹${formatNumber(Number(payment.amount || 0))}`}</td>
-                                  <td className="p-3 text-right font-semibold text-blue-700">{`₹${formatNumber(payableApplied)}`}</td>
-                                  <td className="p-3 text-right font-semibold text-emerald-700">{`₹${formatNumber(creditCreated)}`}</td>
+                                  <td className="p-3 text-right font-semibold">{`${formatNumber(Number(payment.amount || 0))}`}</td>
+                                  <td className="p-3 text-right font-semibold text-blue-700">{`${formatNumber(payableApplied)}`}</td>
+                                  <td className="p-3 text-right font-semibold text-emerald-700">{`${formatNumber(creditCreated)}`}</td>
                                   <td className="p-3 text-slate-600">
                                     <div className="max-w-[220px] whitespace-normal break-words">{payment.note || '—'}</div>
                                   </td>
@@ -2621,11 +2621,11 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                             <td className="p-2">{{ purchase: 'Purchase', supplier_payment: 'Payment', credit_used: 'Credit Applied', legacy_payment: 'Payment', edit_credit: 'Adjustment', reversal: 'Adjustment' }[row.type] || row.type || '\u2014'}</td>
                             <td className="p-2">{row.reference || '\u2014'}</td>
                             <td className="p-2">{row.description || '\u2014'}</td>
-                            <td className="p-2 text-right">{row.purchaseAmount ? `\u20B9${formatNumber(row.purchaseAmount)}` : '\u2014'}</td>
-                            <td className="p-2 text-right">{row.paymentAmount ? `\u20B9${formatNumber(row.paymentAmount)}` : '\u2014'}</td>
-                            <td className="p-2 text-right">{row.creditApplied ? `\u20B9${formatNumber(row.creditApplied)}` : '\u2014'}</td>
-                            <td className="p-2 text-right">{row.creditCreated ? `\u20B9${formatNumber(row.creditCreated)}` : '\u2014'}</td>
-                            <td className="p-2 text-right font-semibold">{'\u20B9'}{formatNumber((row.netPayable ?? row.runningNetPayable) || 0)}</td>
+                            <td className="p-2 text-right">{row.purchaseAmount ? `${formatNumber(row.purchaseAmount)}` : '\u2014'}</td>
+                            <td className="p-2 text-right">{row.paymentAmount ? `${formatNumber(row.paymentAmount)}` : '\u2014'}</td>
+                            <td className="p-2 text-right">{row.creditApplied ? `${formatNumber(row.creditApplied)}` : '\u2014'}</td>
+                            <td className="p-2 text-right">{row.creditCreated ? `${formatNumber(row.creditCreated)}` : '\u2014'}</td>
+                            <td className="p-2 text-right font-semibold">{formatNumber((row.netPayable ?? row.runningNetPayable) || 0)}</td>
                           </tr>
                         ))}
                       </tbody>

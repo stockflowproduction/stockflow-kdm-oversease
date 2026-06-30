@@ -8022,7 +8022,7 @@ export const editInventoryPurchaseHistoryEntry = async (
     remainingAmount,
     paymentHistory,
     updatedAt: now,
-    notes: `${order.notes || ''}${overpaidAmount > 0 ? `${order.notes ? ' | ' : ''}Overpayment after edit: ₹${overpaidAmount.toFixed(2)}` : ''}`.trim(),
+    notes: `${order.notes || ''}${overpaidAmount > 0 ? `${order.notes ? ' | ' : ''}Overpayment after edit: ${overpaidAmount.toFixed(2)}` : ''}`.trim(),
   };
 
   const editCreditId = `pce-edit-${order.id}`;

@@ -177,8 +177,8 @@ export const exportProductsToExcel = (products: Product[]) => {
         'Variants': (p.variants || []).join(', ') || NO_VARIANT,
         'Colors': (p.colors || []).join(', ') || NO_COLOR,
         'HSN/SAC': p.hsn || '-',
-        'Buy Price (₹)': p.buyPrice,
-        'Sell Price (₹)': p.sellPrice,
+        'Buy Price': p.buyPrice,
+        'Sell Price': p.sellPrice,
         'Total Purchase': p.totalPurchase ?? ((p.stock || 0) + (p.totalSold || 0)),
         'Total Sold': p.totalSold || 0,
         'Current Stock': p.stock,
@@ -291,9 +291,8 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
                 'Quantity': qty,
                 'Qty': qty,
                 'Unit Sell Price': sellPrice,
-                'Unit Price (₹)': sellPrice,
+                'Unit Price': sellPrice,
                 'Buy Price': resolvedBuy.buyPrice,
-                'Buy Price (₹)': resolvedBuy.buyPrice,
                 'Buy Price Source': resolvedBuy.source,
                 'Item Discount': item?.discountAmount || 0,
                 'Tax Rate': Number(t.taxRate || 0),
@@ -312,11 +311,11 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
                 'Line Revenue': lineRevenue,
                 'Line Cost': lineCost,
                 'Line Profit': lineProfit,
-                'Line Total (₹)': lineRevenue - Number(item?.discountAmount || 0),
-                'Cash Refund (₹)': Number(fx?.cashRefund || 0),
-                'Online Refund (₹)': Number(fx?.onlineRefund || 0),
-                'Due Reduction (₹)': Number(fx?.dueReduction || 0),
-                'Store Credit Created (₹)': Number(fx?.storeCreditCreated || 0),
+                'Line Total': lineRevenue - Number(item?.discountAmount || 0),
+                'Cash Refund': Number(fx?.cashRefund || 0),
+                'Online Refund': Number(fx?.onlineRefund || 0),
+                'Due Reduction': Number(fx?.dueReduction || 0),
+                'Store Credit Created': Number(fx?.storeCreditCreated || 0),
             });
         });
     });
@@ -329,7 +328,7 @@ export const exportTransactionsToExcel = (transactions: Transaction[]) => {
         { Metric: 'Rows using history buy price', Value: buyPriceSourceCounts.history },
         { Metric: 'Rows using current buy price', Value: buyPriceSourceCounts.current },
         { Metric: 'Rows using none buy price', Value: buyPriceSourceCounts.none },
-        { Metric: 'Total exported line profit (₹)', Value: totalExportedLineProfit },
+        { Metric: 'Total exported line profit', Value: totalExportedLineProfit },
     ]);
     XLSX.utils.book_append_sheet(workbook, summarySheet, 'Audit_Summary');
 
@@ -489,8 +488,8 @@ export const exportCustomersToExcel = (customers: Customer[]) => {
     const data = customers.map(c => ({
         'Name': c.name,
         'Phone': c.phone,
-        'Total Spend (₹)': c.totalSpend,
-        'Total Due (₹)': c.totalDue || 0,
+        'Total Spend': c.totalSpend,
+        'Total Due': c.totalDue || 0,
         'Visit Count': c.visitCount,
         'Last Visit': c.lastVisit ? new Date(c.lastVisit).toLocaleDateString() : '-'
     }));
@@ -577,7 +576,7 @@ export const exportCustomerStatementToExcel = (customer: Customer, history: any[
         []
     ];
 
-    const tableHeader = [['Date', 'Description', 'Debit (₹)', 'Credit (₹)', 'Type', 'Balance (₹)']];
+    const tableHeader = [['Date', 'Description', 'Debit', 'Credit', 'Type', 'Balance']];
     
     const txHistory = history.filter((entry: any) => entry?.type === 'sale' || entry?.type === 'return' || entry?.type === 'payment') as Transaction[];
     const effects = buildTransactionEffects(txHistory);
@@ -599,10 +598,10 @@ export const exportCustomerStatementToExcel = (customer: Customer, history: any[
         const netAfter = runningDue - runningStoreCredit;
         const delta = netAfter - netBefore;
         const desc = tx.type === 'sale'
-          ? `Invoice #${tx.id.slice(-6)} (Paid ₹${formatMoneyPrecise(fx.cashPaid + fx.onlinePaid)}, Due +₹${formatMoneyPrecise(fx.creditDue)})`
+          ? `Invoice #${tx.id.slice(-6)} (Paid ${formatMoneyPrecise(fx.cashPaid + fx.onlinePaid)}, Due +${formatMoneyPrecise(fx.creditDue)})`
           : tx.type === 'payment'
-            ? `Payment #${tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ₹${formatMoneyPrecise(amount)}, Due -₹${formatMoneyPrecise(fx.dueReduction)}${fx.storeCreditCreated > 0 ? `, SC +₹${formatMoneyPrecise(fx.storeCreditCreated)}` : ''})`
-            : `Return #${tx.id.slice(-6)} (${fx.returnMode}: Cash ₹${formatMoneyPrecise(fx.cashRefund)}, Online ₹${formatMoneyPrecise(fx.onlineRefund)}, Due -₹${formatMoneyPrecise(fx.dueReduction)}, SC +₹${formatMoneyPrecise(fx.storeCreditCreated)})`;
+            ? `Payment #${tx.id.slice(-6)} (${tx.paymentMethod || 'Cash'} ${formatMoneyPrecise(amount)}, Due -${formatMoneyPrecise(fx.dueReduction)}${fx.storeCreditCreated > 0 ? `, SC +${formatMoneyPrecise(fx.storeCreditCreated)}` : ''})`
+            : `Return #${tx.id.slice(-6)} (${fx.returnMode}: Cash ${formatMoneyPrecise(fx.cashRefund)}, Online ${formatMoneyPrecise(fx.onlineRefund)}, Due -${formatMoneyPrecise(fx.dueReduction)}, SC +${formatMoneyPrecise(fx.storeCreditCreated)})`;
         return [
             new Date(tx.date).toLocaleDateString(),
             desc,

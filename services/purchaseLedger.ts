@@ -142,7 +142,7 @@ export const buildPurchasePartyLedger = ({
       type: 'purchase',
       reference: order.billNumber || order.id,
       description: partyCreditApplied > 0
-        ? `Purchase ${order.billNumber || order.id} • Supplier Credit Applied ₹${partyCreditApplied.toFixed(2)} • Payable Created ₹${payableCreated.toFixed(2)}`
+        ? `Purchase ${order.billNumber || order.id} • Supplier Credit Applied ${partyCreditApplied.toFixed(2)} • Payable Created ${payableCreated.toFixed(2)}`
         : `Purchase ${order.billNumber || order.id}`,
       purchaseAmount: orderTotal,
       creditApplied: partyCreditApplied,
@@ -189,7 +189,7 @@ export const buildPurchasePartyLedger = ({
     if (Math.abs(roundMoney(allocationTotal - storedPayableApplied)) > 0.01 && allocationTotal > 0) {
       pushWarning({
         code: 'supplier_payment_allocation_mismatch',
-        message: `Supplier payment ${payment.voucherNo || payment.id} stores payable applied ₹${storedPayableApplied.toFixed(2)} but allocations total ₹${allocationTotal.toFixed(2)}.`,
+        message: `Supplier payment ${payment.voucherNo || payment.id} stores payable applied ${storedPayableApplied.toFixed(2)} but allocations total ${allocationTotal.toFixed(2)}.`,
         sourceId: payment.id,
         expected: storedPayableApplied,
         actual: allocationTotal,
@@ -200,7 +200,7 @@ export const buildPurchasePartyLedger = ({
       date: payment.paidAt || payment.createdAt,
       type: 'supplier_payment',
       reference: payment.voucherNo || payment.id,
-      description: `Supplier payment ₹${actual.toFixed(2)}${storedCreditCreated > 0 ? ` • Credit Created ₹${storedCreditCreated.toFixed(2)}` : ''}`,
+      description: `Supplier payment ${actual.toFixed(2)}${storedCreditCreated > 0 ? ` • Credit Created ${storedCreditCreated.toFixed(2)}` : ''}`,
       paymentAmount: actual,
       actualPayment: actual,
       payableApplied: storedPayableApplied,
@@ -265,7 +265,7 @@ export const buildPurchasePartyLedger = ({
       if (row.creditApplied > row.purchaseAmount + 0.01) {
         rowWarnings.push({
           code: 'credit_applied_exceeds_purchase',
-          message: `Credit applied ₹${row.creditApplied.toFixed(2)} is greater than purchase amount ₹${row.purchaseAmount.toFixed(2)}.`,
+          message: `Credit applied ${row.creditApplied.toFixed(2)} is greater than purchase amount ${row.purchaseAmount.toFixed(2)}.`,
           rowId: row.id,
           sourceId: row.sourceId,
           expected: row.purchaseAmount,
@@ -275,7 +275,7 @@ export const buildPurchasePartyLedger = ({
       if (row.creditApplied > creditBefore + 0.01) {
         rowWarnings.push({
           code: 'credit_applied_exceeds_available',
-          message: `Credit applied ₹${row.creditApplied.toFixed(2)} exceeds available running credit ₹${creditBefore.toFixed(2)} before this purchase.`,
+          message: `Credit applied ${row.creditApplied.toFixed(2)} exceeds available running credit ${creditBefore.toFixed(2)} before this purchase.`,
           rowId: row.id,
           sourceId: row.sourceId,
           expected: creditBefore,
@@ -288,7 +288,7 @@ export const buildPurchasePartyLedger = ({
       if (row.payableApplied > canonicalPayableApplied + 0.01) {
         rowWarnings.push({
           code: 'payment_applied_exceeds_open_payable',
-          message: `Stored payable applied ₹${row.payableApplied.toFixed(2)} exceeds open payable ₹${openPayableBefore.toFixed(2)} before this payment.`,
+          message: `Stored payable applied ${row.payableApplied.toFixed(2)} exceeds open payable ${openPayableBefore.toFixed(2)} before this payment.`,
           rowId: row.id,
           sourceId: row.sourceId,
           expected: canonicalPayableApplied,

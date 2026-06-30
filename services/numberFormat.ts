@@ -1,6 +1,6 @@
-const EPSILON = 1e-9;
+﻿const EPSILON = 1e-9;
 
-export const INR_SYMBOL = '\u20B9';
+export const INR_SYMBOL = '';
 export const DISPLAY_FALLBACK = '\u2014';
 export const GST_FALLBACK = 'GST details not added';
 export const CONTACT_FALLBACK = 'Contact not added';
@@ -17,13 +17,13 @@ const WHOLE_MONEY_FORMATTER = new Intl.NumberFormat('en-IN', {
 });
 
 const MOJIBAKE_REPLACEMENTS: Array<[RegExp, string]> = [
-  [/Ã¢â€šÂ¹|â‚¹|₹/g, INR_SYMBOL],
-  [/Ã¢â‚¬Â¢|â€¢|Â·/g, ' • '],
-  [/Ã¢â‚¬â€|â€”|ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â/g, DISPLAY_FALLBACK],
-  [/Ã¢â‚¬Â Ã¢â‚¬â„¢|â†’/g, ' -> '],
-  [/Ã¢Å“â€¢/g, '×'],
-  [/Ã¢â‚¬Â¦/g, '...'],
-  [/Â+/g, ''],
+  [/ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¹|Ã¢â€šÂ¹|â‚¹|₹/g, INR_SYMBOL],
+  [/ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢|Ã¢â‚¬Â¢|Ã‚Â·/g, ' â€¢ '],
+  [/ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â|Ã¢â‚¬â€|ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â/g, DISPLAY_FALLBACK],
+  [/ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢|Ã¢â€ â€™/g, ' -> '],
+  [/ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¢/g, 'Ã—'],
+  [/ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦/g, '...'],
+  [/Ã‚+/g, ''],
 ];
 
 export const toSafeNumber = (value: unknown) => {
@@ -57,7 +57,7 @@ export const sanitizeDisplayText = (value: unknown, fallback = DISPLAY_FALLBACK)
   });
 
   next = next
-    .replace(/\s*•\s*/g, ' • ')
+    .replace(/\s*â€¢\s*/g, ' â€¢ ')
     .replace(/\s*->\s*/g, ' -> ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -83,7 +83,7 @@ export const formatLocationText = (value: unknown) => cleanOptionalText(value) |
 
 export const joinDisplayParts = (...parts: Array<unknown>) => {
   const cleaned = parts.map((part) => cleanOptionalText(part)).filter(Boolean);
-  return cleaned.length ? cleaned.join(' • ') : DISPLAY_FALLBACK;
+  return cleaned.length ? cleaned.join(' â€¢ ') : DISPLAY_FALLBACK;
 };
 
 export const formatMoneyPrecise = (value: unknown) => MONEY_FORMATTER.format(roundTo(value, 2));
@@ -103,3 +103,4 @@ export const formatINRWhole = (value: unknown) => formatCurrencyWhole(value);
 export const formatMoneyFixed2 = (value: unknown) => roundTo(value, 2).toFixed(2);
 
 export const formatMoneyRounded = (value: unknown) => formatMoneyWhole(value);
+

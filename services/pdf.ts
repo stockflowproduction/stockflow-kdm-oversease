@@ -734,10 +734,10 @@ const buildThermalInvoiceHtml = (
     const previousBalanceValue = canonicalBalance?.status === 'ok'
       ? Math.max(0, currentBalanceValue - Math.max(0, Number(settlement.creditDue || 0)))
       : 0;
-    const previousBalanceLabel = canonicalBalance?.status === 'ok' ? `₹${formatMoneyWhole(previousBalanceValue)}` : 'Ledger unavailable';
-    const currentBalanceLabel = canonicalBalance?.status === 'ok' ? `₹${formatMoneyWhole(currentBalanceValue)}` : 'Ledger unavailable';
+    const previousBalanceLabel = canonicalBalance?.status === 'ok' ? `${formatMoneyWhole(previousBalanceValue)}` : 'Ledger unavailable';
+    const currentBalanceLabel = canonicalBalance?.status === 'ok' ? `${formatMoneyWhole(currentBalanceValue)}` : 'Ledger unavailable';
     const paperWidth = getThermalPaperWidth(profile);
-    const currency = (value: number) => `₹${formatMoneyPrecise(Math.max(0, Number(value || 0)))}`;
+    const currency = (value: number) => `${formatMoneyPrecise(Math.max(0, Number(value || 0)))}`;
     const invoiceNo = transaction.type === 'return'
       ? (transaction.creditNoteNo || `CN-${transaction.id.slice(-6)}`)
       : (transaction.invoiceNo || `IN-${transaction.id.slice(-6)}`);
@@ -1224,9 +1224,9 @@ export const generateReceiptPDF = (
         formatInvoiceItemName(item),
         item.hsn || "-",
         item.quantity,
-        `Rs. ${formatMoneyPrecise(item.sellPrice)}`,
-        `Rs. ${formatMoneyPrecise(item.discountAmount || 0)}`,
-        `Rs. ${formatMoneyPrecise(item.sellPrice * item.quantity - (item.discountAmount || 0))}`
+        `${formatMoneyPrecise(item.sellPrice)}`,
+        `${formatMoneyPrecise(item.discountAmount || 0)}`,
+        `${formatMoneyPrecise(item.sellPrice * item.quantity - (item.discountAmount || 0))}`
     ]);
 
     autoTable(doc, {
@@ -1265,21 +1265,21 @@ export const generateReceiptPDF = (
     let summaryY = finalY;
     doc.setFontSize(9);
     doc.text("Sub Total", totalsLabelX, summaryY);
-    doc.text(`Rs. ${formatMoneyPrecise(transaction.subtotal || 0)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`${formatMoneyPrecise(transaction.subtotal || 0)}`, totalsX, summaryY, { align: "right" });
     
     summaryY += 6;
     doc.text("Discount", totalsLabelX, summaryY);
-    doc.text(`Rs. ${formatMoneyPrecise(transaction.discount || 0)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`${formatMoneyPrecise(transaction.discount || 0)}`, totalsX, summaryY, { align: "right" });
     
     if (transaction.tax && transaction.tax > 0) {
         summaryY += 6;
         doc.text(transaction.taxLabel || "Tax", totalsLabelX, summaryY);
-        doc.text(`Rs. ${formatMoneyPrecise(transaction.tax)}`, totalsX, summaryY, { align: "right" });
+        doc.text(`${formatMoneyPrecise(transaction.tax)}`, totalsX, summaryY, { align: "right" });
     }
 
     summaryY += 6;
     doc.text("Round off", totalsLabelX, summaryY);
-    doc.text(`${roundOff >= 0 ? "+" : "-"} Rs. ${formatMoneyPrecise(Math.abs(roundOff))}`, totalsX, summaryY, { align: "right" });
+    doc.text(`${roundOff >= 0 ? "+" : "-"} ${formatMoneyPrecise(Math.abs(roundOff))}`, totalsX, summaryY, { align: "right" });
 
     summaryY += 5;
     doc.setFillColor(93, 58, 43);
@@ -1289,7 +1289,7 @@ export const generateReceiptPDF = (
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
     doc.text("Total", totalsLabelX, summaryY + 5.5);
-    doc.text(`Rs. ${formatMoneyWhole(transaction.total)}`, totalsX, summaryY + 5.5, { align: "right" });
+    doc.text(`${formatMoneyWhole(transaction.total)}`, totalsX, summaryY + 5.5, { align: "right" });
     doc.setTextColor(0, 0, 0);
 
     summaryY += 13;
@@ -1302,23 +1302,23 @@ export const generateReceiptPDF = (
         : 0;
 
     doc.text("Received", totalsLabelX, summaryY);
-    doc.text(`Rs. ${formatMoneyPrecise(receivedAmount)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`${formatMoneyPrecise(receivedAmount)}`, totalsX, summaryY, { align: "right" });
     
     summaryY += 6;
     doc.text(hasCashDetails ? "Change Returned" : "Balance", totalsLabelX, summaryY);
-    doc.text(`Rs. ${formatMoneyPrecise(changeAmount)}`, totalsX, summaryY, { align: "right" });
+    doc.text(`${formatMoneyPrecise(changeAmount)}`, totalsX, summaryY, { align: "right" });
 
     const scUsed = Math.max(0, Number((transaction as any).storeCreditUsed || 0));
     const scAdded = Math.max(0, Number((transaction as any).storeCreditCreated || 0));
     if (scUsed > 0) {
       summaryY += 6;
       doc.text("Store Credit Used", totalsLabelX, summaryY);
-      doc.text(`Rs. ${formatMoneyPrecise(scUsed)}`, totalsX, summaryY, { align: "right" });
+      doc.text(`${formatMoneyPrecise(scUsed)}`, totalsX, summaryY, { align: "right" });
     }
     if (scAdded > 0) {
       summaryY += 6;
       doc.text("Store Credit Added", totalsLabelX, summaryY);
-      doc.text(`Rs. ${formatMoneyPrecise(scAdded)}`, totalsX, summaryY, { align: "right" });
+      doc.text(`${formatMoneyPrecise(scAdded)}`, totalsX, summaryY, { align: "right" });
     }
 
     const youSaved = transaction.discount || 0;
@@ -1326,7 +1326,7 @@ export const generateReceiptPDF = (
         summaryY += 6;
         doc.setFont("helvetica", "bold");
         doc.text("You Saved", totalsLabelX, summaryY);
-        doc.text(`Rs. ${formatMoneyPrecise(youSaved)}`, totalsX, summaryY, { align: "right" });
+        doc.text(`${formatMoneyPrecise(youSaved)}`, totalsX, summaryY, { align: "right" });
     }
 
     // --- Terms & Bank Details ---
@@ -1384,11 +1384,11 @@ const printThermalInvoiceLegacy = (transaction: Transaction, customers: Customer
     const { profile } = data;
     const customer = customers.find(c => c.id === transaction.customerId);
     const canonicalBalance = customer ? getCanonicalCustomerBalanceResult(customer, data.transactions || [], data.upfrontOrders || []) : null;
-    const currentBalanceLabel = canonicalBalance?.status === 'ok' ? `₹${formatMoneyWhole(canonicalBalance.currentDue)}` : 'Ledger unavailable';
+    const currentBalanceLabel = canonicalBalance?.status === 'ok' ? `${formatMoneyWhole(canonicalBalance.currentDue)}` : 'Ledger unavailable';
     const previousBalanceValue = canonicalBalance?.status === 'ok'
       ? Math.max(0, canonicalBalance.currentDue + (transaction.paymentMethod === 'Credit' ? -transaction.total : 0))
       : 0;
-    const previousBalanceLabel = canonicalBalance?.status === 'ok' ? `₹${formatMoneyWhole(previousBalanceValue)}` : 'Ledger unavailable';
+    const previousBalanceLabel = canonicalBalance?.status === 'ok' ? `${formatMoneyWhole(previousBalanceValue)}` : 'Ledger unavailable';
     
     // Utility: Number to words (Simple version)
     const numberToWords = (num: number) => {
@@ -1580,19 +1580,19 @@ const printThermalInvoiceLegacy = (transaction: Transaction, customers: Customer
     <div class="totals">
       <div class="row">
         <span>Sub Total</span>
-        <span>₹${formatMoneyWhole(transaction.subtotal || transaction.total)}</span>
+        <span>${formatMoneyWhole(transaction.subtotal || transaction.total)}</span>
       </div>
       <div class="row total">
         <span>Total</span>
-        <span>₹${formatMoneyWhole(transaction.total)}</span>
+        <span>${formatMoneyWhole(transaction.total)}</span>
       </div>
       <div class="row">
         <span>Received</span>
-        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? (paymentDetails?.cashReceived ?? transaction.cashReceived ?? transaction.total) : transaction.total)}</span>
+        <span>${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? (paymentDetails?.cashReceived ?? transaction.cashReceived ?? transaction.total) : transaction.total)}</span>
       </div>
       <div class="row">
         <span>${transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? 'Change Returned' : 'Balance'}</span>
-        <span>₹${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? ((paymentDetails?.cashReceived ?? transaction.cashReceived ?? transaction.total) - transaction.total)) : 0)}</span>
+        <span>${formatMoneyWhole(transaction.type === 'sale' && transaction.paymentMethod === 'Cash' ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? ((paymentDetails?.cashReceived ?? transaction.cashReceived ?? transaction.total) - transaction.total)) : 0)}</span>
       </div>
       <div class="row">
         <span>Prev Bal</span>

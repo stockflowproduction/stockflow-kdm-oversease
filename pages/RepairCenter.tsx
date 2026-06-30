@@ -102,8 +102,8 @@ const buildAdvanceOrderDueRepairTransaction = (customer: Customer, order: Upfron
     sourceRef: getAdvanceOrderDueRepairSourceRef(order.id),
     sourceTransactionId: order.id,
     notes: trimmedReason
-      ? `Advance Order Due Repair +₹${formatMoneyWhole(remainingAmount)} for order #${order.id.slice(-6)}. Reason: ${trimmedReason}`
-      : `Advance Order Due Repair +₹${formatMoneyWhole(remainingAmount)} for order #${order.id.slice(-6)}`,
+      ? `Advance Order Due Repair +${formatMoneyWhole(remainingAmount)} for order #${order.id.slice(-6)}. Reason: ${trimmedReason}`
+      : `Advance Order Due Repair +${formatMoneyWhole(remainingAmount)} for order #${order.id.slice(-6)}`,
   };
 };
 
@@ -191,7 +191,7 @@ export default function RepairCenter() {
   const [advanceRepairError, setAdvanceRepairError] = useState<string | null>(null);
   const [advanceRepairWarning, setAdvanceRepairWarning] = useState<string | null>(null);
   const [advanceRepairSubmitting, setAdvanceRepairSubmitting] = useState(false);
-  const formatMoney = (value: number) => `\u20B9${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const formatMoney = (value: number) => `${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   useEffect(() => {
     const refresh = () => setRepairData(loadData());
     window.addEventListener('local-storage-update', refresh);
@@ -456,7 +456,7 @@ export default function RepairCenter() {
                         if (entry.activeCount > 0 && entry.totalRemaining > 0 && repairableRemaining > 0) {
                           return (
                             <Button size="sm" variant="outline" onClick={() => openAdvanceOrderSelection(entry)}>
-                              {`+ Add \u20B9${formatMoneyWhole(repairableRemaining)} to Customer Due`}
+                              {`+ Add ${formatMoneyWhole(repairableRemaining)} to Customer Due`}
                             </Button>
                           );
                         }
@@ -516,9 +516,9 @@ export default function RepairCenter() {
                           <div className="font-medium text-slate-900">{order.productName || 'Advance Order'}</div>
                           <div className="text-xs text-slate-500">{new Date(getUpfrontOrderFinancialDate(order)).toLocaleString()}</div>
                         </div>
-                        <div className="text-right font-semibold">{`\u20B9${formatMoneyWhole(getUpfrontOrderTotalAmount(order))}`}</div>
-                        <div className="text-right font-semibold text-emerald-700">{`\u20B9${formatMoneyWhole(getUpfrontOrderAdvancePaidAmount(order))}`}</div>
-                        <div className="text-right font-semibold text-amber-700">{`\u20B9${formatMoneyWhole(Math.max(0, Number(order.remainingAmount || 0)))}`}</div>
+                        <div className="text-right font-semibold">{`${formatMoneyWhole(getUpfrontOrderTotalAmount(order))}`}</div>
+                        <div className="text-right font-semibold text-emerald-700">{`${formatMoneyWhole(getUpfrontOrderAdvancePaidAmount(order))}`}</div>
+                        <div className="text-right font-semibold text-amber-700">{`${formatMoneyWhole(Math.max(0, Number(order.remainingAmount || 0)))}`}</div>
                         <div className="text-right">
                           <Button
                             size="sm"
@@ -527,8 +527,8 @@ export default function RepairCenter() {
                             onClick={() => previewAdvanceOrderDueRepair(selectedAdvanceOrderCustomer.customer, order)}
                           >
                             {dueAlreadyCreated
-                              ? `Added \u20B9${formatMoneyWhole(Math.abs(Number(repairTx?.total || order.remainingAmount || 0)))} to Customer Due ✓`
-                              : `+ Add \u20B9${formatMoneyWhole(repairableRemaining)} to Customer Due`}
+                              ? `Added ${formatMoneyWhole(Math.abs(Number(repairTx?.total || order.remainingAmount || 0)))} to Customer Due ✓`
+                              : `+ Add ${formatMoneyWhole(repairableRemaining)} to Customer Due`}
                           </Button>
                         </div>
                       </div>

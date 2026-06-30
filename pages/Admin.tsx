@@ -776,8 +776,8 @@ export default function Admin() {
           </div>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
             <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Qty</div><div className="font-semibold">{toNonNegativeNumber(h.quantity)}</div></div>
-            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Unit Cost</div><div className="font-semibold">Ã¢â€šÂ¹{toNonNegativeNumber(h.unitPrice).toFixed(2)}</div></div>
-            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Line Total</div><div className="font-semibold">Ã¢â€šÂ¹{lineTotal.toFixed(2)}</div></div>
+            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Unit Cost</div><div className="font-semibold">{toNonNegativeNumber(h.unitPrice).toFixed(2)}</div></div>
+            <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Line Total</div><div className="font-semibold">{lineTotal.toFixed(2)}</div></div>
           </div>
           <div className="space-y-1 text-[11px]">
             <div><span className="text-muted-foreground">Reference:</span> {h.reference || 'Ã¢â‚¬â€'}</div>
@@ -793,13 +793,13 @@ export default function Admin() {
             <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-[11px]">
               <div><span className="text-muted-foreground">Party:</span> <span className="font-medium">{partyName}</span></div>
               <div><span className="text-muted-foreground">PO:</span> <span className="font-medium">{poLabel}</span></div>
-              <div><span className="text-muted-foreground">Line Total:</span> <span className="font-medium">Ã¢â€šÂ¹{lineTotal.toFixed(2)}</span></div>
-              <div><span className="text-muted-foreground">Order Total:</span> <span className="font-medium">{orderTotal != null ? `Ã¢â€šÂ¹${orderTotal.toFixed(2)}` : 'Ã¢â‚¬â€'}</span></div>
-              <div><span className="text-muted-foreground">Paid:</span> <span className="font-medium">{orderPaid != null ? `Ã¢â€šÂ¹${orderPaid.toFixed(2)}` : 'Ã¢â‚¬â€'}</span></div>
-              <div><span className="text-muted-foreground">Remaining Payable:</span> <span className="font-medium">{remainingPayable != null ? `Ã¢â€šÂ¹${remainingPayable.toFixed(2)}` : 'Ã¢â‚¬â€'}</span></div>
-              <div><span className="text-muted-foreground">Party Credit Used:</span> <span className="font-medium">Ã¢â€šÂ¹{paymentSummary.partyCredit.toFixed(2)}</span></div>
-              <div><span className="text-muted-foreground">Cash:</span> <span className="font-medium">Ã¢â€šÂ¹{paymentSummary.cash.toFixed(2)}</span></div>
-              <div><span className="text-muted-foreground">Online/Bank:</span> <span className="font-medium">Ã¢â€šÂ¹{paymentSummary.online.toFixed(2)}</span></div>
+              <div><span className="text-muted-foreground">Line Total:</span> <span className="font-medium">{lineTotal.toFixed(2)}</span></div>
+              <div><span className="text-muted-foreground">Order Total:</span> <span className="font-medium">{orderTotal != null ? `${orderTotal.toFixed(2)}` : 'Ã¢â‚¬â€'}</span></div>
+              <div><span className="text-muted-foreground">Paid:</span> <span className="font-medium">{orderPaid != null ? `${orderPaid.toFixed(2)}` : 'Ã¢â‚¬â€'}</span></div>
+              <div><span className="text-muted-foreground">Remaining Payable:</span> <span className="font-medium">{remainingPayable != null ? `${remainingPayable.toFixed(2)}` : 'Ã¢â‚¬â€'}</span></div>
+              <div><span className="text-muted-foreground">Party Credit Used:</span> <span className="font-medium">{paymentSummary.partyCredit.toFixed(2)}</span></div>
+              <div><span className="text-muted-foreground">Cash:</span> <span className="font-medium">{paymentSummary.cash.toFixed(2)}</span></div>
+              <div><span className="text-muted-foreground">Online/Bank:</span> <span className="font-medium">{paymentSummary.online.toFixed(2)}</span></div>
             </div>
             {!h.purchaseOrderId && (
               <div className="text-[11px] text-muted-foreground">Order summary unavailable.</div>
@@ -844,8 +844,8 @@ export default function Admin() {
             </div>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
               <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Qty</div><div className="font-semibold">{toNonNegativeNumber(row.quantity)}</div></div>
-              <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Unit Cost</div><div className="font-semibold">{"\u20B9"}{toNonNegativeNumber(row.unitPrice).toFixed(2)}</div></div>
-              <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Line Total</div><div className="font-semibold">{"\u20B9"}{lineTotal.toFixed(2)}</div></div>
+              <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Unit Cost</div><div className="font-semibold">{toNonNegativeNumber(row.unitPrice).toFixed(2)}</div></div>
+              <div className="rounded border bg-background p-2"><div className="text-[10px] text-muted-foreground">Line Total</div><div className="font-semibold">{lineTotal.toFixed(2)}</div></div>
             </div>
             <div className="space-y-1 text-[11px]">
               <div><span className="text-muted-foreground">Reference:</span> {row.reference || 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}</div>
@@ -1417,7 +1417,7 @@ export default function Admin() {
         if (appliedAmount <= 0) {
           setNotice({ type: 'error', message: 'Purchase was saved, but party credit could not be applied. Use Apply Party Credit from Party Statement to repair this purchase.' });
         } else if (Math.abs(appliedAmount - creditToApply) > 0.01) {
-          setNotice({ type: 'info', message: `Purchase was saved, but only Ã¢â€šÂ¹${appliedAmount.toFixed(2)} of Ã¢â€šÂ¹${creditToApply.toFixed(2)} party credit was applied. Use Apply Party Credit from Party Statement if needed.` });
+          setNotice({ type: 'info', message: `Purchase was saved, but only ${appliedAmount.toFixed(2)} of ${creditToApply.toFixed(2)} party credit was applied. Use Apply Party Credit from Party Statement if needed.` });
         }
       } catch (creditApplyError) {
         setNotice({ type: 'error', message: 'Purchase was saved, but party credit could not be applied. Use Apply Party Credit from Party Statement to repair this purchase.' });
@@ -2270,7 +2270,7 @@ export default function Admin() {
         doc.setFont("helvetica", "bold");
         doc.setFontSize(12);
         doc.setTextColor(0, 0, 0);
-        doc.text(`Rs.${product.sellPrice}`, x + 3, priceY);
+        doc.text(`${product.sellPrice}`, x + 3, priceY);
         
         const badgeText = `Stock: ${product.stock}`;
         const badgeWidth = doc.getTextWidth(badgeText) + 6;
@@ -2627,7 +2627,7 @@ export default function Admin() {
                             {product.stockByVariantColor.map((row, idx) => (
                               <div key={`${row.variant}-${row.color}-${idx}`} className="rounded border p-2 text-[11px]">
                                 <div className="font-semibold">{row.variant || NO_VARIANT} / {row.color || NO_COLOR}</div>
-                                <div className="text-muted-foreground">Stock: {toNonNegativeNumber(row.stock)} Ã¢â‚¬Â¢ Buy: Ã¢â€šÂ¹{toNonNegativeNumber(row.buyPrice)} Ã¢â‚¬Â¢ Sell: Ã¢â€šÂ¹{toNonNegativeNumber(row.sellPrice)}</div>
+                                <div className="text-muted-foreground">Stock: {toNonNegativeNumber(row.stock)} Ã¢â‚¬Â¢ Buy: {toNonNegativeNumber(row.buyPrice)} Ã¢â‚¬Â¢ Sell: {toNonNegativeNumber(row.sellPrice)}</div>
                               </div>
                             ))}
                           </div>
@@ -2738,10 +2738,10 @@ export default function Admin() {
               <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
                 <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Customers</div><div className="mt-1 text-xl font-black">{customerBalancePolicyDryRun.totalCustomers}</div></div>
                 <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Affected</div><div className="mt-1 text-xl font-black text-amber-700">{customerBalancePolicyDryRun.affectedCustomers}</div></div>
-                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Current Due</div><div className="mt-1 text-xl font-black">Ã¢â€šÂ¹{customerBalancePolicyDryRun.totalCurrentDue.toFixed(2)}</div></div>
-                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">New Due</div><div className="mt-1 text-xl font-black text-blue-700">Ã¢â€šÂ¹{customerBalancePolicyDryRun.totalNewDue.toFixed(2)}</div></div>
-                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Current Store Credit</div><div className="mt-1 text-xl font-black">Ã¢â€šÂ¹{customerBalancePolicyDryRun.totalCurrentStoreCredit.toFixed(2)}</div></div>
-                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">New Store Credit</div><div className="mt-1 text-xl font-black text-emerald-700">Ã¢â€šÂ¹{customerBalancePolicyDryRun.totalNewStoreCredit.toFixed(2)}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Current Due</div><div className="mt-1 text-xl font-black">{customerBalancePolicyDryRun.totalCurrentDue.toFixed(2)}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">New Due</div><div className="mt-1 text-xl font-black text-blue-700">{customerBalancePolicyDryRun.totalNewDue.toFixed(2)}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Current Store Credit</div><div className="mt-1 text-xl font-black">{customerBalancePolicyDryRun.totalCurrentStoreCredit.toFixed(2)}</div></div>
+                <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">New Store Credit</div><div className="mt-1 text-xl font-black text-emerald-700">{customerBalancePolicyDryRun.totalNewStoreCredit.toFixed(2)}</div></div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[980px] text-xs">
@@ -2761,13 +2761,13 @@ export default function Admin() {
                     {customerBalancePolicyDryRun.rows.slice(0, 20).map((row) => (
                       <tr key={row.customerId} className="border-t bg-white">
                         <td className="p-2 font-semibold">{row.customerName}</td>
-                        <td className="p-2 text-right">Ã¢â€šÂ¹{row.currentDue.toFixed(2)}</td>
-                        <td className="p-2 text-right">Ã¢â€šÂ¹{row.currentStoreCredit.toFixed(2)}</td>
-                        <td className="p-2 text-right">Ã¢â€šÂ¹{row.currentNetReceivable.toFixed(2)}</td>
-                        <td className="p-2 text-right text-blue-700">Ã¢â€šÂ¹{row.newDue.toFixed(2)}</td>
-                        <td className="p-2 text-right text-emerald-700">Ã¢â€šÂ¹{row.newStoreCredit.toFixed(2)}</td>
-                        <td className="p-2 text-right font-semibold">Ã¢â€šÂ¹{row.newNetReceivable.toFixed(2)}</td>
-                        <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>Ã¢â€šÂ¹{row.difference.toFixed(2)}</td>
+                        <td className="p-2 text-right">{row.currentDue.toFixed(2)}</td>
+                        <td className="p-2 text-right">{row.currentStoreCredit.toFixed(2)}</td>
+                        <td className="p-2 text-right">{row.currentNetReceivable.toFixed(2)}</td>
+                        <td className="p-2 text-right text-blue-700">{row.newDue.toFixed(2)}</td>
+                        <td className="p-2 text-right text-emerald-700">{row.newStoreCredit.toFixed(2)}</td>
+                        <td className="p-2 text-right font-semibold">{row.newNetReceivable.toFixed(2)}</td>
+                        <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>{row.difference.toFixed(2)}</td>
                       </tr>
                     ))}
                     {customerBalancePolicyDryRun.rows.length === 0 && (
@@ -2809,12 +2809,12 @@ export default function Admin() {
                               <div className="font-semibold">{row.customerName}</div>
                               <div className="text-[11px] text-muted-foreground">{row.phone || 'No phone'}</div>
                             </td>
-                            <td className="p-2 text-right">Ã¢â€šÂ¹{row.storedDue.toFixed(2)}</td>
-                            <td className="p-2 text-right text-emerald-700">Ã¢â€šÂ¹{row.storedStoreCredit.toFixed(2)}</td>
-                            <td className="p-2 text-right text-blue-700">Ã¢â€šÂ¹{row.canonicalDue.toFixed(2)}</td>
-                            <td className="p-2 text-right text-blue-700">Ã¢â€šÂ¹{row.canonicalStoreCredit.toFixed(2)}</td>
-                            <td className="p-2 text-right font-semibold">Ã¢â€šÂ¹{row.canonicalNet.toFixed(2)}</td>
-                            <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>Ã¢â€šÂ¹{row.difference.toFixed(2)}</td>
+                            <td className="p-2 text-right">{row.storedDue.toFixed(2)}</td>
+                            <td className="p-2 text-right text-emerald-700">{row.storedStoreCredit.toFixed(2)}</td>
+                            <td className="p-2 text-right text-blue-700">{row.canonicalDue.toFixed(2)}</td>
+                            <td className="p-2 text-right text-blue-700">{row.canonicalStoreCredit.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">{row.canonicalNet.toFixed(2)}</td>
+                            <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>{row.difference.toFixed(2)}</td>
                             <td className="p-2 text-right">
                               <Button
                                 size="sm"
@@ -2834,7 +2834,7 @@ export default function Admin() {
                                 <div className="grid gap-2 md:grid-cols-3">
                                   <div className="rounded-lg border bg-white p-3">
                                     <div className="font-semibold">Stored Net</div>
-                                    <div className="mt-1 text-muted-foreground">Ã¢â€šÂ¹{Math.max(0, row.storedDue - row.storedStoreCredit).toFixed(2)}</div>
+                                    <div className="mt-1 text-muted-foreground">{Math.max(0, row.storedDue - row.storedStoreCredit).toFixed(2)}</div>
                                   </div>
                                   <div className="rounded-lg border bg-white p-3">
                                     <div className="font-semibold">Open Advance Orders</div>
@@ -2887,9 +2887,9 @@ export default function Admin() {
                             <td className="p-2 font-semibold">{order.customerName}</td>
                             <td className="p-2">{order.orderNo}</td>
                             <td className="p-2"><Badge variant="outline">{order.status}</Badge></td>
-                            <td className="p-2 text-right">Ã¢â€šÂ¹{order.orderTotal.toFixed(2)}</td>
-                            <td className="p-2 text-right">Ã¢â€šÂ¹{order.advancePaid.toFixed(2)}</td>
-                            <td className="p-2 text-right font-semibold text-amber-700">Ã¢â€šÂ¹{order.remaining.toFixed(2)}</td>
+                            <td className="p-2 text-right">{order.orderTotal.toFixed(2)}</td>
+                            <td className="p-2 text-right">{order.advancePaid.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold text-amber-700">{order.remaining.toFixed(2)}</td>
                             <td className="p-2 text-right">{order.paymentHistoryCount}</td>
                           </tr>
                           {expanded && (
@@ -2944,7 +2944,7 @@ export default function Admin() {
                             <td className="p-2 font-semibold">{group.label}</td>
                             <td className="p-2 text-right">{group.count}</td>
                             <td className="p-2 text-right">{group.customerCount}</td>
-                            <td className="p-2 text-right font-semibold">Ã¢â€šÂ¹{group.totalAmount.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">{group.totalAmount.toFixed(2)}</td>
                           </tr>
                           {expanded && (
                             <tr className="border-t bg-slate-50/60">
@@ -2960,7 +2960,7 @@ export default function Admin() {
                                           <div className="text-muted-foreground">{entry.description}</div>
                                         </div>
                                         <div className="text-right">
-                                          <div className="font-semibold">Ã¢â€šÂ¹{entry.amount.toFixed(2)}</div>
+                                          <div className="font-semibold">{entry.amount.toFixed(2)}</div>
                                           <div className="text-muted-foreground">{entry.ref}</div>
                                         </div>
                                       </div>
@@ -3010,13 +3010,13 @@ export default function Admin() {
                               <div className="font-semibold">{row.customerName}</div>
                               <div className="text-[11px] text-muted-foreground">{row.phone || 'No phone'}</div>
                             </td>
-                            <td className="p-2 text-right">Ã¢â€šÂ¹{row.currentDue.toFixed(2)}</td>
-                            <td className="p-2 text-right text-emerald-700">Ã¢â€šÂ¹{row.currentStoreCredit.toFixed(2)}</td>
-                            <td className="p-2 text-right font-semibold">Ã¢â€šÂ¹{row.currentNet.toFixed(2)}</td>
-                            <td className="p-2 text-right text-blue-700">Ã¢â€šÂ¹{row.simulatedDue.toFixed(2)}</td>
-                            <td className="p-2 text-right text-blue-700">Ã¢â€šÂ¹{row.simulatedStoreCredit.toFixed(2)}</td>
-                            <td className="p-2 text-right font-semibold">Ã¢â€šÂ¹{row.simulatedNet.toFixed(2)}</td>
-                            <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>Ã¢â€šÂ¹{row.difference.toFixed(2)}</td>
+                            <td className="p-2 text-right">{row.currentDue.toFixed(2)}</td>
+                            <td className="p-2 text-right text-emerald-700">{row.currentStoreCredit.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">{row.currentNet.toFixed(2)}</td>
+                            <td className="p-2 text-right text-blue-700">{row.simulatedDue.toFixed(2)}</td>
+                            <td className="p-2 text-right text-blue-700">{row.simulatedStoreCredit.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">{row.simulatedNet.toFixed(2)}</td>
+                            <td className={`p-2 text-right font-semibold ${Math.abs(row.difference) <= 0.01 ? 'text-slate-600' : row.difference > 0 ? 'text-red-700' : 'text-emerald-700'}`}>{row.difference.toFixed(2)}</td>
                             <td className="p-2 text-right">
                               <Badge variant={row.risk === 'Safe' ? 'success' : 'outline'}>{row.risk}</Badge>
                             </td>
@@ -3031,11 +3031,11 @@ export default function Admin() {
                                   </div>
                                   <div className="rounded-lg border bg-white p-3">
                                     <div className="font-semibold">Advance-Order Credit</div>
-                                    <div className="mt-1 text-muted-foreground">Ã¢â€šÂ¹{row.advanceOrderCreditTotal.toFixed(2)}</div>
+                                    <div className="mt-1 text-muted-foreground">{row.advanceOrderCreditTotal.toFixed(2)}</div>
                                   </div>
                                   <div className="rounded-lg border bg-white p-3">
                                     <div className="font-semibold">Unknown Credit</div>
-                                    <div className="mt-1 text-muted-foreground">Ã¢â€šÂ¹{row.unknownCreditTotal.toFixed(2)}</div>
+                                    <div className="mt-1 text-muted-foreground">{row.unknownCreditTotal.toFixed(2)}</div>
                                   </div>
                                   <div className="rounded-lg border bg-white p-3">
                                     <div className="font-semibold">Warnings</div>
@@ -3085,7 +3085,7 @@ export default function Admin() {
               <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Needs Supplier Review</div><div className="mt-1 text-2xl font-black text-amber-700">{legacyPurchaseHistoryConversionDryRun.summary.needsSupplierReviewRows}</div></div>
               <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Needs Value Review</div><div className="mt-1 text-2xl font-black text-rose-700">{legacyPurchaseHistoryConversionDryRun.summary.needsValueReviewRows}</div></div>
               <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Duplicate Candidates</div><div className="mt-1 text-2xl font-black text-amber-700">{legacyPurchaseHistoryConversionDryRun.summary.duplicateCandidateRows}</div></div>
-              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Proposed Amount</div><div className="mt-1 text-2xl font-black">Ã¢â€šÂ¹{legacyPurchaseHistoryConversionDryRun.summary.totalProposedPurchaseAmount.toFixed(2)}</div></div>
+              <div className="rounded-lg border bg-slate-50 p-3"><div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Proposed Amount</div><div className="mt-1 text-2xl font-black">{legacyPurchaseHistoryConversionDryRun.summary.totalProposedPurchaseAmount.toFixed(2)}</div></div>
             </CardContent>
           </Card>
 
@@ -3134,8 +3134,8 @@ export default function Admin() {
                             <td className="p-2"><div>{row.partyName || 'Unknown supplier'}</div><div className="text-[11px] text-muted-foreground">{row.suggestedPartyName && row.suggestedPartyName !== row.partyName ? `Suggested: ${row.suggestedPartyName}` : row.partyId || row.suggestedPartyId || ''}</div></td>
                             <td className="p-2">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</td>
                             <td className="p-2 text-right">{row.quantity}</td>
-                            <td className="p-2 text-right">Ã¢â€šÂ¹{row.unitCost.toFixed(2)}</td>
-                            <td className="p-2 text-right font-semibold">Ã¢â€šÂ¹{row.lineTotal.toFixed(2)}</td>
+                            <td className="p-2 text-right">{row.unitCost.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">{row.lineTotal.toFixed(2)}</td>
                             <td className="p-2">{row.reference || row.purchaseOrderId || row.legacyHistoryId || 'Ã¢â‚¬â€'}</td>
                             <td className="p-2"><div className="font-medium">{row.suggestedAction}</div><div className="text-[11px] text-muted-foreground">{row.reviewReason}</div></td>
                           </tr>
@@ -3226,11 +3226,11 @@ export default function Admin() {
                             <td className="p-2">{row.partyId || row.suggestedPartyId || 'Ã¢â‚¬â€'}</td>
                             <td className="p-2">{row.date ? new Date(row.date).toLocaleString() : 'Unknown date'}</td>
                             <td className="p-2 text-right">{row.quantity}</td>
-                            <td className="p-2 text-right">Ã¢â€šÂ¹{row.unitCost.toFixed(2)}</td>
-                            <td className="p-2 text-right font-semibold">Ã¢â€šÂ¹{row.lineTotal.toFixed(2)}</td>
+                            <td className="p-2 text-right">{row.unitCost.toFixed(2)}</td>
+                            <td className="p-2 text-right font-semibold">{row.lineTotal.toFixed(2)}</td>
                             <td className="p-2">{row.paymentStatus}</td>
-                            <td className="p-2 text-right">{row.paidAmount == null ? 'Ã¢â‚¬â€' : `Ã¢â€šÂ¹${row.paidAmount.toFixed(2)}`}</td>
-                            <td className="p-2 text-right">{row.remainingAmount == null ? 'Ã¢â‚¬â€' : `Ã¢â€šÂ¹${row.remainingAmount.toFixed(2)}`}</td>
+                            <td className="p-2 text-right">{row.paidAmount == null ? 'Ã¢â‚¬â€' : `${row.paidAmount.toFixed(2)}`}</td>
+                            <td className="p-2 text-right">{row.remainingAmount == null ? 'Ã¢â‚¬â€' : `${row.remainingAmount.toFixed(2)}`}</td>
                             <td className="p-2">{row.paymentMethod || 'Ã¢â‚¬â€'}</td>
                             <td className="p-2">{row.purchaseOrderId || 'Ã¢â‚¬â€'}</td>
                             <td className="p-2">{row.legacyHistoryId || 'Ã¢â‚¬â€'}</td>
@@ -3259,7 +3259,7 @@ export default function Admin() {
                                       <div className="mt-1 space-y-1 text-muted-foreground">
                                         <div>Proposed PO ID: {row.proposedPurchaseOrder.id}</div>
                                         <div>Supplier: {row.proposedPurchaseOrder.partyName || 'Ã¢â‚¬â€'}</div>
-                                        <div>Total: Ã¢â€šÂ¹{Number(row.proposedPurchaseOrder.totalAmount || 0).toFixed(2)}</div>
+                                        <div>Total: {Number(row.proposedPurchaseOrder.totalAmount || 0).toFixed(2)}</div>
                                         <div>Created By: {row.proposedPurchaseOrder.createdBy || 'Ã¢â‚¬â€'}</div>
                                       </div>
                                     ) : (
@@ -3403,7 +3403,7 @@ export default function Admin() {
                   const unit = Math.max(0, Number(p.lostDamageUnitCost || p.buyPrice || 0));
                   return (
                     <tr key={p.id} className="border-t">
-                      <td className="p-3"><div className="flex items-center gap-2"><div className="h-10 w-10 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{p.image ? <img src={p.image} alt={getProductName(p)} className="h-full w-full object-cover"  loading="lazy"  decoding="async" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div><div><div className="font-medium">{getProductName(p)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(p)}</div></div></div></td><td className="p-3">{getProductBarcode(p)}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">Ã¢â€šÂ¹{unit.toFixed(2)}</td><td className="p-3">Ã¢â€šÂ¹{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
+                      <td className="p-3"><div className="flex items-center gap-2"><div className="h-10 w-10 rounded-md overflow-hidden border bg-muted/20 flex items-center justify-center">{p.image ? <img src={p.image} alt={getProductName(p)} className="h-full w-full object-cover"  loading="lazy"  decoding="async" /> : <Package className="w-4 h-4 text-muted-foreground" />}</div><div><div className="font-medium">{getProductName(p)}</div><div className="text-xs text-muted-foreground">{getProductBarcode(p)}</div></div></div></td><td className="p-3">{getProductBarcode(p)}</td><td className="p-3">{p.stock}</td><td className="p-3">{qty}</td><td className="p-3">{unit.toFixed(2)}</td><td className="p-3">{(qty * unit).toFixed(2)}</td><td className="p-3">{p.lostDamageUpdatedAt ? new Date(p.lostDamageUpdatedAt).toLocaleString() : '-'}</td>
                       <td className="p-3"><Button size="sm" variant="outline" onClick={() => openLostDamageModal(p)}>Edit</Button></td>
                     </tr>
                   );
@@ -3590,7 +3590,7 @@ export default function Admin() {
                       <div className="space-y-2">
                         <Label>Purchase / Buy Price</Label>
                         <div className="relative">
-                          <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs">Ã¢â€šÂ¹</span>
+                          <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs"></span>
                           <Input type="number" className="pl-6" value={formData.buyPrice ?? ''} onChange={e => setFormData({ ...formData, buyPrice: e.target.value })} placeholder="0.00" disabled={!!(formData.variants?.length || formData.colors?.length)} />
                         </div>
                       </div>
@@ -3598,7 +3598,7 @@ export default function Admin() {
                       <div className="space-y-2">
                         <Label>Sell Price</Label>
                         <div className="relative">
-                          <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs">Ã¢â€šÂ¹</span>
+                          <span className="absolute left-2.5 top-2.5 text-muted-foreground text-xs"></span>
                           <Input type="number" className="pl-6 font-bold text-primary" value={formData.sellPrice ?? ''} onChange={e => setFormData({ ...formData, sellPrice: e.target.value })} placeholder="0.00" disabled={!!(formData.variants?.length || formData.colors?.length)} />
                         </div>
                       </div>
@@ -3721,7 +3721,7 @@ export default function Admin() {
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
                   <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Current Stock</div><div className="font-semibold">{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.stock) : purchaseTarget.stock}</div></div>
-                  <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Current Buy Price</div><div className="font-semibold">Ã¢â€šÂ¹{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.buyPrice) : purchaseTarget.buyPrice}</div></div>
+                  <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Current Buy Price</div><div className="font-semibold">{selectedPurchaseVariantRow ? toNonNegativeNumber(selectedPurchaseVariantRow.buyPrice) : purchaseTarget.buyPrice}</div></div>
                   <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">{toNonNegativeNumber(purchaseTarget.totalPurchase)}</div></div>
                   <div className="rounded-lg border bg-white p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Sold</div><div className="font-semibold">{toNonNegativeNumber(purchaseTarget.totalSold)}</div></div>
                 </div>
@@ -3737,7 +3737,7 @@ export default function Admin() {
                   >
                     {purchaseVariantRows.map((row) => (
                       <option key={row.key} value={row.key}>
-                        {row.variant || NO_VARIANT} / {row.color || NO_COLOR} Ã¢â‚¬Â¢ Stock {toNonNegativeNumber(row.stock)} Ã¢â‚¬Â¢ Buy Ã¢â€šÂ¹{toNonNegativeNumber(row.buyPrice)}
+                        {row.variant || NO_VARIANT} / {row.color || NO_COLOR} Ã¢â‚¬Â¢ Stock {toNonNegativeNumber(row.stock)} Ã¢â‚¬Â¢ Buy {toNonNegativeNumber(row.buyPrice)}
                       </option>
                     ))}
                   </select>
@@ -3800,26 +3800,26 @@ export default function Admin() {
                   <div><Label>Remaining Due Before Party Credit</Label><Input value={purchaseRemainingDue.toFixed(2)} readOnly className="bg-muted/30 font-medium" /></div>
                   <div><Label>Payment Note (optional)</Label><Input value={purchasePaymentNote} onChange={(e) => setPurchasePaymentNote(e.target.value)} /></div>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs pt-2">
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">Ã¢â€šÂ¹{purchaseTotalCost.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Cash Paid</div><div className="font-semibold">Ã¢â€šÂ¹{purchaseEffectiveCashPaid.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Bank Paid</div><div className="font-semibold">Ã¢â€šÂ¹{purchaseEffectiveBankPaid.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Amount Paid</div><div className="font-semibold">Ã¢â€šÂ¹{purchaseEffectivePaidAmount.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Due Before Party Credit</div><div className="font-semibold">Ã¢â€šÂ¹{purchaseRemainingDue.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Party Credit Available</div><div className="font-semibold">Ã¢â€šÂ¹{purchaseAvailablePartyCredit.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Party Credit Applied</div><div className="font-semibold">Ã¢â€šÂ¹{purchaseCreditAppliedPreview.toFixed(2)}</div></div>
-                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Final Payable After Credit</div><div className="font-semibold">Ã¢â€šÂ¹{purchaseFinalPayableAfterCredit.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Total Purchase</div><div className="font-semibold">{purchaseTotalCost.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Cash Paid</div><div className="font-semibold">{purchaseEffectiveCashPaid.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Bank Paid</div><div className="font-semibold">{purchaseEffectiveBankPaid.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Amount Paid</div><div className="font-semibold">{purchaseEffectivePaidAmount.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Due Before Party Credit</div><div className="font-semibold">{purchaseRemainingDue.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Party Credit Available</div><div className="font-semibold">{purchaseAvailablePartyCredit.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Party Credit Applied</div><div className="font-semibold">{purchaseCreditAppliedPreview.toFixed(2)}</div></div>
+                    <div className="rounded-lg border bg-muted/20 p-2"><div className="text-[10px] uppercase text-muted-foreground">Final Payable After Credit</div><div className="font-semibold">{purchaseFinalPayableAfterCredit.toFixed(2)}</div></div>
                   </div>
                 </div>
               </div>
               <div className="flex gap-2">
-                <Button type="button" variant="outline" onClick={() => setPurchaseNextBuyPrice(purchaseAveragePrice.toFixed(2))}>Average Price: Ã¢â€šÂ¹{purchaseAveragePrice.toFixed(2)}</Button>
+                <Button type="button" variant="outline" onClick={() => setPurchaseNextBuyPrice(purchaseAveragePrice.toFixed(2))}>Average Price: {purchaseAveragePrice.toFixed(2)}</Button>
                 <Input type="number" placeholder="New buy price (you can edit)" value={purchaseNextBuyPrice} onChange={(e) => setPurchaseNextBuyPrice(e.target.value)} />
               </div>
               <p className="text-xs text-muted-foreground">Click Average Price to auto-fill, or edit manually before applying.</p>
               {purchaseError && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{purchaseError}</div>}
               <div className="sticky bottom-0 mt-2 flex flex-col gap-2 rounded-lg border bg-background/95 p-3 backdrop-blur sm:flex-row sm:items-center sm:justify-between">
                 <div className="text-sm">
-                  <span className="font-semibold">Total:</span> Ã¢â€šÂ¹{purchaseTotalCost.toFixed(2)} Ã‚Â· <span className="font-semibold">Paid:</span> Ã¢â€šÂ¹{purchaseEffectivePaidAmount.toFixed(2)} Ã‚Â· <span className="font-semibold">Due:</span> Ã¢â€šÂ¹{purchaseRemainingDue.toFixed(2)}
+                  <span className="font-semibold">Total:</span> {purchaseTotalCost.toFixed(2)} Ã‚Â· <span className="font-semibold">Paid:</span> {purchaseEffectivePaidAmount.toFixed(2)} Ã‚Â· <span className="font-semibold">Due:</span> {purchaseRemainingDue.toFixed(2)}
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={() => setPurchaseTarget(null)}>Cancel</Button>
@@ -3935,12 +3935,12 @@ export default function Admin() {
                           </td>
                           <td className="p-3">{row.date ? new Date(row.date).toLocaleString() : 'N/A'}</td>
                           <td className="p-3 text-right">{row.quantity}</td>
-                          <td className="p-3 text-right">Ã¢â€šÂ¹{row.unitPrice.toFixed(2)}</td>
-                          <td className="p-3 text-right">Ã¢â€šÂ¹{row.total.toFixed(2)}</td>
+                          <td className="p-3 text-right">{row.unitPrice.toFixed(2)}</td>
+                          <td className="p-3 text-right">{row.total.toFixed(2)}</td>
                           <td className="p-3">
                             <div className="font-medium">{row.reason === 'product_not_found' ? 'Product doc missing' : 'History row missing'}</div>
                             <div className="text-xs text-muted-foreground">
-                              Preview payment: {row.expectedHistoryRowPreview.paymentMethod || 'N/A'} Ã‚Â· Paid Ã¢â€šÂ¹{Number(row.expectedHistoryRowPreview.paidAmount || 0).toFixed(2)}
+                              Preview payment: {row.expectedHistoryRowPreview.paymentMethod || 'N/A'} Ã‚Â· Paid {Number(row.expectedHistoryRowPreview.paidAmount || 0).toFixed(2)}
                             </div>
                           </td>
                         </tr>
@@ -3994,7 +3994,7 @@ export default function Admin() {
                 </div>
                 <div className="rounded-lg border bg-slate-50 p-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total</div>
-                  <div className="mt-1 text-lg font-bold text-slate-900">Ã¢â€šÂ¹{Number(purchaseTraceResult.purchaseOrder?.total || 0).toFixed(2)}</div>
+                  <div className="mt-1 text-lg font-bold text-slate-900">{Number(purchaseTraceResult.purchaseOrder?.total || 0).toFixed(2)}</div>
                 </div>
               </div>
               {purchaseTraceResult.purchaseOrder ? (
@@ -4031,8 +4031,8 @@ export default function Admin() {
                           </td>
                           <td className="p-3">
                             <div>Qty: {line.quantity}</div>
-                            <div>Unit Price: Ã¢â€šÂ¹{line.unitPrice.toFixed(2)}</div>
-                            <div>Total: Ã¢â€šÂ¹{line.lineTotal.toFixed(2)}</div>
+                            <div>Unit Price: {line.unitPrice.toFixed(2)}</div>
+                            <div>Total: {line.lineTotal.toFixed(2)}</div>
                           </td>
                           <td className="p-3">
                             <div className="font-medium">{line.productFound ? 'Product found' : 'Product missing'}</div>
@@ -4047,7 +4047,7 @@ export default function Admin() {
                               <div key={row.id} className="mt-1 rounded border bg-slate-50 px-2 py-1 text-xs text-muted-foreground">
                                 <div>ID: {row.id}</div>
                                 <div>Date: {row.date ? new Date(row.date).toLocaleString() : 'N/A'}</div>
-                                <div>Qty: {Number(row.quantity || 0)} Ã‚Â· Unit: Ã¢â€šÂ¹{Number(row.unitPrice || 0).toFixed(2)}</div>
+                                <div>Qty: {Number(row.quantity || 0)} Ã‚Â· Unit: {Number(row.unitPrice || 0).toFixed(2)}</div>
                               </div>
                             ))}
                           </td>
@@ -4146,7 +4146,7 @@ export default function Admin() {
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Current stock</div><div className="font-semibold">{viewingProduct.stock}</div></div>
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Total purchase (variants)</div><div className="font-semibold">{viewingVariantDetails.totalPurchase}</div></div>
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Total sold (variants)</div><div className="font-semibold">{viewingVariantDetails.totalSold}</div></div>
-                    <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Avg Buy / Sell</div><div className="font-semibold">Ã¢â€šÂ¹{viewingVariantDetails.avgBuyPrice.toFixed(2)} / Ã¢â€šÂ¹{viewingVariantDetails.avgSellPrice.toFixed(2)}</div></div>
+                    <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Avg Buy / Sell</div><div className="font-semibold">{viewingVariantDetails.avgBuyPrice.toFixed(2)} / {viewingVariantDetails.avgSellPrice.toFixed(2)}</div></div>
                     <div className="rounded border p-2 bg-muted/20"><div className="text-muted-foreground">Lost & Damage</div><div className="font-semibold">{Math.max(0, Number(viewingProduct.lostDamageQty || 0))} pcs</div></div>
                   </div>
                   <div>
@@ -4168,8 +4168,8 @@ export default function Admin() {
                               <td className="p-2">{row.variant || NO_VARIANT}</td>
                               <td className="p-2">{row.color || NO_COLOR}</td>
                               <td className="p-2">{toNonNegativeNumber(row.stock)}</td>
-                              <td className="p-2">Ã¢â€šÂ¹{toNonNegativeNumber(row.buyPrice)}</td>
-                              <td className="p-2">Ã¢â€šÂ¹{toNonNegativeNumber(row.sellPrice)}</td>
+                              <td className="p-2">{toNonNegativeNumber(row.buyPrice)}</td>
+                              <td className="p-2">{toNonNegativeNumber(row.sellPrice)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -4411,7 +4411,7 @@ export default function Admin() {
                                           <h4 className="font-bold text-xs truncate" title={getProductName(p)}>{getProductName(p)}</h4>
                                           <p className="text-[9px] text-muted-foreground font-mono truncate">{getProductBarcode(p)}</p>
                                           <div className="flex items-center justify-between mt-2">
-                                              <span className="text-xs font-bold">Ã¢â€šÂ¹{p.sellPrice}</span>
+                                              <span className="text-xs font-bold">{p.sellPrice}</span>
                                               <Badge variant={p.stock === 0 ? "destructive" : "secondary"} className="h-5 px-1.5 text-[10px]">
                                                   Qty: {p.stock}
                                               </Badge>
@@ -4468,9 +4468,9 @@ export default function Admin() {
                 <div>Purchase order: <span className="font-medium">{linkedOrder?.billNumber || linkedOrder?.id || targetHistory?.purchaseOrderId || 'Ã¢â‚¬â€'}</span></div>
                 <div className="grid grid-cols-2 gap-2 text-xs rounded border p-2">
                   <div>Old quantity: {oldQty}</div>
-                  <div>Old unit price: Ã¢â€šÂ¹{oldUnitPrice.toFixed(2)}</div>
-                  <div>Old total: Ã¢â€šÂ¹{oldTotal.toFixed(2)}</div>
-                  <div>Covered amount: Ã¢â€šÂ¹{coveredPaid.toFixed(2)}</div>
+                  <div>Old unit price: {oldUnitPrice.toFixed(2)}</div>
+                  <div>Old total: {oldTotal.toFixed(2)}</div>
+                  <div>Covered amount: {coveredPaid.toFixed(2)}</div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div><Label>Quantity</Label><Input type="number" min="0" value={purchaseEditQuantity} onChange={(e) => setPurchaseEditQuantity(e.target.value)} /></div>
@@ -4478,11 +4478,11 @@ export default function Admin() {
                 </div>
                 <div className="rounded border p-2 text-xs">
                   <div className="font-medium">payable impact</div>
-                  <div>New total: Ã¢â€šÂ¹{newTotal.toFixed(2)}</div>
-                  <div>Difference: Ã¢â€šÂ¹{(newTotal - oldTotal).toFixed(2)}</div>
+                  <div>New total: {newTotal.toFixed(2)}</div>
+                  <div>Difference: {(newTotal - oldTotal).toFixed(2)}</div>
                   <div>stock delta: {stockDelta >= 0 ? '+' : ''}{stockDelta}</div>
-                  <div>Estimated remaining payable after edit: Ã¢â€šÂ¹{estimatedRemaining.toFixed(2)}</div>
-                  {estimatedOverpaymentCredit > 0 && <div>Overpayment will become Our Credit: Ã¢â€šÂ¹{estimatedOverpaymentCredit.toFixed(2)}</div>}
+                  <div>Estimated remaining payable after edit: {estimatedRemaining.toFixed(2)}</div>
+                  {estimatedOverpaymentCredit > 0 && <div>Overpayment will become Our Credit: {estimatedOverpaymentCredit.toFixed(2)}</div>}
                 </div>
                 {purchaseEditError && <div className="text-xs text-red-600">{purchaseEditError}</div>}
                 <div className="flex justify-end gap-2">
@@ -4505,14 +4505,14 @@ export default function Admin() {
               <div className="text-sm"><span className="font-medium">{lostDamageTarget.name}</span></div>
               <div className="grid grid-cols-2 gap-2 text-sm">
                 <div className="rounded border p-2">Current Stock: <span className="font-semibold">{Math.max(0, Number(lostDamageTarget.stock || 0))}</span></div>
-                <div className="rounded border p-2">Purchase Price: <span className="font-semibold">Ã¢â€šÂ¹{Math.max(0, Number(lostDamageTarget.buyPrice || 0)).toFixed(2)}</span></div>
+                <div className="rounded border p-2">Purchase Price: <span className="font-semibold">{Math.max(0, Number(lostDamageTarget.buyPrice || 0)).toFixed(2)}</span></div>
               </div>
               <div className="text-xs text-muted-foreground">Existing Lost & Damage Qty: {Math.max(0, Number(lostDamageTarget.lostDamageQty || 0))}</div>
               <div>
                 <Label>Final Lost & Damage Quantity</Label>
                 <Input type="number" min={0} step={1} value={lostDamageQtyInput} inputMode="numeric" onWheel={e => (e.currentTarget as HTMLInputElement).blur()} onChange={(e) => setLostDamageQtyInput(e.target.value.replace(/[^\d]/g, ''))} />
               </div>
-              <div className="text-sm">Total Loss Amount: <span className="font-semibold">Ã¢â€šÂ¹{(Math.max(0, Number(lostDamageQtyInput || 0)) * Math.max(0, Number(lostDamageTarget.buyPrice || 0))).toFixed(2)}</span></div>
+              <div className="text-sm">Total Loss Amount: <span className="font-semibold">{(Math.max(0, Number(lostDamageQtyInput || 0)) * Math.max(0, Number(lostDamageTarget.buyPrice || 0))).toFixed(2)}</span></div>
               {lostDamageError && <div className="text-sm text-red-600">{lostDamageError}</div>}
               <div className="flex justify-end gap-2 pt-2">
                 <Button variant="outline" onClick={() => { setLostDamageTarget(null); setLostDamageError(null); }}>Cancel</Button>

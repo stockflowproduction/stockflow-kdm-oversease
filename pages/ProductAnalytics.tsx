@@ -63,7 +63,7 @@ type ProductAggregate = {
 };
 
 const safeNum = (value: unknown) => (Number.isFinite(Number(value)) ? Number(value) : 0);
-const fmtCurrency = (value: number) => `₹${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+const fmtCurrency = (value: number) => `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 const fmtQty = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 
 const getTxType = (tx: Transaction) => String((tx as Transaction & { type?: string }).type || '').toLowerCase();
