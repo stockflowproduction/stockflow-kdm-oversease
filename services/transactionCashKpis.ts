@@ -40,7 +40,7 @@ export function getTransactionCashKpis(tx: Transaction, saleCashPaid = 0) {
 
   if (type === 'sale' || type === 'historical_reference') {
     result.totalCashIn = getSaleCashKept(tx, saleCashPaid);
-    result.cashReceivedOnCreditDue = getSaleCashAppliedToPreviousDue(tx, saleCashPaid);
+    // Credit Received is a customer payment receipt, never a sale settlement.
   } else if (type === 'return') {
     const mode = String(tx.returnHandlingMode || '').trim().toLowerCase();
     if (mode === 'refund_cash' || (!mode && cash)) result.totalCashOut = amount;

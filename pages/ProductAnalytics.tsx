@@ -1,9 +1,11 @@
 import { getProductBarcode, getProductCategory, getProductName, safeLower } from '../utils/productText';
 import { useEffect, useMemo, useState } from 'react';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
+import { Pagination } from '../components/Pagination';
 import { BarChart3, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
 import { loadData } from '../services/storage';
-import { exportProductAnalyticsToExcel, exportSelectedProductAnalyticsToExcel } from '../services/excel';
+import { exportSelectedProductAnalyticsToExcel } from '../services/excel';
 import { normalizeTransactionItems } from '../utils/transactionItems';
 import type { Customer, Product, Transaction } from '../types';
 
@@ -143,6 +145,58 @@ const computeMetrics = (lines: ParsedLine[]): Metrics => {
   };
 };
 
+const buildProductExportDetails = (product: ProductAggregate) => {
+  const variations = new Map<string, { variant: string; color: string; lines: ParsedLine[] }>();
+  const days = new Map<string, ParsedLine[]>();
+  const months = new Map<string, ParsedLine[]>();
+  for (const line of product.lines) {
+    const key = JSON.stringify([line.variant, line.color]);
+    const variation = variations.get(key) || { variant: line.variant, color: line.color, lines: [] };
+    variation.lines.push(line);
+    variations.set(key, variation);
+    const day = line.txDate.slice(0, 10);
+    const month = line.txDate.slice(0, 7);
+    if (!days.has(day)) days.set(day, []);
+    if (!months.has(month)) months.set(month, []);
+    days.get(day)!.push(line);
+    months.get(month)!.push(line);
+  }
+  const trendRows = (buckets: Map<string, ParsedLine[]>) => Array.from(buckets.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([period, lines]) => {
+      const metrics = computeMetrics(lines);
+      return {
+        period,
+        qtySold: metrics.totalQuantitySold,
+        qtyReturned: metrics.totalQuantityReturned,
+        qtyNet: metrics.netQuantity,
+        revenue: metrics.totalRevenue,
+        cogs: metrics.totalCOGS,
+        profit: metrics.grossProfit,
+      };
+    });
+  const dailyTrend = trendRows(days).map(({ period, ...metrics }) => ({ date: period, ...metrics }));
+  const monthlyTrend = trendRows(months).map(({ period, ...metrics }) => ({ month: period, ...metrics }));
+  const peak = <T extends { qtyNet: number }>(rows: T[]): T | null => rows.reduce<T | null>(
+    (best, row) => best === null || row.qtyNet > best.qtyNet ? row : best, null,
+  );
+  return {
+    productId: product.productId,
+    productName: product.productName,
+    barcode: product.barcode,
+    category: product.category,
+    summaryMetrics: product.metrics,
+    variationBreakdown: Array.from(variations.values())
+      .map(({ variant, color, lines }) => ({ variant, color, metrics: computeMetrics(lines) }))
+      .sort((a, b) => b.metrics.totalRevenue - a.metrics.totalRevenue),
+    dailyTrend,
+    monthlyTrend,
+    peakSaleDay: peak(dailyTrend),
+    peakSaleMonth: peak(monthlyTrend),
+    transactionTraceability: [...product.lines].sort((a, b) => new Date(b.txDate).getTime() - new Date(a.txDate).getTime()),
+  };
+};
+
 const MiniBar = ({ value, max, color }: { value: number; max: number; color: string }) => (
   <div className="h-2 w-full bg-slate-100 rounded">
     <div className={`h-2 rounded ${color}`} style={{ width: `${max <= 0 ? 0 : Math.max(2, (Math.abs(value) / max) * 100)}%` }} />
@@ -150,12 +204,14 @@ const MiniBar = ({ value, max, color }: { value: number; max: number; color: str
 );
 
 export default function ProductAnalytics() {
-  const [data, setData] = useState(loadData());
+  const [data, setData] = useState(() => loadData());
   const [filtersOpen, setFiltersOpen] = useState(true);
   const [preset, setPreset] = useState<DatePreset>('30d');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const [productSearch, setProductSearch] = useState('');
+  const settledProductSearch = useDebouncedValue(productSearch);
+  const [tracePage, setTracePage] = useState(1);
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [variantFilter, setVariantFilter] = useState('all');
   const [colorFilter, setColorFilter] = useState('all');
@@ -286,7 +342,7 @@ export default function ProductAnalytics() {
   const distinctPayments = useMemo(() => Array.from(new Set(parsedLines.map((line) => line.paymentMethod))).sort(), [parsedLines]);
 
   const filteredLines = useMemo(() => {
-    const query = safeLower(productSearch.trim());
+    const query = safeLower(settledProductSearch.trim());
     const minQtyN = minQty === '' ? null : safeNum(minQty);
     const maxQtyN = maxQty === '' ? null : safeNum(maxQty);
     const minProfitN = minProfit === '' ? null : safeNum(minProfit);
@@ -310,9 +366,9 @@ export default function ProductAnalytics() {
       if (maxProfitN !== null && line.profit > maxProfitN) return false;
       return true;
     });
-  }, [parsedLines, productSearch, categoryFilter, variantFilter, colorFilter, customerFilter, paymentFilter, txTypeFilter, minQty, maxQty, minProfit, maxProfit, dateRange]);
+  }, [parsedLines, settledProductSearch, categoryFilter, variantFilter, colorFilter, customerFilter, paymentFilter, txTypeFilter, minQty, maxQty, minProfit, maxProfit, dateRange]);
 
-  const productAggregates = useMemo<ProductAggregate[]>(() => {
+  const allProductAggregates = useMemo<ProductAggregate[]>(() => {
     const byProduct = new Map<string, ParsedLine[]>();
     for (const line of filteredLines) {
       if (!byProduct.has(line.productId)) byProduct.set(line.productId, []);
@@ -334,14 +390,20 @@ export default function ProductAnalytics() {
       return b.metrics.totalRevenue - a.metrics.totalRevenue;
     });
 
+    return rows;
+  }, [filteredLines, sortBy]);
+
+  const productAggregates = useMemo(() => {
     const n = Math.max(1, Math.floor(safeNum(topN) || 25));
-    return rows.slice(0, n);
-  }, [filteredLines, sortBy, topN]);
+    return allProductAggregates.slice(0, n);
+  }, [allProductAggregates, topN]);
 
   const globalMetrics = useMemo(() => computeMetrics(filteredLines), [filteredLines]);
   const returnsImpact = useMemo(() => filteredLines.filter((line) => line.qtySigned < 0).reduce((sum, line) => sum + line.profit, 0), [filteredLines]);
 
   const selectedProduct = useMemo(() => productAggregates.find((row) => row.productId === selectedProductId) || null, [productAggregates, selectedProductId]);
+  useEffect(() => setTracePage(1), [selectedProductId, filteredLines]);
+  const sortedTraceLines = useMemo(() => selectedProduct ? [...selectedProduct.lines].sort((a, b) => new Date(b.txDate).getTime() - new Date(a.txDate).getTime()) : [], [selectedProduct]);
 
   const variationBreakdown = useMemo(() => {
     if (!selectedProduct) return [] as Array<{ variant: string; color: string; metrics: Metrics }>;
@@ -431,26 +493,44 @@ export default function ProductAnalytics() {
   const rowCountLabel = `${productAggregates.length} products from ${filteredLines.length} filtered line-items`;
 
   const handleExportAnalytics = () => {
-    const rows = productAggregates.map((row) => ({
-      productId: row.productId,
-      productName: row.productName,
-      barcode: row.barcode || '',
-      category: row.category || '',
-      qtySold: row.metrics.totalQuantitySold,
-      qtyReturned: row.metrics.totalQuantityReturned,
-      netQty: row.metrics.netQuantity,
-      revenue: row.metrics.totalRevenue,
-      cogs: row.metrics.totalCOGS,
-      grossProfit: row.metrics.grossProfit,
-      avgSellPrice: row.metrics.avgSellingPrice,
-      avgCostPrice: row.metrics.avgCostPrice,
-      marginPercent: row.metrics.profitMarginPercent,
-      transactionCount: row.metrics.totalTransactionsCount,
-      uniqueCustomers: row.metrics.uniqueCustomersCount,
-      firstSaleDate: row.metrics.firstSaleDate ? row.metrics.firstSaleDate.slice(0, 10) : '',
-      lastSaleDate: row.metrics.lastSaleDate ? row.metrics.lastSaleDate.slice(0, 10) : '',
-    }));
-    exportProductAnalyticsToExcel(rows);
+    const exportedAt = new Date().toISOString();
+    const payload = {
+      schemaVersion: 1,
+      exportedAt,
+      scope: 'All matching products and line-items; Top N applies only to the display.',
+      filters: {
+        datePreset: preset, customStart, customEnd,
+        dateFrom: dateRange.from?.toISOString() ?? null,
+        dateTo: dateRange.to?.toISOString() ?? null,
+        productSearch: settledProductSearch, category: categoryFilter, variant: variantFilter, color: colorFilter,
+        customer: customerFilter, paymentMethod: paymentFilter, transactionType: txTypeFilter,
+        minQuantity: minQty === '' ? null : safeNum(minQty),
+        maxQuantity: maxQty === '' ? null : safeNum(maxQty),
+        minProfit: minProfit === '' ? null : safeNum(minProfit),
+        maxProfit: maxProfit === '' ? null : safeNum(maxProfit),
+        sortBy,
+      },
+      productCount: allProductAggregates.length,
+      lineItemCount: filteredLines.length,
+      summaryMetrics: { ...globalMetrics, returnsImpact },
+      revenueProfitTrend,
+      categoryDistribution: Array.from(allProductAggregates.reduce((totals, product) => {
+        totals.set(product.category, (totals.get(product.category) || 0) + product.metrics.totalRevenue);
+        return totals;
+      }, new Map<string, number>()))
+        .map(([category, revenue]) => ({ category, revenue }))
+        .sort((a, b) => b.revenue - a.revenue),
+      products: allProductAggregates.map(buildProductExportDetails),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Product_Analytics_${exportedAt.slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleExportSelectedProduct = () => {
@@ -545,7 +625,7 @@ export default function ProductAnalytics() {
           <p className="text-muted-foreground">Transaction-first blueprint from sale, return, and historical reference line-items.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" onClick={handleExportAnalytics}>Export Analytics</Button>
+          <Button variant="outline" onClick={handleExportAnalytics} disabled={productSearch !== settledProductSearch}>Export Analytics</Button>
           {selectedProduct && <Button variant="outline" onClick={handleExportSelectedProduct}>Export Selected Product</Button>}
           <Button variant="outline" onClick={() => setFiltersOpen((prev) => !prev)} className="gap-2">
             <BarChart3 className="w-4 h-4" />
@@ -878,8 +958,7 @@ export default function ProductAnalytics() {
                         </tr>
                       </thead>
                       <tbody>
-                        {[...selectedProduct.lines]
-                          .sort((a, b) => new Date(b.txDate).getTime() - new Date(a.txDate).getTime())
+                        {sortedTraceLines.slice((tracePage - 1) * 50, tracePage * 50)
                           .map((line) => (
                             <tr key={`${line.txId}-${line.productId}-${line.variant}-${line.color}-${line.txDate}-${line.qtySigned}`} className="border-b">
                               <td className="py-2">{line.txDate.slice(0, 10)}</td>
@@ -895,6 +974,7 @@ export default function ProductAnalytics() {
                       </tbody>
                     </table>
                   </div>
+                  <Pagination page={tracePage} totalRows={sortedTraceLines.length} pageSize={50} onPageChange={setTracePage} />
                 </CardContent>
               </Card>
             </div>

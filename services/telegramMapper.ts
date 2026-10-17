@@ -170,7 +170,7 @@ const normalizeFrequencyValue = (
   }
 
   return unit === 'seconds'
-    ? 60
+    ? 5
     : 1;
 };
 

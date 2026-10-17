@@ -91,6 +91,48 @@ export const telegramFrequencyToMs = (
   }
 };
 
+export const normalizeTelegramFrequencyFloor = (
+  value: unknown,
+  unit: TelegramCollectionFrequencyUnit,
+): {
+  value: number;
+  unit: TelegramCollectionFrequencyUnit;
+} => {
+  const parsed = Number(value);
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed <= 0
+  ) {
+    return {
+      value: 5,
+      unit: 'seconds',
+    };
+  }
+
+  const frequencyMs =
+    telegramFrequencyToMs(
+      parsed,
+      unit,
+    );
+
+  if (
+    !Number.isFinite(frequencyMs) ||
+    frequencyMs >=
+      TELEGRAM_MIN_FREQUENCY_MS
+  ) {
+    return {
+      value: parsed,
+      unit,
+    };
+  }
+
+  return {
+    value: 5,
+    unit: 'seconds',
+  };
+};
+
 export const isTelegramFrequencyUnit = (
   value: unknown,
 ): value is TelegramCollectionFrequencyUnit => {

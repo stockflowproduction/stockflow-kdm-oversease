@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
+import { Pagination } from '../components/Pagination';
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
@@ -2681,7 +2683,7 @@ export default function Finance({
 
     return parsed ? formatDateDisplay(parsed) : "Date not available";
   };
-  const [data, setData] = useState<AppState>(loadData());
+  const [data, setData] = useState<AppState>(() => loadData());
   const [storageHydration, setStorageHydration] = useState(() =>
     getStorageHydrationState(),
   );
@@ -2867,6 +2869,9 @@ export default function Finance({
   const [expenseCustomFrom, setExpenseCustomFrom] = useState("");
   const [expenseCustomTo, setExpenseCustomTo] = useState("");
   const [expenseSearchQuery, setExpenseSearchQuery] = useState("");
+  const settledExpenseSearchQuery = useDebouncedValue(expenseSearchQuery);
+  const [expensePage, setExpensePage] = useState(1);
+  const [cashHistoryPage, setCashHistoryPage] = useState(1);
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<
     "all" | string
   >("all");
@@ -2931,6 +2936,7 @@ export default function Finance({
   >("all");
 
   const [cashbookCustomerQuery, setCashbookCustomerQuery] = useState("");
+  const settledCashbookCustomerQuery = useDebouncedValue(cashbookCustomerQuery);
   const [cashbookPage, setCashbookPage] = useState(1);
   const [cashbookScope, setCashbookScope] = useState<"recent_90d" | "all">(
     "recent_90d",
@@ -3263,9 +3269,9 @@ export default function Finance({
     [cashSessions],
   );
 
-  const cashHistory = [...visibleCashSessions].sort(
+  const cashHistory = useMemo(() => [...visibleCashSessions].sort(
     (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime(),
-  );
+  ), [visibleCashSessions]);
 
   const filteredCashHistory = useMemo(
     () =>
@@ -3304,6 +3310,15 @@ export default function Finance({
       ),
     [cashHistory, cashHistoryRange],
   );
+
+  useEffect(() => setCashHistoryPage(1), [cashHistoryRange]);
+  useEffect(() => setCashHistoryPage(page => Math.min(page, Math.max(1, Math.ceil(filteredCashHistory.length / 20)))), [filteredCashHistory.length]);
+  const pagedCashHistory = useMemo(() => filteredCashHistory.slice((cashHistoryPage - 1) * 20, cashHistoryPage * 20), [filteredCashHistory, cashHistoryPage]);
+  const pagedCashHistoryTotals = useMemo(() => new Map((activeTab === 'cash' && !simplifiedShiftAccess ? pagedCashHistory : []).map(session => [session.id, getSessionCashTotals(
+    data.transactions, expenses, cashAdjustments, data.deleteCompensations || [],
+    data.deletedTransactions || [], data.purchaseOrders || [], data.manualCashbookEntries || [],
+    session.startTime, session.endTime, undefined, upfrontOrders, data.supplierPayments || [],
+  )])), [activeTab, simplifiedShiftAccess, pagedCashHistory, data, expenses, cashAdjustments, upfrontOrders]);
 
   const activeHistorySession = useMemo(
     () =>
@@ -4831,7 +4846,7 @@ export default function Finance({
       categoryFilter?: string;
     },
   ) => {
-    const normalizedSearch = (options?.searchQuery ?? expenseSearchQuery)
+    const normalizedSearch = (options?.searchQuery ?? settledExpenseSearchQuery)
       .trim()
       .toLowerCase();
 
@@ -4896,7 +4911,7 @@ export default function Finance({
     [
       shouldComputeExpenseTabDerives,
       expenses,
-      expenseSearchQuery,
+      settledExpenseSearchQuery,
       expenseCategoryFilter,
       expensePreset,
       expenseCustomFrom,
@@ -4904,6 +4919,10 @@ export default function Finance({
       activeTab,
     ],
   );
+
+  useEffect(() => setExpensePage(1), [settledExpenseSearchQuery, expenseCategoryFilter, expensePreset, expenseCustomFrom, expenseCustomTo]);
+  useEffect(() => setExpensePage(page => Math.min(page, Math.max(1, Math.ceil(filteredExpenses.length / 25)))), [filteredExpenses.length]);
+  const pagedExpenses = useMemo(() => filteredExpenses.slice((expensePage - 1) * 25, expensePage * 25), [filteredExpenses, expensePage]);
 
   const expensesTotalForDate = useMemo(
     () => filteredExpenses.reduce((sum, e) => sum + e.amount, 0),
@@ -6765,7 +6784,7 @@ const transactionMap = new Map<string, Transaction>(
       ? new Date(`${cashbookToDate}T23:59:59.999`).getTime()
       : Number.POSITIVE_INFINITY;
 
-    const query = cashbookCustomerQuery.trim().toLowerCase();
+    const query = settledCashbookCustomerQuery.trim().toLowerCase();
 
     return cashbookRowsWithSignals.filter((row) => {
       const time = new Date(row.date).getTime();
@@ -6794,7 +6813,7 @@ const transactionMap = new Map<string, Transaction>(
     cashbookFromDate,
     cashbookToDate,
     cashbookTypeFilter,
-    cashbookCustomerQuery,
+    settledCashbookCustomerQuery,
   ]);
 
   const cashbookIntelligenceSummary = useMemo(
@@ -6886,7 +6905,7 @@ const transactionMap = new Map<string, Transaction>(
     cashbookToDate,
     cashbookTypeFilter,
     reportingLayerMode,
-    cashbookCustomerQuery,
+    settledCashbookCustomerQuery,
     cashbookAuditFilter,
   ]);
 
@@ -13565,21 +13584,8 @@ const transactionMap = new Map<string, Transaction>(
                   </div>
                 ) : null}
 
-                {filteredCashHistory.map((session) => {
-                  const computedTotals = getSessionCashTotals(
-                    data.transactions,
-                    expenses,
-                    cashAdjustments,
-                    data.deleteCompensations || [],
-                    data.deletedTransactions || [],
-                    data.purchaseOrders || [],
-                    data.manualCashbookEntries || [],
-                    session.startTime,
-                    session.endTime,
-                    undefined,
-                    upfrontOrders,
-                    data.supplierPayments || [],
-                  );
+                {pagedCashHistory.map((session) => {
+                  const computedTotals = pagedCashHistoryTotals.get(session.id)!;
 
                   const systemCashTotal = getSessionActiveSystemCashTotal(
                     session,
@@ -13851,6 +13857,7 @@ const transactionMap = new Map<string, Transaction>(
                   );
                 })}
 
+                <Pagination page={cashHistoryPage} totalRows={filteredCashHistory.length} pageSize={20} onPageChange={setCashHistoryPage} />
                 {!filteredCashHistory.length && (
                   <p className="text-sm text-muted-foreground">
                     No cash sessions in selected range.
@@ -15189,7 +15196,7 @@ const transactionMap = new Map<string, Transaction>(
                       </div>
                     ) : (
                       <div className="max-h-[72vh] space-y-3 overflow-auto pr-1">
-                        {filteredExpenses.map((expense) => (
+                        {pagedExpenses.map((expense) => (
                           <div
                             key={expense.id}
                             className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:bg-slate-50/70"
@@ -15254,6 +15261,7 @@ const transactionMap = new Map<string, Transaction>(
                   </CardContent>
 
                   <div className="border-t border-slate-200 px-6 py-4 text-sm text-slate-600">
+                    <Pagination page={expensePage} totalRows={filteredExpenses.length} pageSize={25} onPageChange={setExpensePage} />
                     <span className="font-medium text-slate-900">
                       Latest activity:
                     </span>{" "}
@@ -15704,7 +15712,7 @@ const transactionMap = new Map<string, Transaction>(
                           </div>
 
                           <div className="divide-y divide-slate-200">
-                            {filteredExpenses.map((e) => (
+                            {pagedExpenses.map((e) => (
                               <div
                                 key={e.id}
                                 className="grid grid-cols-12 gap-2 px-3 py-3"

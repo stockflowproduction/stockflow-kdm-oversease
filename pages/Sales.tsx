@@ -1,5 +1,7 @@
 ﻿
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
+import { Pagination } from '../components/Pagination';
 import { doc, getDoc } from 'firebase/firestore';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -561,6 +563,7 @@ export default function Sales() {
   const pendingCheckoutRef = useRef<{ transactionId: string; cart: CartItem[]; transaction: Transaction; cashDetails: { cashReceived: number; changeReturned: number } | null; printAfterSave: boolean } | null>(null);
 
   const [productSearch, setProductSearch] = useState('');
+  const settledProductSearch = useDebouncedValue(productSearch);
   const [isReturnMode, setIsReturnMode] = useState(false);
   const [cartError, setCartError] = useState<string | null>(null);
   const [isTaxModalOpen, setIsTaxModalOpen] = useState(false);
@@ -574,6 +577,8 @@ export default function Sales() {
   const [transactionComplete, setTransactionComplete] = useState<Transaction | null>(null);
   
   const [customerSearch, setCustomerSearch] = useState('');
+  const settledCustomerSearch = useDebouncedValue(customerSearch);
+  const [customerSearchPage, setCustomerSearchPage] = useState(1);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   const [invoiceGstName, setInvoiceGstName] = useState('');
@@ -610,6 +615,7 @@ export default function Sales() {
   const [prefilledTransactionDateTimeIso, setPrefilledTransactionDateTimeIso] = useState<string | null>(null);
   const [transactionSyncStatus, setTransactionSyncStatus] = useState<{ phase: 'idle' | 'pending' | 'committing' | 'success' | 'error'; message: string }>({ phase: 'idle', message: '' });
   const [returnSearch, setReturnSearch] = useState('');
+  const settledReturnSearch = useDebouncedValue(returnSearch);
   const [returnDateFilter, setReturnDateFilter] = useState<'all' | '30d' | '90d'>('90d');
   const [returnSort, setReturnSort] = useState<'newest' | 'oldest' | 'amount_high' | 'amount_low'>('newest');
   const [selectedReturnTxId, setSelectedReturnTxId] = useState<string | null>(null);
@@ -618,6 +624,7 @@ export default function Sales() {
   const [isAdvanceOrdersOpen, setIsAdvanceOrdersOpen] = useState(false);
   const [selectedAdvanceOrderId, setSelectedAdvanceOrderId] = useState<string | null>(null);
   const [advanceSearch, setAdvanceSearch] = useState('');
+  const settledAdvanceSearch = useDebouncedValue(advanceSearch);
   const [advanceCollectNowInput, setAdvanceCollectNowInput] = useState('');
   const [advanceCollectMethod, setAdvanceCollectMethod] = useState<'Cash' | 'Online'>('Cash');
   const [advanceOrderError, setAdvanceOrderError] = useState<string | null>(null);
@@ -634,7 +641,6 @@ export default function Sales() {
   const [returnPage, setReturnPage] = useState(1);
   const settlementPanelRef = useRef<HTMLDivElement | null>(null);
   const productListScrollRef = useRef<HTMLDivElement | null>(null);
-  const productLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const [settlementHint, setSettlementHint] = useState<string | null>(null);
   const [sendInvoiceMessage, setSendInvoiceMessage] = useState<string | null>(null);
   const [waSendingStage, setWaSendingStage] = useState<string | null>(null);
@@ -1666,7 +1672,7 @@ export default function Sales() {
     !simplifiedShiftAccess && normalizeCashSource(source) === 'reserve' ? cashSourceAvailability.reserveCash : cashSourceAvailability.activeCash
   );
   const pendingAdvanceOrders = useMemo(() => perfMeasureSync('page.Sales.derive.pendingAdvanceOrders', () => {
-    const q = advanceSearch.trim().toLowerCase();
+    const q = settledAdvanceSearch.trim().toLowerCase();
     return safeUpfrontOrders
       .filter((order) => !order.fulfilledAt)
       .filter((order) => {
@@ -1688,7 +1694,7 @@ export default function Sales() {
     runId: perfRunIdRef.current,
     upfrontOrders: safeUpfrontOrders.length,
     customers: safeCustomers.length,
-  }), [advanceSearch, safeCustomers, safeUpfrontOrders]);
+  }), [settledAdvanceSearch, safeCustomers, safeUpfrontOrders]);
   const selectedAdvanceOrder = useMemo(
     () => pendingAdvanceOrders.find((order) => order.id === selectedAdvanceOrderId) || null,
     [pendingAdvanceOrders, selectedAdvanceOrderId]
@@ -1944,9 +1950,9 @@ export default function Sales() {
     storeCreditInput,
   ]);
 
-  const categories = ['All', ...Array.from(new Set(products.map((p) => getProductCategory(p))))];
-  const filteredProducts = products.filter(p => {
-    const query = safeLower(productSearch).trim();
+  const categories = useMemo(() => ['All', ...Array.from(new Set(products.map((p) => getProductCategory(p))))], [products]);
+  const filteredProducts = useMemo(() => products.filter(p => {
+    const query = safeLower(settledProductSearch).trim();
     const queryTokens = query.split(/\s+/).filter(Boolean);
     const haystack = safeLower(getProductSearchText(p))
       .replace(/[^a-z0-9]+/g, ' ')
@@ -1960,10 +1966,7 @@ export default function Sales() {
     const categoryCompare = categoryA.localeCompare(categoryB, undefined, { sensitivity: 'base' });
     if (categoryCompare !== 0) return categoryCompare;
     return getProductName(a).localeCompare(getProductName(b), undefined, { sensitivity: 'base' });
-  });
-
-  useEffect(() => {
-  }, [products.length, filteredProducts.length, productSearch, selectedCategory]);
+  }), [products, settledProductSearch, selectedCategory]);
   useEffect(() => {
     if (!categories.includes(selectedCategory)) {
       setSelectedCategory('All');
@@ -1974,19 +1977,23 @@ export default function Sales() {
     window.localStorage.setItem('stockflow_pos_selected_category', selectedCategory);
   }, [selectedCategory]);
   const customerSeriesById = useMemo(() => buildCustomerSeriesMap(customers), [customers]);
-  const filteredCustomers = customerSearch ? customers.filter(c => {
-    const lowerSearch = customerSearch.toLowerCase();
+  const filteredCustomers = useMemo(() => settledCustomerSearch ? customers.filter(c => {
+    const lowerSearch = settledCustomerSearch.toLowerCase();
     return c.name.toLowerCase().includes(lowerSearch)
-      || c.phone.includes(customerSearch)
+      || c.phone.includes(settledCustomerSearch)
       || (customerSeriesById.get(c.id)?.toLowerCase() || '').includes(lowerSearch);
-  }) : [];
+  }) : [], [customers, settledCustomerSearch, customerSeriesById]);
+  const visibleSearchCustomers = filteredCustomers.slice((customerSearchPage - 1) * 10, customerSearchPage * 10);
+  useEffect(() => setCustomerSearchPage(1), [settledCustomerSearch]);
+  useEffect(() => setCustomerSearchPage(page => Math.min(page, Math.max(1, Math.ceil(filteredCustomers.length / 10)))), [filteredCustomers.length]);
   const productTotalPages = Math.max(1, Math.ceil(filteredProducts.length / POS_PRODUCTS_PER_PAGE));
-  const visibleProducts = filteredProducts.slice(0, productPage * POS_PRODUCTS_PER_PAGE);
+  const visibleProducts = filteredProducts.slice((productPage - 1) * POS_PRODUCTS_PER_PAGE, productPage * POS_PRODUCTS_PER_PAGE);
   const returnTransactions = useMemo(() => {
     const now = new Date();
     const thresholdDays = returnDateFilter === '30d' ? 30 : returnDateFilter === '90d' ? 90 : null;
     const threshold = thresholdDays ? new Date(now.getTime() - thresholdDays * 24 * 60 * 60 * 1000).getTime() : null;
-    const query = returnSearch.trim().toLowerCase();
+    if (!isReturnMode) return [];
+    const query = settledReturnSearch.trim().toLowerCase();
     const base = transactions.filter(tx => tx.type === 'sale');
     const filtered = base.filter((tx) => {
       if (threshold && new Date(tx.date).getTime() < threshold) return false;
@@ -2006,37 +2013,21 @@ export default function Sales() {
       if (returnSort === 'amount_low') return Math.abs(a.total) - Math.abs(b.total);
       return new Date(b.date).getTime() - new Date(a.date).getTime();
     });
-  }, [transactions, customerById, returnDateFilter, returnSearch, returnSort]);
+  }, [isReturnMode, transactions, customerById, returnDateFilter, settledReturnSearch, returnSort]);
   const returnTotalPages = Math.max(1, Math.ceil(returnTransactions.length / RETURN_TRANSACTIONS_PER_PAGE));
   const paginatedReturnTransactions = returnTransactions.slice((returnPage - 1) * RETURN_TRANSACTIONS_PER_PAGE, returnPage * RETURN_TRANSACTIONS_PER_PAGE);
 
   useEffect(() => {
     setProductPage(1);
-  }, [productSearch, selectedCategory]);
+  }, [settledProductSearch, selectedCategory]);
 
   useEffect(() => {
     setReturnPage(1);
-  }, [returnSearch, returnDateFilter, returnSort]);
+  }, [settledReturnSearch, returnDateFilter, returnSort]);
 
   useEffect(() => {
     setProductPage((prev) => Math.min(prev, productTotalPages));
   }, [productTotalPages]);
-  useEffect(() => {
-    const node = productLoadMoreRef.current;
-    const rootNode = productListScrollRef.current;
-    if (isReturnMode || !node || !rootNode || productPage >= productTotalPages) return;
-    const observer = new IntersectionObserver((entries) => {
-      const [entry] = entries;
-      if (!entry?.isIntersecting) return;
-      setProductPage((prev) => Math.min(productTotalPages, prev + 1));
-    }, {
-      root: rootNode,
-      rootMargin: '180px 0px',
-      threshold: 0.01,
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [isReturnMode, productPage, productTotalPages, visibleProducts.length]);
 
   useEffect(() => {
     setReturnPage((prev) => Math.min(prev, returnTotalPages));
@@ -2462,12 +2453,11 @@ export default function Sales() {
                       />
                     );
                   })}
-                  {productPage < productTotalPages && <div ref={productLoadMoreRef} className="h-4 w-full" />}
                 </div>
               </div>
               {filteredProducts.length > 0 && (
                 <div className="shrink-0 rounded-lg border bg-card px-3 py-2 text-center text-sm text-muted-foreground">
-                  Showing {visibleProducts.length} of {filteredProducts.length}
+                  <Pagination page={productPage} totalRows={filteredProducts.length} pageSize={POS_PRODUCTS_PER_PAGE} onPageChange={(page) => { setProductPage(page); productListScrollRef.current?.scrollTo({ top: 0 }); }} />
                 </div>
               )}
             </div>
@@ -2777,11 +2767,12 @@ export default function Sales() {
                 )}
                 {customerSearch && !hasSelectedCustomer && filteredCustomers.length > 0 && (
                   <div className="border rounded-lg max-h-40 overflow-auto divide-y">
-                    {filteredCustomers.map(c => (
+                    {visibleSearchCustomers.map(c => (
                       <div key={c.id} className="p-2 hover:bg-muted cursor-pointer" onClick={() => { mutateSelectedCustomer(c, 'customer_search_select_desktop', 'set', 'customer search result click'); setInvoiceGstName(c.gstName || ''); setInvoiceGstNumber(c.gstNumber || ''); setCustomerSearch(''); }}>
                         <p className="text-sm font-bold">{c.name} <span className="text-xs font-medium text-muted-foreground">({customerSeriesById.get(c.id) || 'CU01'})</span></p><p className="text-xs text-muted-foreground">{c.phone}</p>
                       </div>
                     ))}
+                    <Pagination page={customerSearchPage} totalRows={filteredCustomers.length} pageSize={10} onPageChange={setCustomerSearchPage} />
                   </div>
                 )}
               </div>
@@ -3290,15 +3281,16 @@ export default function Sales() {
                     )}
                     {customerSearch && !hasSelectedCustomer && filteredCustomers.length > 0 && (
                       <div className="border rounded-lg max-h-40 overflow-auto divide-y">
-                        {filteredCustomers.map(c => (
+                        {visibleSearchCustomers.map(c => (
                           <div key={c.id} className="p-3 hover:bg-muted cursor-pointer transition-colors" onClick={() => { mutateSelectedCustomer(c, 'customer_search_select_mobile', 'set', 'customer search result click'); setInvoiceGstName(c.gstName || ''); setInvoiceGstNumber(c.gstNumber || ''); setCustomerSearch(''); }}>
                             <p className="text-sm font-bold">{c.name} <span className="text-xs font-medium text-muted-foreground">({customerSeriesById.get(c.id) || 'CU01'})</span></p>
                             <p className="text-xs text-muted-foreground">{c.phone}</p>
                           </div>
                         ))}
+                        <Pagination page={customerSearchPage} totalRows={filteredCustomers.length} pageSize={10} onPageChange={setCustomerSearchPage} />
                       </div>
                     )}
-                    {customerSearch && !hasSelectedCustomer && filteredCustomers.length === 0 && (
+                    {customerSearch && customerSearch === settledCustomerSearch && !hasSelectedCustomer && filteredCustomers.length === 0 && (
                       <div className="space-y-3">
                         <div className="flex flex-col items-center justify-center py-4 px-3 bg-destructive/10 border border-destructive/20 rounded-xl text-center space-y-2">
                           <UserMinus className="w-8 h-8 text-destructive opacity-80" />

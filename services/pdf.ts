@@ -8,6 +8,7 @@ import { formatMoneyPrecise, formatMoneyWhole, roundMoneyWhole } from './numberF
 import { normalizeTransactionItems } from '../utils/transactionItems';
 import { resolveInvoicePrintProfile } from './invoicePrintPreferences';
 import { requireTransactionDocumentNumber } from './invoiceDocument';
+import thermalReceiptFont from '../assets/fonts/RobotoCondensed-Latin.woff2?inline';
 
 type ReceiptPaymentDetails = {
     cashReceived?: number;
@@ -2488,13 +2489,16 @@ export const buildThermalInvoiceHtmlFromProfile = (
     const settlement = transaction.saleSettlement || { cashPaid: 0, onlinePaid: 0, creditDue: 0 };
     const paidNow = Math.max(0, Number(settlement.cashPaid || 0)) + Math.max(0, Number(settlement.onlinePaid || 0));
     const receivedAmount = transaction.type === 'sale'
-      ? Math.max(0, paymentDetails?.cashReceived ?? transaction.cashReceived ?? paidNow)
+      ? Math.max(0, paymentDetails?.cashReceived ?? transaction.cashReceived ?? Number(settlement.cashPaid || 0))
       : Math.max(0, paidNow);
+    const onlinePaid = Math.max(0, Number(settlement.onlinePaid || 0));
+    const storeCreditUsed = Math.max(0, Number(transaction.storeCreditUsed || 0));
+    const storeCreditCreated = Math.max(0, Number(transaction.storeCreditCreated || 0));
     const balanceAmount = transaction.type === 'sale'
       ? Math.max(0, Number(settlement.creditDue || 0))
       : 0;
     const changeAmount = transaction.type === 'sale'
-      ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? Math.max(0, receivedAmount - Math.abs(transaction.total || 0)))
+      ? Math.max(0, paymentDetails?.changeReturned ?? transaction.changeReturned ?? Math.max(0, receivedAmount - Number(settlement.cashPaid || 0) - Math.max(storeCreditCreated, Number(transaction.paymentAppliedToReceivable || 0))))
       : 0;
     const currentBalanceValue = canonicalBalance?.status === 'ok' ? Math.max(0, Number(canonicalBalance.currentDue || 0)) : 0;
     const previousBalanceValue = canonicalBalance?.status === 'ok'
@@ -2503,11 +2507,9 @@ export const buildThermalInvoiceHtmlFromProfile = (
     const previousBalanceLabel = canonicalBalance?.status === 'ok' ? `${formatMoneyWhole(previousBalanceValue)}` : 'Ledger unavailable';
     const currentBalanceLabel = canonicalBalance?.status === 'ok' ? `${formatMoneyWhole(currentBalanceValue)}` : 'Ledger unavailable';
     const paperWidth = getThermalPaperWidth(resolvedProfile);
-    const thermalStyle = getThermalStyle(resolvedProfile);
-    const thermalDensity = getThermalDensity(resolvedProfile);
-    const thermalFontScale = getThermalFontScale(resolvedProfile);
-    const thermalPaddingX = getThermalPaddingX(resolvedProfile);
-    const thermalPaddingY = getThermalPaddingY(resolvedProfile);
+    const thermalFontScale = 1;
+    const thermalPaddingX = 2.5;
+    const thermalPaddingY = 2;
     const currency = (value: number) => `${formatMoneyPrecise(Math.max(0, Number(value || 0)))}`;
     const invoiceNo = requireTransactionDocumentNumber(transaction);
     const invoiceTitle = transaction.type === 'return' ? 'Credit Note' : 'Invoice';
@@ -2517,14 +2519,10 @@ export const buildThermalInvoiceHtmlFromProfile = (
       ? issuedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })
       : '';
     const customerName = (transaction.customerName || 'Walk-in Customer').trim() || 'Walk-in Customer';
-    const headerTone = thermalStyle === 'boxed' ? '#ffffff' : '#111827';
-    const headerBackground = thermalStyle === 'boxed' ? '#111827' : 'transparent';
-    const ruleStyle = thermalStyle === 'minimal' ? 'solid' : thermalStyle === 'boxed' ? 'double' : thermalStyle === 'classic' ? 'dashed' : 'solid';
-    const densityLineHeight = thermalDensity === 'comfortable' ? 1.42 : thermalDensity === 'balanced' ? 1.28 : 1.12;
-    const baseFontSize = (paperWidth === '58mm' ? 9 : 10) * thermalFontScale;
-    const headerFontSize = (paperWidth === '58mm' ? 14 : 16) * thermalFontScale;
-    const titleFontSize = (paperWidth === '58mm' ? 10 : 11) * thermalFontScale;
-    const smallFontSize = (paperWidth === '58mm' ? 8 : 9) * thermalFontScale;
+    const densityLineHeight = 1.12;
+    const baseFontSize = (paperWidth === '58mm' ? 10 : 12) * thermalFontScale;
+    const titleFontSize = (paperWidth === '58mm' ? 25 : 35) * thermalFontScale;
+    const smallFontSize = (paperWidth === '58mm' ? 10 : 11) * thermalFontScale;
     const normalizedItems = normalizeTransactionItems(transaction.items);
     const printPageLength = '300mm';
     const itemRows = normalizedItems.map((item, index) => {
@@ -2560,9 +2558,17 @@ export const buildThermalInvoiceHtmlFromProfile = (
       Math.max(0, Number(transaction.discount || 0)) > 0 ? { label: 'Discount', value: currency(Number(transaction.discount || 0)) } : null,
       Math.max(0, Number(transaction.tax || 0)) > 0 ? { label: transaction.taxLabel || 'Tax', value: currency(Number(transaction.tax || 0)) } : null,
       { label: 'Total', value: currency(Math.abs(Number(transaction.total || 0))), strong: true },
-      { label: 'Received', value: currency(receivedAmount) },
+      ...(transaction.type === 'sale' ? [
+        { label: 'Cash Tendered', value: currency(receivedAmount) },
+        ...(onlinePaid > 0 ? [
+          { label: 'Online Paid', value: currency(onlinePaid) },
+          { label: 'Total Tendered', value: currency(receivedAmount + onlinePaid) },
+        ] : []),
+        { label: 'Store Credit Used', value: currency(storeCreditUsed) },
+        { label: 'Store Credit Created', value: currency(storeCreditCreated) },
+        { label: 'Change Given', value: currency(changeAmount) },
+      ] : [{ label: 'Received', value: currency(receivedAmount) }]),
       { label: 'Balance', value: currency(balanceAmount) },
-      changeAmount > 0 ? { label: 'Change', value: currency(changeAmount) } : null,
       ...balanceRows,
     ].filter(Boolean) as Array<{ label: string; value: string; strong?: boolean }>;
 
@@ -2592,12 +2598,11 @@ export const buildThermalInvoiceHtmlFromProfile = (
         </div>` : '<div class="info-cell empty"></div>'}
       </div>`).join('');
 
-    const totalsMarkup = totalsRows.map((row, index) => `
-      ${index === 0 || row.strong ? '<div class="rule solid"></div>' : ''}
+    const totalsMarkup = totalsRows.map((row) => `
       <div class="total-row${row.strong ? ' strong' : ''}">
         <span>${escapeHtml(row.label)}</span>
         <span>${escapeHtml(row.value)}</span>
-      </div>`).join('') + '<div class="rule solid"></div>';
+      </div>`).join('');
 
     return `<!DOCTYPE html>
 <html lang="en" class="thermal-print-root">
@@ -2606,23 +2611,26 @@ export const buildThermalInvoiceHtmlFromProfile = (
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${escapeHtml(`StockFlow Receipt ${invoiceNo}`)}</title>
   <style>
+    @font-face {
+      font-family: 'Receipt Condensed';
+      src: url('${thermalReceiptFont}') format('woff2');
+      font-style: normal;
+      font-weight: 100 900;
+      font-display: block;
+    }
     :root {
       --paper-width: ${paperWidth};
-      --receipt-width: ${paperWidth === '58mm' ? '54mm' : '76mm'};
+      --receipt-width: ${paperWidth};
       --receipt-padding-x: ${thermalPaddingX}mm;
       --receipt-padding-y: ${thermalPaddingY}mm;
       --font-size: ${baseFontSize}px;
-      --header-size: ${headerFontSize}px;
       --title-size: ${titleFontSize}px;
       --small-size: ${smallFontSize}px;
-      --line-color: #1f2937;
-      --muted: #4b5563;
-      --header-tone: ${headerTone};
-      --header-bg: ${headerBackground};
+      --muted: #000;
       --line-height: ${densityLineHeight};
       --print-page-length: ${printPageLength};
     }
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; font-weight: 700; color: #000; }
     html.thermal-print-root, body.thermal-print-body {
       margin: 0;
       padding: 0;
@@ -2631,8 +2639,10 @@ export const buildThermalInvoiceHtmlFromProfile = (
       max-width: var(--paper-width);
       min-height: auto;
       background: #fff;
-      color: #111827;
-      font-family: "Courier New", Courier, monospace;
+      color: #000;
+      font-family: 'Receipt Condensed', 'Arial Narrow', Arial, sans-serif;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
       font-size: var(--font-size);
       line-height: var(--line-height);
       height: auto;
@@ -2654,41 +2664,20 @@ export const buildThermalInvoiceHtmlFromProfile = (
     .center { text-align: center; }
     .muted { color: var(--muted); }
     .strong { font-weight: 700; }
-    .rule {
-      border-top: 1px ${ruleStyle} var(--line-color);
-      margin: ${thermalDensity === 'comfortable' ? '4px' : thermalDensity === 'balanced' ? '3px' : '2px'} 0;
-    }
-    .rule.solid {
-      border-top-style: solid;
-      margin: 2px 0;
-    }
-    .header-title {
-      font-size: var(--header-size);
-      font-weight: 700;
-      letter-spacing: 0.15px;
-      margin: 0;
-      line-height: 1.15;
-      color: var(--header-tone);
-      background: var(--header-bg);
-      padding: ${thermalStyle === 'boxed' ? '3px 4px' : '0'};
-    }
-    .header-subtext {
-      margin-top: 1px;
-      line-height: 1.15;
-    }
     .document-title {
-      margin-top: ${thermalDensity === 'comfortable' ? '3px' : '2px'};
+      margin: 0 0 2px;
       font-size: var(--title-size);
-      font-weight: 700;
-      letter-spacing: 0.8px;
+      font-weight: 900;
+      line-height: 1.1;
+      letter-spacing: 0;
       text-transform: uppercase;
     }
     .info-block {
-      margin-top: 3px;
+      margin: 0 0 8px;
     }
     .info-row {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 60fr 40fr;
       gap: 0 8px;
       align-items: start;
     }
@@ -2698,14 +2687,15 @@ export const buildThermalInvoiceHtmlFromProfile = (
     .info-cell {
       min-width: 0;
       display: grid;
-      grid-template-columns: auto auto minmax(0, 1fr);
-      column-gap: 3px;
+      grid-template-columns: 4.5em 0.4em minmax(0, 1fr);
+      column-gap: 1px;
       align-items: baseline;
-      line-height: 1.2;
-      padding: 1px 0;
+      line-height: 1.05;
+      padding: 0;
     }
     .info-cell.align-right {
-      text-align: right;
+      text-align: left;
+      grid-template-columns: 3.1em 0.4em minmax(0, 1fr);
     }
     .info-cell.empty {
       display: block;
@@ -2723,30 +2713,33 @@ export const buildThermalInvoiceHtmlFromProfile = (
       border-collapse: collapse;
       table-layout: fixed;
     }
-    col.no { width: 7%; }
+    col.no { width: 8%; }
     col.item { width: 47%; }
-    col.qty { width: 10%; }
-    col.rate { width: 18%; }
-    col.amount { width: 18%; }
+    col.qty { width: 12%; }
+    col.rate { width: 13%; }
+    col.amount { width: 20%; }
     thead th {
-      border-top: 1px solid var(--line-color);
-      border-bottom: 1px solid var(--line-color);
-      padding: ${thermalDensity === 'comfortable' ? '3px' : '2px'} 1px;
+      border-top: 1px dashed #000;
+      border-bottom: 1px dashed #000;
+      padding: 6px 1px;
       text-align: left;
-      font-size: var(--small-size);
+      font-size: var(--font-size);
       font-weight: 700;
+      text-transform: uppercase;
     }
     tbody td {
-      padding: ${thermalDensity === 'comfortable' ? '3px' : thermalDensity === 'balanced' ? '2px' : '1.5px'} 1px;
+      padding: 2px 1px;
       vertical-align: top;
-      border-bottom: ${thermalStyle === 'minimal' ? '1px solid #e5e7eb' : '1px dotted #d1d5db'};
+      border: none;
       word-break: normal;
       overflow-wrap: anywhere;
     }
     tbody tr:last-child td {
       border-bottom: none;
     }
-    .num, .amt { text-align: right; }
+    tbody tr:first-child td { padding-top: 6px; }
+    .num { text-align: left; }
+    .amt { text-align: right; white-space: nowrap; }
     th.num, th.amt { text-align: right; }
     th.qty-col, td.qty-col { text-align: center; }
     .item-cell {
@@ -2765,33 +2758,33 @@ export const buildThermalInvoiceHtmlFromProfile = (
       line-height: 1.1;
     }
     .totals {
-      margin-top: 2px;
+      border-top: 1px dashed #000;
+      margin-top: 6px;
+      padding-top: 4px;
     }
     .total-row {
       display: grid;
       grid-template-columns: 1fr auto;
       gap: 8px;
-      padding: ${thermalDensity === 'comfortable' ? '2px' : '1px'} 0;
+      padding: 1px 0;
       align-items: baseline;
-      line-height: var(--line-height);
+      line-height: 1.2;
     }
     .total-row.strong {
       font-weight: 700;
       font-size: var(--font-size);
     }
     .words {
-      margin-top: 4px;
-      font-size: var(--small-size);
+      border-top: 1px dashed #000;
+      margin-top: 7px;
+      padding-top: 6px;
+      font-size: var(--font-size);
       line-height: 1.2;
     }
+    .amount-words { text-transform: uppercase; }
     .words-title {
       font-weight: 700;
       margin-bottom: 1px;
-    }
-    .footer {
-      margin-top: 4px;
-      font-size: var(--small-size);
-      line-height: 1.2;
     }
     @page {
       margin: 0 !important;
@@ -2810,7 +2803,7 @@ export const buildThermalInvoiceHtmlFromProfile = (
         max-width: var(--paper-width) !important;
         min-height: auto !important;
         background: #fff !important;
-        color: #111827 !important;
+        color: #000 !important;
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
         height: auto !important;
@@ -2848,7 +2841,6 @@ export const buildThermalInvoiceHtmlFromProfile = (
 <body class="thermal-print-body">
   <div class="receipt">
     <div class="center">
-      <div class="header-title">${escapeHtml(resolvedProfile.storeName || 'StockFlow')}</div>
       <div class="document-title">${escapeHtml(invoiceTitle)}</div>
     </div>
 
@@ -2856,7 +2848,6 @@ export const buildThermalInvoiceHtmlFromProfile = (
       ${infoMarkup}
     </div>
 
-    <div class="rule"></div>
 
     <table>
       <colgroup>
@@ -2886,13 +2877,9 @@ export const buildThermalInvoiceHtmlFromProfile = (
 
     <div class="words">
       <div class="words-title">Amount in Words</div>
-      <div>${escapeHtml(numberToReceiptWords(Math.abs(Number(transaction.total || 0))))}</div>
+      <div class="amount-words">${escapeHtml(numberToReceiptWords(Math.abs(Number(transaction.total || 0))))}</div>
     </div>
 
-    <div class="footer center">
-      <div>Thank you for your business</div>
-      <div class="muted">Please keep this receipt for reference</div>
-    </div>
   </div>
 </body>
 </html>`;

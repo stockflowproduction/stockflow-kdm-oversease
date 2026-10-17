@@ -38,8 +38,9 @@ import {
   type User,
 } from 'firebase/auth';
 import { aggregateCartItemsByStockBucket, normalizeStockBucketColor, normalizeStockBucketVariant } from './stockBuckets';
-import { perfLog } from './perf';
-import { financeLog } from './financeLogger';
+import { financeLog, FINANCE_LOAD_LOGS_ENABLED } from './financeLogger';
+import { applySnapshotRowChanges } from './snapshotRows';
+import { getCustomerLedgerInputs } from './customerLedgerIndex';
 import { roundMoneyWhole } from './numberFormat';
 import { emitFinanceSnapshot } from '../utils/financeDebugLogger';
 import { normalizeTransactionItems } from '../utils/transactionItems';
@@ -1660,8 +1661,9 @@ const rebuildCustomerBalanceFromLedger = (customerId: string, transactions: Tran
   let activeReturnsTotal = 0;
   const processed: Transaction[] = [];
 
-  const customerTransactions = transactions.filter(tx => tx.customerId === customerId);
-  const upfrontEffects = buildUpfrontOrderLedgerEffects(upfrontOrders.filter(order => order.customerId === customerId), customers)
+  const ledgerInputs = getCustomerLedgerInputs({ id: customerId, name: '', phone: '' }, transactions, upfrontOrders);
+  const customerTransactions = ledgerInputs.transactions;
+  const upfrontEffects = buildUpfrontOrderLedgerEffects(ledgerInputs.upfrontOrders, customers)
     .filter(effect => effect.type !== 'legacy_custom_order_info');
   const events = [
     ...customerTransactions.map(tx => ({ kind: 'transaction' as const, id: tx.id, date: tx.date, priority: getCanonicalLedgerEffectiveTransactionType(tx) === 'sale' ? 2 : getCanonicalLedgerEffectiveTransactionType(tx) === 'return' ? 3 : 4, tx })),
@@ -2937,6 +2939,8 @@ const computeCashSupplierPaymentsOutflow = (orders: PurchaseOrder[] = [], suppli
   }, 0);
 
 const logLoadedState = (state: AppState) => {
+  // Do not replay the ledger just to construct a disabled diagnostic message.
+  if (!FINANCE_LOAD_LOGS_ENABLED) return;
   const openShift = (state.cashSessions || []).find(s => s.status === 'open');
   financeLog.load('STATE', {
     productsCount: state.products.length,
@@ -3501,11 +3505,13 @@ async function syncFromCloud(): Promise<void> {
         const docRef = doc(db, "stores", user.uid);
         unsubscribeCloudListeners(user.uid, 'sync_reinitialize');
 
+        const productSnapshotRows = new Map<string, Product>();
+        const customerSnapshotRows = new Map<string, Customer>();
+        const transactionSnapshotRows = new Map<string, Transaction>();
+
         unsubscribeProductsSnapshot = onSnapshot(getProductsCollectionRef(user.uid), (productsSnap) => {
             perfMeasureSync('storage.listener.products_snapshot', () => {
-              subcollectionProductsCache = productsSnap.docs
-                .map(docItem => ({ ...(docItem.data() as Product), id: docItem.id }))
-                .filter(p => !((p as any).isDeleted));
+              subcollectionProductsCache = applySnapshotRowChanges<Product>(productSnapshotRows, productsSnap.docChanges() as any, p => !(p as any).isDeleted);
               logStockFlowDataAudit('products.subcollection.snapshot', {
                 uid: user.uid,
                 rootProductsCount: legacyRootProductsCache.length,
@@ -3527,9 +3533,7 @@ async function syncFromCloud(): Promise<void> {
         });
         unsubscribeCustomersSnapshot = onSnapshot(getCustomersCollectionRef(user.uid), (customersSnap) => {
             perfMeasureSync('storage.listener.customers_snapshot', () => {
-              const customers = customersSnap.docs
-                .map(docItem => ({ ...(docItem.data() as Customer), id: docItem.id }))
-                .filter(c => !((c as any).isDeleted));
+              const customers = applySnapshotRowChanges<Customer>(customerSnapshotRows, customersSnap.docChanges() as any, c => !(c as any).isDeleted);
 
               logStorageHydrationDebug('customers_snapshot_received', {
                 uid: user.uid,
@@ -3556,9 +3560,7 @@ async function syncFromCloud(): Promise<void> {
         });
         unsubscribeTransactionsSnapshot = onSnapshot(getTransactionsCollectionRef(user.uid), (transactionsSnap) => {
             perfMeasureSync('storage.listener.transactions_snapshot', () => {
-              const transactions = transactionsSnap.docs
-                .map(docItem => ({ ...(docItem.data() as Transaction), id: docItem.id }))
-                .filter(t => !((t as any).isDeleted));
+              const transactions = applySnapshotRowChanges<Transaction>(transactionSnapshotRows, transactionsSnap.docChanges() as any, t => !(t as any).isDeleted);
 
               const sortedTransactions = sortTransactionsDesc(transactions);
               memoryState = { ...memoryState, transactions: sortedTransactions };

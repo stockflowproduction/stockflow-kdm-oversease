@@ -1,4 +1,4 @@
-const FINANCE_LOAD_LOGS_ENABLED = String((import.meta as any).env?.VITE_FINANCE_LOAD_LOGS || '').toLowerCase() === 'true';
+export const FINANCE_LOAD_LOGS_ENABLED = String((import.meta as any).env?.VITE_FINANCE_LOAD_LOGS || '').toLowerCase() === 'true';
 
 export const financeLog = {
   tx: (_label: string, _data: unknown) => undefined,

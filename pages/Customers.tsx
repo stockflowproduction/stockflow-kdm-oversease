@@ -1,5 +1,7 @@
 
-import React, { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
+import { Pagination } from '../components/Pagination';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
@@ -697,6 +699,9 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
     }
   }
   const initialData = initialDataRef.current;
+  useEffect(() => {
+    initialDataRef.current = { customers: [], transactions: [], upfrontOrders: [], products: [], loadError: null };
+  }, []);
   const [customers, setCustomers] = useState<Customer[]>(initialData.customers);
   const [transactions, setTransactions] = useState<Transaction[]>(initialData.transactions);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>(initialData.upfrontOrders);
@@ -756,9 +761,15 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
   const [orderCustomer, setOrderCustomer] = useState<Customer | null>(null);
   const [orderStage, setOrderStage] = useState<'picker' | 'form'>('picker');
   const [productSearch, setProductSearch] = useState('');
+  const settledProductSearch = useDebouncedValue(productSearch);
+  const [orderProductPage, setOrderProductPage] = useState(1);
+  const orderPickerProducts = useMemo(() => isUpfrontOrderModalOpen ? products.filter(p => `${p.name} ${p.category || ''}`.toLowerCase().includes(settledProductSearch.toLowerCase())) : [], [isUpfrontOrderModalOpen, products, settledProductSearch]);
+  useEffect(() => setOrderProductPage(1), [settledProductSearch, isUpfrontOrderModalOpen]);
+  useEffect(() => setOrderProductPage(page => Math.min(page, Math.max(1, Math.ceil(orderPickerProducts.length / 20)))), [orderPickerProducts.length]);
   const [selectedOrderProduct, setSelectedOrderProduct] = useState<Product | null>(null);
   const [orderPopupTab, setOrderPopupTab] = useState<'create' | 'all_orders'>('create');
   const [allOrdersSearch, setAllOrdersSearch] = useState('');
+  const settledAllOrdersSearch = useDebouncedValue(allOrdersSearch);
   const [allOrdersStatus, setAllOrdersStatus] = useState<'all' | 'pending' | 'paid'>('all');
   const [allOrdersSort, setAllOrdersSort] = useState<'newest' | 'oldest'>('newest');
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
@@ -811,7 +822,7 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
   const [upfrontRepairError, setUpfrontRepairError] = useState<string | null>(null);
   const [upfrontRepairConfirmOpen, setUpfrontRepairConfirmOpen] = useState(false);
   const [upfrontRepairSubmitting, setUpfrontRepairSubmitting] = useState(false);
-  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const deferredSearchQuery = useDebouncedValue(searchQuery);
   const storageRefreshFrameRef = React.useRef<number | null>(null);
   const queuedStorageEventTypesRef = React.useRef<string[]>([]);
   const correctLedgerAuditEnabledRef = React.useRef(false);
@@ -1255,7 +1266,7 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
 
   useEffect(() => {
     setCustomerPage(1);
-  }, [searchQuery, filterType, sortBy, sortOrder]);
+  }, [deferredSearchQuery, filterType, sortBy, sortOrder]);
 
   useEffect(() => {
     if (!customerHeaderMenu) return;
@@ -1549,7 +1560,7 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
   }, [upfrontOrders, orderCustomer]);
   const filteredPopupCustomerOrders = useMemo(() => popupCustomerOrders
     .filter(o => {
-      const q = allOrdersSearch.toLowerCase();
+      const q = settledAllOrdersSearch.toLowerCase();
       const matchesQ = !q || `${o.productName || ''} ${o.notes || ''}`.toLowerCase().includes(q);
       const status = getUpfrontOrderStatus(o);
       const matchesS = allOrdersStatus === 'all' || (allOrdersStatus === 'pending' ? status !== 'Paid in Full' : status === 'Paid in Full');
@@ -1557,7 +1568,7 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
     })
     .sort((a, b) => allOrdersSort === 'newest'
       ? new Date(b.date || b.createdAt || 0).getTime() - new Date(a.date || a.createdAt || 0).getTime()
-      : new Date(a.date || a.createdAt || 0).getTime() - new Date(b.date || b.createdAt || 0).getTime()), [popupCustomerOrders, allOrdersSearch, allOrdersStatus, allOrdersSort]);
+      : new Date(a.date || a.createdAt || 0).getTime() - new Date(b.date || b.createdAt || 0).getTime()), [popupCustomerOrders, settledAllOrdersSearch, allOrdersStatus, allOrdersSort]);
   const openCustomerActionModal = (type: 'payment' | 'customer_cash_out' | 'customer_credit' = 'payment') => {
     if (!canCollectCustomerPayments) return;
     setCustomerActionType(type);
@@ -3842,8 +3853,9 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
                       {orderPopupTab === 'create' ? (orderStage === 'picker' ? (
                         <>
                           <Input placeholder="Search product/category..." value={productSearch} onChange={(e) => setProductSearch(e.target.value)} />
+                          <Pagination page={orderProductPage} totalRows={orderPickerProducts.length} pageSize={20} onPageChange={setOrderProductPage} />
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            {products.filter((p) => `${p.name} ${p.category || ''}`.toLowerCase().includes(productSearch.toLowerCase())).map((product) => (
+                            {orderPickerProducts.slice((orderProductPage - 1) * 20, orderProductPage * 20).map((product) => (
                               <div key={product.id} className="rounded-lg border p-2 space-y-2">
                                 <img src={product.image || 'https://placehold.co/300x180?text=No+Image'} alt={product.name} className="h-24 w-full object-cover rounded" />
                                 <div className="text-sm font-semibold">{product.name}</div>

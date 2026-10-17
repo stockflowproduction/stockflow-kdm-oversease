@@ -2,6 +2,7 @@ import { AppState, Customer, Transaction, UpfrontOrder } from '../types';
 import { buildUpfrontOrderLedgerEffects, getCanonicalReturnAllocation, getHistoricalAwareSaleSettlement, getSaleSettlementBreakdown, loadData } from './storage';
 import { normalizeTransactionItems } from '../utils/transactionItems';
 import { getTransactionDocumentNumber } from './invoiceDocument';
+import { getCustomerLedgerInputs } from './customerLedgerIndex';
 
 export type EffectiveTransactionType = 'sale' | 'payment' | 'return' | 'customer_credit' | 'customer_cash_out' | 'unknown';
 
@@ -159,8 +160,9 @@ const buildCustomerLedgerPreviewForPolicy = (
 ): CorrectCustomerLedgerPreview => {
   const warnings: CorrectCustomerLedgerWarning[] = [];
   const rows: CorrectCustomerLedgerRow[] = [];
-  const customerTx = transactions.filter((tx) => transactionMatchesCustomer(tx, customer));
-  const upfrontEffects = buildUpfrontOrderLedgerEffects(upfrontOrders.filter((order) => order.customerId === customer.id), [customer])
+  const ledgerInputs = getCustomerLedgerInputs(customer, transactions, upfrontOrders);
+  const customerTx = ledgerInputs.transactions.filter((tx) => transactionMatchesCustomer(tx, customer));
+  const upfrontEffects = buildUpfrontOrderLedgerEffects(ledgerInputs.upfrontOrders, [customer])
     .filter((effect) => effect.type !== 'legacy_custom_order_info');
   const events = [
     ...customerTx.map((tx) => ({ kind: 'transaction' as const, id: tx.id, date: tx.date, priority: getEffectiveTransactionType(tx) === 'sale' ? 2 : getEffectiveTransactionType(tx) === 'return' ? 3 : 4, tx })),

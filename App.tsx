@@ -371,9 +371,7 @@ function AppContent() {
   const navigationSafetyTimeoutRef = React.useRef<number | null>(null);
   const navigationSequenceRef = React.useRef(0);
   const navigationTraceRef = React.useRef<{ fromPath: string; targetPath: string; label: string; startedAt: number; transitionId: number } | null>(null);
-  const mountedPersistentPathsRef = React.useRef<Set<string>>(new Set());
   const previousPersistentActivePathRef = React.useRef<string | null>(null);
-  const [mountedPersistentPaths, setMountedPersistentPaths] = useState<string[]>([]);
   const persistentRouteConfigByPath = React.useMemo(() => new Map(PERSISTENT_ROUTE_CONFIGS.map((config) => [config.path, config])), []);
   const activePersistentRouteConfig = persistentRouteConfigByPath.get(location.pathname) || null;
   const isPersistentRouteAllowed = React.useCallback((config: PersistentRouteConfig | null) => {
@@ -384,12 +382,9 @@ function AppContent() {
   }, [authStatus]);
   const isPersistentRouteActive = isPersistentRouteAllowed(activePersistentRouteConfig);
   const renderedPersistentPaths = React.useMemo(() => {
-    const paths = new Set(mountedPersistentPaths);
-    if (isPersistentRouteActive && activePersistentRouteConfig) {
-      paths.add(activePersistentRouteConfig.path);
-    }
-    return Array.from(paths);
-  }, [activePersistentRouteConfig, isPersistentRouteActive, mountedPersistentPaths]);
+    // Unmount inactive pages so their datasets, workers, and listeners are released.
+    return isPersistentRouteActive && activePersistentRouteConfig ? [activePersistentRouteConfig.path] : [];
+  }, [activePersistentRouteConfig, isPersistentRouteActive]);
 
   const preloadRoute = React.useCallback((path: string) => {
     const preload = ROUTE_PRELOADERS[path];
@@ -478,9 +473,7 @@ function AppContent() {
 
   useEffect(() => {
     if (authStatus === 'authenticated') return;
-    mountedPersistentPathsRef.current.clear();
     previousPersistentActivePathRef.current = null;
-    setMountedPersistentPaths([]);
   }, [authStatus]);
 
   useEffect(() => {
@@ -499,23 +492,6 @@ function AppContent() {
     }
 
     if (nextActivePath && activePersistentRouteConfig) {
-      const wasMounted = mountedPersistentPathsRef.current.has(nextActivePath);
-      if (!wasMounted) {
-        mountedPersistentPathsRef.current.add(nextActivePath);
-        setMountedPersistentPaths(Array.from(mountedPersistentPathsRef.current));
-        perfLog('route.cache.first_mount', {
-          routePath: activePersistentRouteConfig.path,
-          routeLabel: activePersistentRouteConfig.label,
-          pageInstanceId: getPersistentPageInstanceId(activePersistentRouteConfig.path),
-        });
-      } else if (previousActivePath !== nextActivePath) {
-        perfLog('route.cache.reuse', {
-          routePath: activePersistentRouteConfig.path,
-          routeLabel: activePersistentRouteConfig.label,
-          pageInstanceId: getPersistentPageInstanceId(activePersistentRouteConfig.path),
-        });
-      }
-
       if (previousActivePath !== nextActivePath) {
         perfLog('route.cache.activate', {
           routePath: activePersistentRouteConfig.path,

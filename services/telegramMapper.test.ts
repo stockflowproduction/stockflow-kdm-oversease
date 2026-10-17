@@ -214,6 +214,17 @@ describe('telegramMapper', () => {
       );
     });
 
+    it('defaults seconds frequency values to five seconds', () => {
+      const result =
+        mapTelegramRuntimeCollection({
+          frequencyUnit: 'seconds',
+        });
+
+      expect(result.frequencyValue).toBe(
+        5,
+      );
+    });
+
     it('supports existing cursor and counter aliases', () => {
       const result =
         mapTelegramRuntimeCollection({

@@ -54,4 +54,6 @@ export const computeFinanceSnapshot = (state: AppState) => {
   const netProfitToday = netSales - cogsToday - expensesToday;
   return { 'Opening balance': openingBalance, 'Net sales today': netSales, 'Credit due created': creditDueCreated, 'Net profit today': netProfitToday, 'Cash at Sale today': cashAtSale, 'Cash Collections (payments) today': cashCollections, 'Online Collections (payments) today': onlineCollections, 'Cash Refunds today': cashRefunds, 'Customer Cash Out today': customerCashOutflow, 'Expense (cash outflow) today': expenseCashOutflow, 'Net Cash Movement (after expenses) today': netCashMovement, 'Total revenue today': totalRevenue, 'Returns today': returnAmount, 'Net Sales today': netSales, 'Total receivable today': totalReceivable, 'Total Payable today': totalPayable, 'Inventory value cost today': inventoryValueCost, 'Total investment till date today': totalInvestmentTillDate };
 };
-export const emitFinanceSnapshot = (reason: string, state: AppState, activity?: FinanceActivity) => { if (activity) logFinanceActivity(activity); logFinanceSnapshot(reason, computeFinanceSnapshot(state)); };
+export const emitFinanceSnapshot = (_reason: string, _state: AppState, _activity?: FinanceActivity) => {
+  // The sinks above are disabled; avoid computing a full snapshot for a no-op.
+};

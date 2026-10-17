@@ -1,5 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Pagination } from '../components/Pagination';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
 import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Transaction, Customer, DeletedTransactionRecord, CartItem, Product, PurchaseOrder, UpfrontOrder, SupplierPaymentLedgerEntry, Expense, CashAdjustment, DeleteCompensationRecord, ManualCashbookEntry } from '../types';
@@ -151,7 +153,7 @@ export default function Transactions() {
 
   const DELETED_ROWS_PER_PAGE = 25;
   const DELETED_WINDOW_BATCH_SIZE = 100;
-  const TRANSACTION_RENDER_BATCH_SIZE = 100;
+  const TRANSACTION_RENDER_BATCH_SIZE = 50;
   const getDeletedOriginalTransactionIds = (records: DeletedTransactionRecord[] = []) =>
     records
       .map((record) => String(record.originalTransactionId || record.originalTransaction?.id || ''))
@@ -220,6 +222,12 @@ export default function Transactions() {
     }
   }
   const initialData = initialDataRef.current;
+  useEffect(() => {
+    const bootstrap = initialDataRef.current;
+    if (bootstrap) initialDataRef.current = Object.fromEntries(
+      Object.entries(bootstrap).map(([key, value]) => [key, Array.isArray(value) ? [] : value]),
+    ) as typeof bootstrap;
+  }, []);
   const [transactions, setTransactions] = useState<Transaction[]>(initialData.transactions);
   const [storageHydration, setStorageHydration] = useState(() => getStorageHydrationState());
   const [expenses, setExpenses] = useState<Expense[]>(initialData.expenses);
@@ -261,8 +269,9 @@ export default function Transactions() {
   const [editingTxNotes, setEditingTxNotes] = useState('');
   const [editingCustomerId, setEditingCustomerId] = useState('');
   const [editingCustomerSearch, setEditingCustomerSearch] = useState('');
+  const settledEditingCustomerSearch = useDebouncedValue(editingCustomerSearch);
+  const [editingCustomerPage, setEditingCustomerPage] = useState(1);
   const [isEditingCustomerPickerOpen, setIsEditingCustomerPickerOpen] = useState(false);
-  const [showAllEditingCustomers, setShowAllEditingCustomers] = useState(false);
   const [editingItems, setEditingItems] = useState<CartItem[]>([]);
   const [editingCashPaid, setEditingCashPaid] = useState('');
   const [editingOnlinePaid, setEditingOnlinePaid] = useState('');
@@ -270,6 +279,8 @@ export default function Transactions() {
   const [editingReturnMode, setEditingReturnMode] = useState<'reduce_due' | 'refund_cash' | 'refund_online' | 'store_credit'>('refund_cash');
   const [isProductPickerOpen, setIsProductPickerOpen] = useState(false);
   const [productPickerSearch, setProductPickerSearch] = useState('');
+  const settledProductPickerSearch = useDebouncedValue(productPickerSearch);
+  const [productPickerPage, setProductPickerPage] = useState(1);
   const [productPickerQuantities, setProductPickerQuantities] = useState<Record<string, number>>({});
   const [recentlyAddedProductId, setRecentlyAddedProductId] = useState<string | null>(null);
   const [editingError, setEditingError] = useState<string | null>(null);
@@ -279,8 +290,7 @@ export default function Transactions() {
   const [isTransactionsProcessing, setIsTransactionsProcessing] = useState(false);
   const [hasProcessedCurrentQuery, setHasProcessedCurrentQuery] = useState(false);
   const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
-  const [visibleTransactionCount, setVisibleTransactionCount] = useState(TRANSACTION_RENDER_BATCH_SIZE);
-  const [isLoadingMoreTransactions, setIsLoadingMoreTransactions] = useState(false);
+  const [transactionPage, setTransactionPage] = useState(1);
   const [lastTransactionProcessingMs, setLastTransactionProcessingMs] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(initialData.loadError);
   const [showBin, setShowBin] = useState(false);
@@ -308,7 +318,6 @@ export default function Transactions() {
   const [isDeletedWindowed, setIsDeletedWindowed] = useState(initialData.isDeletedWindowed);
   const transactionProcessingRequestRef = useRef(0);
   const transactionProcessingLoaderTimeoutRef = useRef<number | null>(null);
-  const loadMoreTransactionsSentinelRef = useRef<HTMLDivElement | null>(null);
   const transactionWorkerRef = useRef<Worker | null>(null);
   const transactionWorkerBusyRef = useRef(false);
   const transactionsWorkerFailedRef = useRef(false);
@@ -663,13 +672,14 @@ export default function Transactions() {
 
   useEffect(() => {
     if (!isRouteActive) return;
+    if (!showBin) return;
     if (isTransactionsHydrating) return;
     if (nonCriticalRefreshStartedRef.current) return;
     nonCriticalRefreshStartedRef.current = true;
     void perfMeasureAsync('page.Transactions.refreshDeletedTransactionsBin.startup', () => refreshDeletedTransactionsBin(), {
       runId: perfRunIdRef.current,
     });
-  }, [isRouteActive, isTransactionsHydrating]);
+  }, [showBin, isRouteActive, isTransactionsHydrating]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -803,7 +813,7 @@ export default function Transactions() {
   useEffect(() => {
     const timeout = window.setTimeout(() => {
       setDebouncedSearchTerm(searchTerm);
-    }, 180);
+    }, 1000);
     return () => window.clearTimeout(timeout);
   }, [searchTerm]);
 
@@ -848,8 +858,7 @@ export default function Transactions() {
         .map((id) => transactionsById.get(id))
         .filter((tx): tx is Transaction => Boolean(tx));
       setFilteredTransactions(nextFilteredTransactions);
-      setVisibleTransactionCount(Math.min(TRANSACTION_RENDER_BATCH_SIZE, nextFilteredTransactions.length));
-      setIsLoadingMoreTransactions(false);
+      setTransactionPage(1);
       setLastTransactionProcessingMs(durationMs);
       setHasProcessedCurrentQuery(true);
       if (transactionProcessingLoaderTimeoutRef.current !== null) {
@@ -1184,9 +1193,10 @@ export default function Transactions() {
     [renderedTransactions, selectedTransactionIds]
   );
   const paginatedTransactions = useMemo(() => {
-    return filteredTransactions.slice(0, visibleTransactionCount);
-  }, [filteredTransactions, visibleTransactionCount]);
-  const hasMoreVisibleTransactions = visibleTransactionCount < filteredTransactions.length;
+    return filteredTransactions.slice((transactionPage - 1) * TRANSACTION_RENDER_BATCH_SIZE, transactionPage * TRANSACTION_RENDER_BATCH_SIZE);
+  }, [filteredTransactions, transactionPage]);
+  const visibleTransactionCount = paginatedTransactions.length;
+  const hasMoreVisibleTransactions = transactionPage * TRANSACTION_RENDER_BATCH_SIZE < filteredTransactions.length;
   useEffect(() => {
     if (showBin || isTransactionsProcessing || !hasProcessedCurrentQuery) return;
     perfLog('page.Transactions.visible_rows.commit', {
@@ -1365,24 +1375,6 @@ export default function Transactions() {
     setDeletedPage((prev) => Math.min(prev, deletedTotalPages));
   }, [deletedTotalPages]);
 
-  useEffect(() => {
-    if (!isRouteActive || showBin || isTransactionsProcessing || !hasMoreVisibleTransactions) return;
-    const sentinel = loadMoreTransactionsSentinelRef.current;
-    if (!sentinel) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (!entries.some((entry) => entry.isIntersecting)) return;
-      observer.disconnect();
-      setIsLoadingMoreTransactions(true);
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => {
-          setVisibleTransactionCount((prev) => Math.min(filteredTransactions.length, prev + TRANSACTION_RENDER_BATCH_SIZE));
-          setIsLoadingMoreTransactions(false);
-        });
-      });
-    }, { rootMargin: '240px 0px' });
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [isRouteActive, showBin, isTransactionsProcessing, hasMoreVisibleTransactions, filteredTransactions.length, visibleTransactionCount]);
   function parseBusinessDate(value?: string | number | Date | null) {
     if (value instanceof Date) {
       return Number.isFinite(value.getTime()) ? new Date(value.getTime()) : null;
@@ -1443,7 +1435,6 @@ export default function Transactions() {
     setEditingCustomerId(tx.customerId || '');
     setEditingCustomerSearch('');
     setIsEditingCustomerPickerOpen(false);
-    setShowAllEditingCustomers(false);
     setEditingItems(normalizeTransactionItems(tx.items).map(item => ({ ...item })));
     setEditingCashPaid(String(settlement.cashPaid || 0));
     setEditingOnlinePaid(String(settlement.onlinePaid || 0));
@@ -1464,7 +1455,6 @@ export default function Transactions() {
     setEditingCustomerId('');
     setEditingCustomerSearch('');
     setIsEditingCustomerPickerOpen(false);
-    setShowAllEditingCustomers(false);
     setEditingCashPaid('');
     setEditingOnlinePaid('');
     setEditingCreditDue('');
@@ -1536,13 +1526,16 @@ export default function Transactions() {
   };
 
   const filteredProductsForPicker = useMemo(() => {
-    const term = safeLower(productPickerSearch.trim());
+    if (!isProductPickerOpen) return [];
+    const term = safeLower(settledProductPickerSearch.trim());
     if (!term) return products;
     return products.filter((product) => {
       const haystack = safeLower(getProductSearchText(product));
       return haystack.includes(term);
     });
-  }, [productPickerSearch, products]);
+  }, [isProductPickerOpen, settledProductPickerSearch, products]);
+  useEffect(() => setProductPickerPage(1), [settledProductPickerSearch, isProductPickerOpen]);
+  useEffect(() => setProductPickerPage(page => Math.min(page, Math.max(1, Math.ceil(filteredProductsForPicker.length / 20)))), [filteredProductsForPicker.length]);
 
   const updateProductPickerQty = (productId: string, value: number) => {
     const safeQty = Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1;
@@ -1815,14 +1808,17 @@ export default function Transactions() {
     [customers, editingCustomerId]
   );
   const filteredEditingCustomers = useMemo(() => {
-    const normalizedSearch = safeLower(editingCustomerSearch.trim());
+    if (!isEditingCustomerPickerOpen) return [];
+    const normalizedSearch = safeLower(settledEditingCustomerSearch.trim());
     const sortedCustomers = [...customers].sort((a, b) => a.name.localeCompare(b.name) || String(a.phone || '').localeCompare(String(b.phone || '')));
     if (!normalizedSearch) return sortedCustomers;
     return sortedCustomers.filter((customer) => safeLower(`${customer.name} ${customer.phone || ''} ${customer.id}`).includes(normalizedSearch));
-  }, [customers, editingCustomerSearch]);
+  }, [isEditingCustomerPickerOpen, customers, settledEditingCustomerSearch]);
+  useEffect(() => setEditingCustomerPage(1), [settledEditingCustomerSearch, isEditingCustomerPickerOpen]);
+  useEffect(() => setEditingCustomerPage(page => Math.min(page, Math.max(1, Math.ceil(filteredEditingCustomers.length / 10)))), [filteredEditingCustomers.length]);
   const visibleEditingCustomers = useMemo(
-    () => (showAllEditingCustomers ? filteredEditingCustomers : filteredEditingCustomers.slice(0, 6)),
-    [filteredEditingCustomers, showAllEditingCustomers]
+    () => filteredEditingCustomers.slice((editingCustomerPage - 1) * 10, editingCustomerPage * 10),
+    [filteredEditingCustomers, editingCustomerPage]
   );
   const editingCustomerBalance = useMemo(
     () => getCanonicalCustomerBalanceResult(editingCustomer, transactions, upfrontOrders),
@@ -2996,14 +2992,8 @@ export default function Transactions() {
                 })}
             </div>
         )}
-        {!showBin && !isTransactionsProcessing && hasMoreVisibleTransactions && (
-          <div ref={loadMoreTransactionsSentinelRef} className="flex items-center justify-center py-3">
-            {isLoadingMoreTransactions ? (
-              <div className="text-sm text-muted-foreground">Loading more transactions...</div>
-            ) : (
-              <div className="h-5 w-full" aria-hidden="true" />
-            )}
-          </div>
+        {!showBin && !isTransactionsProcessing && (
+          <Pagination page={transactionPage} totalRows={filteredTransactions.length} pageSize={TRANSACTION_RENDER_BATCH_SIZE} onPageChange={setTransactionPage} />
         )}
       </div>
 
@@ -3744,7 +3734,6 @@ export default function Transactions() {
                                 value={editingCustomerSearch}
                                 onChange={(e) => {
                                   setEditingCustomerSearch(e.target.value);
-                                  setShowAllEditingCustomers(false);
                                 }}
                                 placeholder="Search customer name, phone, or ID"
                                 className="pl-9"
@@ -3758,7 +3747,6 @@ export default function Transactions() {
                                   setEditingCustomerId('');
                                   setEditingCustomerSearch('');
                                   setIsEditingCustomerPickerOpen(false);
-                                  setShowAllEditingCustomers(false);
                                 }}
                               >
                                 <div>
@@ -3779,7 +3767,6 @@ export default function Transactions() {
                                       setEditingCustomerId(customer.id);
                                       setEditingCustomerSearch(customer.name);
                                       setIsEditingCustomerPickerOpen(false);
-                                      setShowAllEditingCustomers(false);
                                     }}
                                   >
                                     <div className="min-w-0">
@@ -3791,16 +3778,7 @@ export default function Transactions() {
                                 ))}
                               </div>
                             </div>
-                            {!showAllEditingCustomers && filteredEditingCustomers.length > visibleEditingCustomers.length && (
-                              <button
-                                type="button"
-                                className="mt-2 flex w-full items-center justify-center gap-2 rounded-md border border-dashed px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                                onClick={() => setShowAllEditingCustomers(true)}
-                              >
-                                <Users className="h-4 w-4" />
-                                See all {filteredEditingCustomers.length} customers
-                              </button>
-                            )}
+                            <Pagination page={editingCustomerPage} totalRows={filteredEditingCustomers.length} pageSize={10} onPageChange={setEditingCustomerPage} />
                           </div>
                         )}
                       </div>
@@ -4004,7 +3982,7 @@ export default function Transactions() {
                 <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No products found</div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {filteredProductsForPicker.map((product) => {
+                  {filteredProductsForPicker.slice((productPickerPage - 1) * 20, productPickerPage * 20).map((product) => {
                     const qty = Math.max(1, Math.floor(productPickerQuantities[product.id] || 1));
                     const imageSrc = getProductPickerImage(product);
                     const isOutOfStock = Number(product.stock || 0) <= 0;
@@ -4037,6 +4015,7 @@ export default function Transactions() {
                   })}
                 </div>
               )}
+              <Pagination page={productPickerPage} totalRows={filteredProductsForPicker.length} pageSize={20} onPageChange={setProductPickerPage} />
               <div className="border-t pt-2 flex justify-end">
                 <Button type="button" onClick={() => setIsProductPickerOpen(false)}>Done</Button>
               </div>

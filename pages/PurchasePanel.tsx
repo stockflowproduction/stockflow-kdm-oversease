@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
+import { Pagination } from '../components/Pagination';
 import { getProductBarcode, getProductCategory, getProductName, getProductSearchText, safeLower } from '../utils/productText';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '../components/ui';
 import { AppState, CashSource, PartyCreditLedgerEntry, Product, PurchaseOrder, PurchaseOrderLine, PurchaseParty, RepairHistoryEntry, SupplierPaymentLedgerEntry } from '../types';
@@ -701,6 +703,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const [parties, setParties] = useState<PurchaseParty[]>([]);
 
   const [homeSearch, setHomeSearch] = useState('.');
+  const settledHomeSearch = useDebouncedValue(homeSearch);
   const [sortBy, setSortBy] = useState<'latest' | 'amount' | 'party'>('latest');
   const [filterBy, setFilterBy] = useState<'all' | PurchaseOrder['status']>('all');
   const [ordersPage, setOrdersPage] = useState(1);
@@ -710,6 +713,8 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const [sourceMode, setSourceMode] = useState<SourceMode>('inventory');
 
   const [productSearch, setProductSearch] = useState('.');
+  const settledProductSearch = useDebouncedValue(productSearch);
+  const [productPickerPage, setProductPickerPage] = useState(1);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedVariantKeys, setSelectedVariantKeys] = useState<string[]>([]);
 
@@ -771,6 +776,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const [sendingPartyLedgerId, setSendingPartyLedgerId] = useState<string | null>(null);
   const [repairPartyDetailTab, setRepairPartyDetailTab] = useState<'overview' | 'ledger' | 'repair_history'>('overview');
   const [purchaseRowsSearch, setPurchaseRowsSearch] = useState('.');
+  const settledPurchaseRowsSearch = useDebouncedValue(purchaseRowsSearch);
   const [purchaseRowsPartyFilter, setPurchaseRowsPartyFilter] = useState('all');
   const [purchaseRowsPaymentFilter, setPurchaseRowsPaymentFilter] = useState<'all' | 'paid' | 'partial' | 'unpaid'>('all');
   const [purchaseRowsRemainingFilter, setPurchaseRowsRemainingFilter] = useState<'all' | 'with_remaining' | 'cleared'>('all');
@@ -902,10 +908,12 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   }, []);
 
   const filteredProducts = useMemo(() => {
-    const q = safeLower(productSearch.trim());
+    const q = safeLower(settledProductSearch.trim());
     if (!q) return products;
     return products.filter(p => safeLower(getProductSearchText(p)).includes(q));
-  }, [products, productSearch]);
+  }, [products, settledProductSearch]);
+  useEffect(() => setProductPickerPage(1), [settledProductSearch]);
+  useEffect(() => setProductPickerPage(page => Math.min(page, Math.max(1, Math.ceil(filteredProducts.length / 20)))), [filteredProducts.length]);
   const categorySuggestions = useMemo(
     () => Array.from<string>(new Set<string>(
       products
@@ -925,7 +933,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
       productsLabel: order.lines.map(l => l.productName).slice(0, 3).join(', '),
     }));
 
-    const q = homeSearch.trim().toLowerCase();
+    const q = settledHomeSearch.trim().toLowerCase();
     rows = rows.filter(r => {
       const matchesSearch = !q || [r.order.id, r.order.partyName, r.productsLabel].join(' ').toLowerCase().includes(q);
       const matchesFilter = filterBy === 'all' || r.order.status === filterBy;
@@ -943,7 +951,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
     searchLength: homeSearch.trim().length,
     filterBy,
     sortBy,
-  }), [orders, homeSearch, filterBy, sortBy]);
+  }), [orders, settledHomeSearch, filterBy, sortBy]);
   const orderTotalPages = useMemo(
     () => Math.max(1, Math.ceil(orderList.length / ORDERS_PAGE_SIZE)),
     [orderList.length]
@@ -955,7 +963,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
 
   useEffect(() => {
     setOrdersPage(1);
-  }, [homeSearch, filterBy, sortBy]);
+  }, [settledHomeSearch, filterBy, sortBy]);
 
   useEffect(() => {
     setOrdersPage((prev) => Math.min(prev, orderTotalPages));
@@ -1927,7 +1935,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [purchaseOrderDiagnosticRows]);
   const filteredPurchaseDiagnosticRows = useMemo(() => {
-    const q = safeLower(purchaseRowsSearch.trim());
+    const q = safeLower(settledPurchaseRowsSearch.trim());
     const fromMs = purchaseRowsFrom ? new Date(`${purchaseRowsFrom}T00:00:00`).getTime() : null;
     const toMs = purchaseRowsTo ? new Date(`${purchaseRowsTo}T23:59:59.999`).getTime() : null;
     return purchaseOrderDiagnosticRows.filter((row) => {
@@ -1956,7 +1964,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
       const matchesTo = toMs === null || (rowDateMs !== null && rowDateMs <= toMs);
       return matchesSearch && matchesParty && matchesPayment && matchesRemaining && matchesCredit && matchesProduct && matchesFrom && matchesTo;
     });
-  }, [purchaseOrderDiagnosticRows, purchaseRowsSearch, purchaseRowsPartyFilter, purchaseRowsPaymentFilter, purchaseRowsRemainingFilter, purchaseRowsCreditFilter, purchaseRowsProductFilter, purchaseRowsFrom, purchaseRowsTo]);
+  }, [purchaseOrderDiagnosticRows, settledPurchaseRowsSearch, purchaseRowsPartyFilter, purchaseRowsPaymentFilter, purchaseRowsRemainingFilter, purchaseRowsCreditFilter, purchaseRowsProductFilter, purchaseRowsFrom, purchaseRowsTo]);
   const filteredPurchaseDiagnosticSummary = useMemo(() => {
     const uniqueOrders = new Set(filteredPurchaseDiagnosticRows.map((row) => row.orderId));
     const seenOrders = new Set<string>();
@@ -1994,7 +2002,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   }, [filteredPurchaseDiagnosticRows, purchaseRowsPage]);
   useEffect(() => {
     setPurchaseRowsPage(1);
-  }, [purchaseRowsSearch, purchaseRowsPartyFilter, purchaseRowsPaymentFilter, purchaseRowsRemainingFilter, purchaseRowsCreditFilter, purchaseRowsProductFilter, purchaseRowsFrom, purchaseRowsTo]);
+  }, [settledPurchaseRowsSearch, purchaseRowsPartyFilter, purchaseRowsPaymentFilter, purchaseRowsRemainingFilter, purchaseRowsCreditFilter, purchaseRowsProductFilter, purchaseRowsFrom, purchaseRowsTo]);
   useEffect(() => {
     setPurchaseRowsPage((prev) => Math.min(prev, purchaseDiagnosticTotalPages));
   }, [purchaseDiagnosticTotalPages]);
@@ -2634,7 +2642,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
     return partyLedgers.get(expandedPartyId)?.rows || [];
   }, [expandedPartyId, partyLedgers]);
   const repairCenterFilteredParties = useMemo(() => {
-    const query = homeSearch.trim().toLowerCase();
+    const query = settledHomeSearch.trim().toLowerCase();
     const rows = visibleParties.filter((party) => {
       if (!query) return true;
       return [
@@ -2646,7 +2654,7 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
       ].join(' ').toLowerCase().includes(query);
     });
     return rows.sort((a, b) => a.name.localeCompare(b.name));
-  }, [visibleParties, homeSearch]);
+  }, [visibleParties, settledHomeSearch]);
   const selectedRepairParty = useMemo(
     () => (expandedPartyId ? visibleParties.find((party) => party.id === expandedPartyId) || null : null),
     [expandedPartyId, visibleParties],
@@ -4603,8 +4611,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
                 <input value={productSearch} onChange={e => setProductSearch(e.target.value)} placeholder="Search products..." className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-10 pr-4 outline-none focus:border-slate-400" />
               </div>
             </div>
+            <Pagination page={productPickerPage} totalRows={filteredProducts.length} pageSize={20} onPageChange={setProductPickerPage} />
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {filteredProducts.map(product => (
+              {filteredProducts.slice((productPickerPage - 1) * 20, productPickerPage * 20).map(product => (
                 <button key={product.id} onClick={() => selectProduct(product)} className="overflow-hidden rounded-3xl border border-slate-200 text-left transition hover:-translate-y-0.5 hover:shadow-md">
                   <img src={product.image || '.'} alt={getProductName(product)} className="h-44 w-full object-cover" />
                   <div className="p-4">

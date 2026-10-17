@@ -1,5 +1,7 @@
 ﻿
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
+import { Pagination } from '../components/Pagination';
 import { useNavigate } from 'react-router-dom';
 import JsBarcode from 'jsbarcode';
 import jsPDF from 'jspdf';
@@ -134,12 +136,16 @@ export default function Admin() {
     perfLog('page.Admin.render.start', { runId: perfRunIdRef.current });
   }
   const navigate = useNavigate();
-  const INVENTORY_PAGE_SIZE = 100;
+  const INVENTORY_PAGE_SIZE = 25;
   const initialDataRef = useRef<any | null>(null);
   if (initialDataRef.current === null) {
     initialDataRef.current = loadData();
   }
   const initialData = initialDataRef.current;
+  useEffect(() => {
+    // State owns the current rows; do not retain an obsolete bootstrap snapshot.
+    initialDataRef.current = {};
+  }, []);
   const [products, setProducts] = useState<Product[]>(initialData.products || []);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>(Array.isArray(initialData.purchaseOrders) ? initialData.purchaseOrders : []);
   const [customers, setCustomers] = useState<Customer[]>(Array.isArray(initialData.customers) ? initialData.customers : []);
@@ -164,9 +170,11 @@ export default function Admin() {
   
   // Filters & Sort
   const [searchTerm, setSearchTerm] = useState('');
+  const settledSearchTerm = useDebouncedValue(searchTerm);
   const [sortOption, setSortOption] = useState('name-asc');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [inventoryPage, setInventoryPage] = useState(1);
+  const [missingPurchasePage, setMissingPurchasePage] = useState(1);
   const OPERATOR_INVENTORY_PAGE_SIZE = 20;
   const [operatorInventoryPage, setOperatorInventoryPage] = useState(1);
   const [operatorSortOption, setOperatorSortOption] = useState<'name' | 'stock-desc' | 'stock-asc' | 'sell-desc' | 'sell-asc' | 'category'>('name');
@@ -257,6 +265,7 @@ const [categoryDeleteError, setCategoryDeleteError] = useState<string | null>(nu
   const [showSupplierPartyModal, setShowSupplierPartyModal] = useState(false);
   const [supplierPartyPickerContext, setSupplierPartyPickerContext] = useState<'product' | 'purchase' | 'stock_source'>('product');
   const [supplierPartySearch, setSupplierPartySearch] = useState('');
+  const settledSupplierPartySearch = useDebouncedValue(supplierPartySearch);
   const [showAddSupplierPartyModal, setShowAddSupplierPartyModal] = useState(false);
   const [newSupplierPartyName, setNewSupplierPartyName] = useState('');
   const [newSupplierPartyPhone, setNewSupplierPartyPhone] = useState('');
@@ -543,10 +552,10 @@ useEscapeLayer(Boolean(deletingCategory), () => {
       .slice(0, 5);
   }, [stockSourcePartyName, stockSourceProduct, isStockSourcePartyInputFocused, visiblePurchaseParties]);
   const filteredVisiblePurchaseParties = useMemo(() => {
-    const query = supplierPartySearch.trim().toLowerCase();
+    const query = settledSupplierPartySearch.trim().toLowerCase();
     if (!query) return visiblePurchaseParties;
     return visiblePurchaseParties.filter((party) => [party.name, party.phone || '', party.gst || ''].join(' ').toLowerCase().includes(query));
-  }, [visiblePurchaseParties, supplierPartySearch]);
+  }, [visiblePurchaseParties, settledSupplierPartySearch]);
 
   useEffect(() => {
     if (!firstEffectLoggedRef.current) {
@@ -3636,7 +3645,7 @@ useEffect(() => {
 
   const filteredProducts = useMemo(() => {
     let result = products.filter(p => 
-      (safeLower(getProductSearchTextForAdmin(p)).includes(safeLower(searchTerm))) &&
+      (safeLower(getProductSearchTextForAdmin(p)).includes(safeLower(settledSearchTerm))) &&
       (categoryFilter === 'all' || getProductCategory(p) === categoryFilter)
     );
 
@@ -3651,12 +3660,13 @@ useEffect(() => {
     });
 
     return result;
-  }, [products, searchTerm, sortOption, categoryFilter]);
+  }, [products, settledSearchTerm, sortOption, categoryFilter]);
   const purchaseOrderRowsForAudit = useMemo(
     () => purchaseOrders,
     [purchaseOrders]
   );
   const inventoryPurchaseHistoryAuditRows = useMemo(() => {
+    if (!viewingProductAuditMode) return [];
     return filteredProducts.map((product) => {
       const audit = compareProductPurchaseHistoryForProduct(product, purchaseOrderRowsForAudit);
       const implication = audit.brokenProductLinkCount > 0
@@ -3671,7 +3681,7 @@ useEffect(() => {
 
       return { product, audit, implication };
     });
-  }, [filteredProducts, purchaseOrderRowsForAudit]);
+  }, [viewingProductAuditMode, filteredProducts, purchaseOrderRowsForAudit]);
   const inventoryPurchaseHistoryAuditSummary = useMemo(() => {
     return inventoryPurchaseHistoryAuditRows.reduce((summary, row) => {
       summary.productsScanned += 1;
@@ -3710,6 +3720,7 @@ useEffect(() => {
       .slice(0, 30);
   }, [inventoryPurchaseHistoryAuditRows]);
   const missingPurchaseIdRows = useMemo(() => {
+    if (inventoryViewTab !== 'missing-purchase-ids') return [];
     return filteredProducts.flatMap((product) => {
       const embeddedHistoryIds = new Set(
         (Array.isArray(product.purchaseHistory) ? product.purchaseHistory : [])
@@ -3743,13 +3754,15 @@ useEffect(() => {
       const dateDelta = new Date(b.row.date || '').getTime() - new Date(a.row.date || '').getTime();
       return Number.isFinite(dateDelta) && dateDelta !== 0 ? dateDelta : getProductName(a.product).localeCompare(getProductName(b.product));
     });
-  }, [filteredProducts, purchaseOrders]);
+  }, [inventoryViewTab, filteredProducts, purchaseOrders]);
   const missingPurchaseIdSummary = useMemo(() => {
     const productsAffected = new Set(missingPurchaseIdRows.map((item) => item.product.id)).size;
     const purchaseValue = missingPurchaseIdRows.reduce((sum, item) => sum + Math.max(0, Number(item.row.lineTotal || 0)), 0);
     const missingEmbeddedHistories = missingPurchaseIdRows.filter((item) => item.embeddedHistoryCount === 0).length;
     return { rows: missingPurchaseIdRows.length, productsAffected, purchaseValue, missingEmbeddedHistories };
   }, [missingPurchaseIdRows]);
+  useEffect(() => setMissingPurchasePage(1), [settledSearchTerm, categoryFilter, inventoryViewTab]);
+  useEffect(() => setMissingPurchasePage(page => Math.min(page, Math.max(1, Math.ceil(missingPurchaseIdRows.length / 25)))), [missingPurchaseIdRows.length]);
   const inventoryTotalPages = Math.max(1, Math.ceil(filteredProducts.length / INVENTORY_PAGE_SIZE));
   const paginatedProducts = useMemo(
     () => filteredProducts.slice((inventoryPage - 1) * INVENTORY_PAGE_SIZE, inventoryPage * INVENTORY_PAGE_SIZE),
@@ -3757,7 +3770,7 @@ useEffect(() => {
   );
 
   const operatorFilteredProducts = useMemo(() => {
-    const term = safeLower(searchTerm);
+    const term = safeLower(settledSearchTerm);
     const result = products.filter((product) => {
       const matchesSearch = !term || safeLower([getProductName(product), getProductCategory(product), getProductBarcode(product), (product as any).locationZone, (product as any).locationRow, (product as any).locationRack, (product as any).locationShelf, (product as any).telegramKeywords, (product as any).piecesPerCarton].join(' ')).includes(term);
       const stock = Math.max(0, Number(product.stock || 0));
@@ -3781,7 +3794,7 @@ useEffect(() => {
     });
 
     return result;
-  }, [products, searchTerm, operatorSortOption, operatorStockFilter]);
+  }, [products, settledSearchTerm, operatorSortOption, operatorStockFilter]);
   const operatorInventoryTotalPages = Math.max(1, Math.ceil(operatorFilteredProducts.length / OPERATOR_INVENTORY_PAGE_SIZE));
   const operatorPaginatedProducts = useMemo(
     () => operatorFilteredProducts.slice((operatorInventoryPage - 1) * OPERATOR_INVENTORY_PAGE_SIZE, operatorInventoryPage * OPERATOR_INVENTORY_PAGE_SIZE),
@@ -3799,11 +3812,11 @@ useEffect(() => {
 
   useEffect(() => {
     setInventoryPage(1);
-  }, [searchTerm, categoryFilter, sortOption]);
+  }, [settledSearchTerm, categoryFilter, sortOption]);
 
   useEffect(() => {
     setOperatorInventoryPage(1);
-  }, [searchTerm, operatorSortOption, operatorStockFilter]);
+  }, [settledSearchTerm, operatorSortOption, operatorStockFilter]);
 
   useEffect(() => {
     setInventoryPage((prev) => Math.min(prev, inventoryTotalPages));
@@ -4400,6 +4413,7 @@ useEffect(() => {
       </>
       ) : inventoryViewTab === 'missing-purchase-ids' ? (
         <div className="space-y-3">
+          <Pagination page={missingPurchasePage} totalRows={missingPurchaseIdRows.length} pageSize={25} onPageChange={setMissingPurchasePage} />
           <div className="overflow-hidden rounded-xl border bg-card">
             <div className="border-b bg-amber-50/60 px-4 py-3">
               <div className="font-semibold text-amber-950">Missing Purchase IDs</div>
@@ -4420,7 +4434,7 @@ useEffect(() => {
                   </tr>
                 </thead>
                 <tbody>
-                  {missingPurchaseIdRows.map((item) => {
+                  {missingPurchaseIdRows.slice((missingPurchasePage - 1) * 25, missingPurchasePage * 25).map((item) => {
                     const { product, row, order, orderLine } = item;
                     const availableIdsPreview = item.availableHistoryIds.slice(0, 3).join(', ');
                     return (

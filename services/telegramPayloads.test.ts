@@ -326,6 +326,21 @@ describe('telegramPayloads', () => {
       ).toBe(5);
     });
 
+    it('caps too-fast collection frequencies at five seconds', () => {
+      const result =
+        buildTelegramCollectionStartRequest({
+          ...createInput(),
+          frequencyValue: 1,
+          frequencyUnit:
+            'seconds' as const,
+        });
+
+      expect(result.frequencyValue).toBe(5);
+      expect(result.frequencyUnit).toBe(
+        'seconds',
+      );
+    });
+
     it('normalizes the legacy telegram_details token for backend compatibility', () => {
       const input = {
         ...createInput(),

@@ -1,4 +1,6 @@
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
+import { Pagination } from '../components/Pagination';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select, LightweightLoader } from '../components/ui';
 import { AppState, CashAdjustment, CashSession, CashSource, Customer, DeleteCompensationRecord, Expense, ManualCashbookEntry, PartyCreditLedgerEntry, PurchaseOrder, PurchaseParty, SupplierPaymentLedgerEntry, Transaction, UpfrontOrder } from '../types';
@@ -317,9 +319,11 @@ export default function Dashboard() {
   const [supplierDashboardTab, setSupplierDashboardTab] = useState<'payable' | 'credit' | 'withoutDue'>('payable');
   const [customerDashboardSearch, setCustomerDashboardSearch] = useState('');
   const [supplierDashboardSearch, setSupplierDashboardSearch] = useState('');
+  const [customerDashboardPage, setCustomerDashboardPage] = useState(1);
+  const [supplierDashboardPage, setSupplierDashboardPage] = useState(1);
   const [dashboardDetailsReady, setDashboardDetailsReady] = useState(false);
-  const deferredCustomerDashboardSearch = useDeferredValue(customerDashboardSearch);
-  const deferredSupplierDashboardSearch = useDeferredValue(supplierDashboardSearch);
+  const deferredCustomerDashboardSearch = useDebouncedValue(customerDashboardSearch);
+  const deferredSupplierDashboardSearch = useDebouncedValue(supplierDashboardSearch);
 
   const refresh = () => {
     perfMeasureSync('page.Dashboard.refresh', () => {
@@ -644,7 +648,7 @@ export default function Dashboard() {
   const receivableCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable > 0), [allCustomerDashboardRows]);
   const storeCreditCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable <= 0 && Math.max(0, Number(c.storeCredit || 0)) > 0), [allCustomerDashboardRows]);
   const zeroDueCustomerRows = useMemo(() => allCustomerDashboardRows.filter((c) => c.receivable <= 0 && Math.max(0, Number(c.storeCredit || 0)) <= 0), [allCustomerDashboardRows]);
-  const visibleCustomerDashboardRows = useMemo(() => {
+  const matchingCustomerDashboardRows = useMemo(() => {
     const rows = customerDashboardTab === 'receivable' ? receivableCustomerRows : customerDashboardTab === 'storeCredit' ? storeCreditCustomerRows : zeroDueCustomerRows;
     const query = deferredCustomerDashboardSearch.trim().toLowerCase();
     if (!query) return rows;
@@ -655,6 +659,9 @@ export default function Dashboard() {
       customer.gstNumber,
     ].some((value) => String(value || '').toLowerCase().includes(query)));
   }, [customerDashboardTab, deferredCustomerDashboardSearch, receivableCustomerRows, storeCreditCustomerRows, zeroDueCustomerRows]);
+  const visibleCustomerDashboardRows = matchingCustomerDashboardRows.slice((customerDashboardPage - 1) * 20, customerDashboardPage * 20);
+  useEffect(() => setCustomerDashboardPage(1), [customerDashboardTab, deferredCustomerDashboardSearch]);
+  useEffect(() => setCustomerDashboardPage(page => Math.min(page, Math.max(1, Math.ceil(matchingCustomerDashboardRows.length / 20)))), [matchingCustomerDashboardRows.length]);
 
   const allPartyDashboardRows = useMemo<PartyPayableRow[]>(() => perfMeasureSync('page.Dashboard.derive.allPartyDashboardRows', () => {
     if (!dashboardDetailsReady) return [];
@@ -758,7 +765,7 @@ export default function Dashboard() {
   const payablePartyRows = useMemo(() => mergedPartyDashboardRows.filter((p) => p.payable > 0), [mergedPartyDashboardRows]);
   const creditPartyRows = useMemo(() => mergedPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) > 0), [mergedPartyDashboardRows]);
   const zeroDuePartyRows = useMemo(() => mergedPartyDashboardRows.filter((p) => p.payable <= 0 && Math.max(0, Number(p.partyCredit || 0)) <= 0), [mergedPartyDashboardRows]);
-  const visibleSupplierDashboardRows = useMemo(() => {
+  const matchingSupplierDashboardRows = useMemo(() => {
     const rows = supplierDashboardTab === 'payable' ? payablePartyRows : supplierDashboardTab === 'credit' ? creditPartyRows : zeroDuePartyRows;
     const query = deferredSupplierDashboardSearch.trim().toLowerCase();
     if (!query) return rows;
@@ -769,6 +776,9 @@ export default function Dashboard() {
       party.contactPerson,
     ].some((value) => String(value || '').toLowerCase().includes(query)));
   }, [creditPartyRows, deferredSupplierDashboardSearch, payablePartyRows, supplierDashboardTab, zeroDuePartyRows]);
+  const visibleSupplierDashboardRows = matchingSupplierDashboardRows.slice((supplierDashboardPage - 1) * 20, supplierDashboardPage * 20);
+  useEffect(() => setSupplierDashboardPage(1), [supplierDashboardTab, deferredSupplierDashboardSearch]);
+  useEffect(() => setSupplierDashboardPage(page => Math.min(page, Math.max(1, Math.ceil(matchingSupplierDashboardRows.length / 20)))), [matchingSupplierDashboardRows.length]);
 
   const operatorRevenueBreakdown = useMemo(() => transactions.filter((tx) => tx.type === 'sale').reduce((acc, tx) => {
     const settlement = getSaleSettlementBreakdown(tx);
@@ -1546,6 +1556,7 @@ export default function Dashboard() {
                 </div>
               </div>
             ))}
+            {dashboardDetailsReady && <Pagination page={customerDashboardPage} totalRows={matchingCustomerDashboardRows.length} pageSize={20} onPageChange={setCustomerDashboardPage} />}
             {dashboardDetailsReady && !visibleCustomerDashboardRows.length && customerDashboardSearch.trim() && <p className="text-sm text-muted-foreground">No customers match this search.</p>}
             {dashboardDetailsReady && !customerDashboardSearch.trim() && customerDashboardTab === 'receivable' && !receivableCustomerRows.length && <p className="text-sm text-muted-foreground">No customer receivables.</p>}
             {dashboardDetailsReady && !customerDashboardSearch.trim() && customerDashboardTab === 'storeCredit' && !storeCreditCustomerRows.length && <p className="text-sm text-muted-foreground">No customers with store credit.</p>}
@@ -1590,6 +1601,7 @@ export default function Dashboard() {
                 </div>
               </div>
             ))}
+            {dashboardDetailsReady && <Pagination page={supplierDashboardPage} totalRows={matchingSupplierDashboardRows.length} pageSize={20} onPageChange={setSupplierDashboardPage} />}
             {dashboardDetailsReady && !visibleSupplierDashboardRows.length && supplierDashboardSearch.trim() && <p className="text-sm text-muted-foreground">No suppliers match this search.</p>}
             {dashboardDetailsReady && !supplierDashboardSearch.trim() && supplierDashboardTab === 'payable' && !payablePartyRows.length && <p className="text-sm text-muted-foreground">No payable parties.</p>}
             {dashboardDetailsReady && !supplierDashboardSearch.trim() && supplierDashboardTab === 'credit' && !creditPartyRows.length && <p className="text-sm text-muted-foreground">No party credits recorded yet.</p>}

@@ -12,8 +12,8 @@ import { generateProductCatalogPDF } from '../services/pdf';
 import { CustomerCatalogOptionsModal, CustomerCatalogOptions } from '../components/CustomerCatalogOptionsModal';
 
 export default function Reports() {
-  const [products, setProducts] = useState(loadData().products);
-  const [transactions, setTransactions] = useState(loadData().transactions);
+  const [products, setProducts] = useState(() => loadData().products);
+  const [transactions, setTransactions] = useState(() => loadData().transactions);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [reportType, setReportType] = useState<'internal' | 'customer' | 'detailed_sales'>('internal');
   const [isCatalogOptionsOpen, setIsCatalogOptionsOpen] = useState(false);

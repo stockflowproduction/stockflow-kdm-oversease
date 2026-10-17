@@ -46,7 +46,7 @@ describe('transaction cash KPI classification', () => {
     expect(getTransactionCashKpis(transaction({ type, paymentMethod: 'Mixed' }), 25))
       .toEqual({ ...zero, totalCashIn: 25 });
   });
-  it('counts sale cash kept above invoice cash as credit received', () => {
+  it('keeps sale cash above invoice cash out of Credit Received', () => {
     expect(getTransactionCashKpis(transaction({
       type: 'sale',
       total: 130,
@@ -55,7 +55,30 @@ describe('transaction cash KPI classification', () => {
       changeReturned: 0,
       paymentAppliedToReceivable: 20,
       storeCreditCreated: 20,
-    }), 130)).toEqual({ ...zero, totalCashIn: 150, cashReceivedOnCreditDue: 20 });
+    }), 130)).toEqual({ ...zero, totalCashIn: 150 });
+  });
+  it.each(['sale', 'historical_reference'] as const)('excludes %s from Credit Received even with receivable allocations', (type) => {
+    expect(getTransactionCashKpis(transaction({
+      type,
+      cashReceived: 150,
+      paymentAppliedToReceivable: 20,
+      paymentAppliedToCanonicalReceivable: 20,
+      storeCreditCreated: 20,
+    }), 130).cashReceivedOnCreditDue).toBe(0);
+  });
+  it('uses only customer payment rows for both the Credit Received list and total', () => {
+    const rows = [
+      transaction({ id: 'customer-cash', total: 125 }),
+      transaction({ id: 'customer-online', total: 430, paymentMethod: 'Online' }),
+      transaction({ id: 'sale-cash', type: 'sale', total: 1625, cashReceived: 2125, paymentAppliedToReceivable: 500 }),
+      transaction({ id: 'sale-credit', type: 'sale', paymentMethod: 'Credit', paymentAppliedToReceivable: 8346 }),
+      transaction({ id: 'supplier-payment-1', total: 900 }),
+      transaction({ id: 'refund', type: 'return', total: -100 }),
+    ];
+    const receipts = rows.map(tx => ({ tx, amount: getTransactionCashKpis(tx, tx.id === 'sale-cash' ? 1625 : 0).cashReceivedOnCreditDue }))
+      .filter(row => row.amount > 0);
+    expect(receipts.map(row => row.tx.id)).toEqual(['customer-cash', 'customer-online']);
+    expect(receipts.reduce((sum, row) => sum + row.amount, 0)).toBe(555);
   });
   it('excludes inactive sale rows from transaction cash KPIs', () => {
     expect(getTransactionCashKpis(transaction({

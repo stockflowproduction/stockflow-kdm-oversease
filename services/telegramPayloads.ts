@@ -11,6 +11,7 @@ import type {
 
 import {
   isTelegramBatchSize,
+  normalizeTelegramFrequencyFloor,
   throwTelegramValidationError,
   validateTelegramBatchSize,
   validateTelegramChannel,
@@ -177,6 +178,12 @@ const normalizeSchedulerProduct = (
 export const buildTelegramCollectionStartRequest = (
   input: TelegramCollectionStartInput,
 ): TelegramCollectionStartRequest => {
+  const frequency =
+    normalizeTelegramFrequencyFloor(
+      input.frequencyValue,
+      input.frequencyUnit,
+    );
+
   throwTelegramValidationError(
     validateTelegramCollectionName(
       input.name,
@@ -197,8 +204,8 @@ export const buildTelegramCollectionStartRequest = (
 
   throwTelegramValidationError(
     validateTelegramFrequency(
-      input.frequencyValue,
-      input.frequencyUnit,
+      frequency.value,
+      frequency.unit,
     ),
   );
 
@@ -290,12 +297,10 @@ export const buildTelegramCollectionStartRequest = (
     ),
 
     frequencyValue:
-      Number(
-        input.frequencyValue,
-      ),
+      frequency.value,
 
     frequencyUnit:
-      input.frequencyUnit,
+      frequency.unit,
 
     batchSize,
 

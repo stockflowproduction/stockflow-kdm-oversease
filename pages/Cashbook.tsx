@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
+import { Pagination } from '../components/Pagination';
 import * as XLSX from 'xlsx';
 import { loadData, getSaleSettlementBreakdown, getCanonicalCustomerBalanceSnapshot, buildUpfrontOrderLedgerEffects, createManualCashbookEntry, refreshDeletedTransactionsFromCloud } from '../services/storage';
 import { AppState, CashAdjustment, CashSession, CashSource, Expense, ManualCashbookEntry, Product, PurchaseOrder, Transaction, UpfrontOrder } from '../types';
@@ -165,7 +167,7 @@ const getDateValue = (value: string) => {
   const time = new Date(value).getTime();
   return Number.isFinite(time) ? time : 0;
 };
-const GROSS_PROFIT_PAGE_SIZE = 200;
+const GROSS_PROFIT_PAGE_SIZE = 50;
 const matchesDateRange = (value: string, from: string, to: string) => {
   const current = getDateValue(value);
   if (from) {
@@ -433,11 +435,15 @@ export default function Cashbook() {
   const [payFilter, setPayFilter] = useState<'all' | 'cash' | 'online' | 'credit' | 'mixed'>('all');
   const [typeFilter, setTypeFilter] = useState<'all' | LedgerType>('all');
   const [search, setSearch] = useState(''); const [sort, setSort] = useState<'newest' | 'oldest'>('newest');
-  const [visibleRowCount, setVisibleRowCount] = useState(100);
+  const settledSearch = useDebouncedValue(search);
+  const [ledgerPage, setLedgerPage] = useState(1);
+  const [advancePage, setAdvancePage] = useState(1);
   const [activeTab, setActiveTab] = useState<'ledger' | 'daily_breakdown' | 'advance_orders' | 'gross_profit'>('ledger');
   const [selectedDailyBreakdownKey, setSelectedDailyBreakdownKey] = useState<string | null>(null);
   const [grossProfitCustomerSearch, setGrossProfitCustomerSearch] = useState('');
   const [grossProfitProductSearch, setGrossProfitProductSearch] = useState('');
+  const settledGrossProfitCustomerSearch = useDebouncedValue(grossProfitCustomerSearch);
+  const settledGrossProfitProductSearch = useDebouncedValue(grossProfitProductSearch);
   const [isGrossProfitModalOpen, setIsGrossProfitModalOpen] = useState(false);
   const [grossProfitModalScope, setGrossProfitModalScope] = useState<'all' | 'net_sales' | 'gross_profit' | 'expenses'>('all');
   const [grossProfitPage, setGrossProfitPage] = useState(1);
@@ -845,12 +851,13 @@ export default function Cashbook() {
     const t = new Date(r.date).getTime(); if (effectiveFrom && t < new Date(`${effectiveFrom}T00:00:00`).getTime()) return false; if (effectiveTo && t > new Date(`${effectiveTo}T23:59:59`).getTime()) return false;
     if (payFilter !== 'all' && r.payment !== payFilter) return false;
     if (typeFilter !== 'all' && r.type !== typeFilter) return false;
-    const q = search.trim().toLowerCase(); if (!q) return true; return `${r.description} ${r.reference} ${r.party}`.toLowerCase().includes(q);
-  }).sort((a, b) => sort === 'newest' ? new Date(b.date).getTime() - new Date(a.date).getTime() : new Date(a.date).getTime() - new Date(b.date).getTime()), [allLedgerRows, effectiveFrom, effectiveTo, payFilter, typeFilter, search, sort]);
+    const q = settledSearch.trim().toLowerCase(); if (!q) return true; return `${r.description} ${r.reference} ${r.party}`.toLowerCase().includes(q);
+  }).sort((a, b) => sort === 'newest' ? new Date(b.date).getTime() - new Date(a.date).getTime() : new Date(a.date).getTime() - new Date(b.date).getTime()), [allLedgerRows, effectiveFrom, effectiveTo, payFilter, typeFilter, settledSearch, sort]);
 
   const advanceOrderRows = useMemo<AdvanceOrderCashbookRow[]>(() => {
     const orderById = new Map(safeUpfrontOrders.map((order) => [String(order.id), order]));
-    const q = search.trim().toLowerCase();
+    if (activeTab !== 'advance_orders') return [];
+    const q = settledSearch.trim().toLowerCase();
     const effectRows = buildUpfrontOrderLedgerEffects(safeUpfrontOrders, safeCustomers)
       .filter((effect) => !effect.isReceivableOnlyRepair)
       .map((effect): AdvanceOrderCashbookRow => {
@@ -940,7 +947,7 @@ export default function Cashbook() {
         return `${row.description} ${row.reference} ${row.party} ${row.productName} ${row.orderStatus}`.toLowerCase().includes(q);
       })
       .sort((a, b) => sort === 'newest' ? new Date(b.date).getTime() - new Date(a.date).getTime() : new Date(a.date).getTime() - new Date(b.date).getTime());
-  }, [effectiveFrom, effectiveTo, payFilter, safeCustomers, safeUpfrontOrders, search, sort]);
+  }, [activeTab, effectiveFrom, effectiveTo, payFilter, safeCustomers, safeUpfrontOrders, settledSearch, sort]);
 
   const advanceOrderSummary = useMemo(() => ({
     rows: advanceOrderRows.length,
@@ -1014,8 +1021,10 @@ export default function Cashbook() {
   );
 
 
-  useEffect(() => setVisibleRowCount(100), [datePreset, from, to, payFilter, typeFilter, search, sort]);
-  const visibleRows = useMemo(() => asArray<Row>(filteredDisplayRows).slice(0, visibleRowCount), [filteredDisplayRows, visibleRowCount]);
+  useEffect(() => { setLedgerPage(1); setAdvancePage(1); }, [datePreset, from, to, payFilter, typeFilter, settledSearch, sort]);
+  useEffect(() => setLedgerPage(page => Math.min(page, Math.max(1, Math.ceil(filteredDisplayRows.length / 50)))), [filteredDisplayRows.length]);
+  useEffect(() => setAdvancePage(page => Math.min(page, Math.max(1, Math.ceil(advanceOrderRows.length / 50)))), [advanceOrderRows.length]);
+  const visibleRows = useMemo(() => asArray<Row>(filteredDisplayRows).slice((ledgerPage - 1) * 50, ledgerPage * 50), [filteredDisplayRows, ledgerPage]);
   const visibleDisplayRows = useMemo(() => visibleRows.map((row) => {
     const items = (row.itemPreviews || []).map((item) => ({
       ...item,
@@ -1159,7 +1168,8 @@ export default function Cashbook() {
   };
 
   const dailyBreakdownRows = useMemo(() => {
-    const query = search.trim().toLowerCase();
+    if (activeTab !== 'daily_breakdown') return [];
+    const query = settledSearch.trim().toLowerCase();
     const startTime = effectiveFrom ? new Date(`${effectiveFrom}T00:00:00`).getTime() : Number.NEGATIVE_INFINITY;
     const endTime = effectiveTo ? new Date(`${effectiveTo}T23:59:59`).getTime() : Number.POSITIVE_INFINITY;
     const chrono = [...allLedgerRows].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
@@ -1247,7 +1257,7 @@ export default function Cashbook() {
       .sort((a, b) => sort === 'newest'
         ? new Date(`${b.dayKey}T00:00:00`).getTime() - new Date(`${a.dayKey}T00:00:00`).getTime()
         : new Date(`${a.dayKey}T00:00:00`).getTime() - new Date(`${b.dayKey}T00:00:00`).getTime());
-  }, [allLedgerRows, effectiveFrom, effectiveTo, search, sort]);
+  }, [activeTab, allLedgerRows, effectiveFrom, effectiveTo, settledSearch, sort]);
 
   const selectedDailyBreakdown = useMemo(
     () => selectedDailyBreakdownKey
@@ -1412,6 +1422,7 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
   );
 
   const grossProfitRows = useMemo<GrossProfitRow[]>(() => {
+    if (activeTab !== 'gross_profit' && !isGrossProfitModalOpen) return [];
     const rowsOut: GrossProfitRow[] = [];
     const transactionsById = new Map(safeTransactions.map((tx) => [tx.id, tx]));
 
@@ -1509,11 +1520,11 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
     });
 
     return rowsOut.sort((a, b) => getDateValue(b.date) - getDateValue(a.date));
-  }, [customerMap, productMap, safeTransactions, safeExpenses]);
+  }, [activeTab, isGrossProfitModalOpen, customerMap, productMap, safeTransactions, safeExpenses]);
 
   const filteredGrossProfitRows = useMemo(() => {
-    const customerQuery = grossProfitCustomerSearch.trim().toLowerCase();
-    const productQuery = grossProfitProductSearch.trim().toLowerCase();
+    const customerQuery = settledGrossProfitCustomerSearch.trim().toLowerCase();
+    const productQuery = settledGrossProfitProductSearch.trim().toLowerCase();
 
     return grossProfitRows.filter((row) => {
       if (!matchesDateRange(row.date, effectiveFrom, effectiveTo)) return false;
@@ -1521,7 +1532,7 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
       if (productQuery && !row.product.toLowerCase().includes(productQuery)) return false;
       return true;
     });
-  }, [effectiveFrom, effectiveTo, grossProfitCustomerSearch, grossProfitProductSearch, grossProfitRows]);
+  }, [effectiveFrom, effectiveTo, settledGrossProfitCustomerSearch, settledGrossProfitProductSearch, grossProfitRows]);
 
   const grossProfitSummary = useMemo(() => {
     const netSales = filteredGrossProfitRows.reduce((sum, row) => sum + row.revenue, 0);
@@ -1573,7 +1584,7 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
   useEffect(() => {
     setGrossProfitPage(1);
     setGrossProfitModalPage(1);
-  }, [effectiveFrom, effectiveTo, grossProfitCustomerSearch, grossProfitProductSearch]);
+  }, [effectiveFrom, effectiveTo, settledGrossProfitCustomerSearch, settledGrossProfitProductSearch]);
 
   useEffect(() => {
     if (grossProfitPage > grossProfitTotalPages) {
@@ -1879,6 +1890,7 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
       )}
       {activeTab === 'advance_orders' && (
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <Pagination page={advancePage} totalRows={advanceOrderRows.length} pageSize={50} onPageChange={setAdvancePage} />
         <div className="border-b border-slate-200 p-3">
           <input placeholder="Search advance order, customer, product, or reference" value={search} onChange={e => setSearch(e.target.value)} className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" />
         </div>
@@ -1909,7 +1921,7 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
               </tr>
             </thead>
             <tbody className="bg-white">
-              {advanceOrderRows.map((row) => (
+              {advanceOrderRows.slice((advancePage - 1) * 50, advancePage * 50).map((row) => (
                 <tr key={row.id} className={`border-b border-slate-100 align-top ${row.isLegacyInfoOnly || row.isFulfilledInfoOnly ? 'bg-slate-50/80' : getLedgerRowToneClass(row.type)}`}>
                   <td className="whitespace-nowrap px-3 py-3 text-slate-700">{formatDateTimeDisplay(row.date)}</td>
                   <td className="px-3 py-3">
@@ -2019,10 +2031,7 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
         </table>
         </div>
       </div>
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>Showing {Math.min(visibleRows.length, filteredDisplayRows.length)} of {filteredDisplayRows.length} entries</span>
-        {filteredDisplayRows.length > visibleRowCount && <button onClick={() => setVisibleRowCount((p) => p + 100)} className="rounded-lg border border-slate-200 px-3 py-1.5 text-foreground transition hover:bg-slate-50">Load More (100)</button>}
-      </div>
+      <Pagination page={ledgerPage} totalRows={filteredDisplayRows.length} pageSize={50} onPageChange={setLedgerPage} />
       </>
       )}
       {activeTab === 'gross_profit' && (

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useDebouncedValue } from '../src/hooks/useDebouncedValue';
 import { Clock3, FolderPlus, Image as ImageIcon, Pause, Play, Plus, Save, Search, Send, Square, Trash2, X } from 'lucide-react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../components/ui';
 import { getFriendlyErrorMessage } from '../services/errorMessages';
@@ -399,6 +400,7 @@ export default function TelegramPosts() {
 
   const [searchTerm, setSearchTerm] =
     useState('');
+  const settledSearchTerm = useDebouncedValue(searchTerm);
 
   const [categoryFilter, setCategoryFilter] =
     useState('all');
@@ -414,11 +416,14 @@ export default function TelegramPosts() {
 
   const [queueSearchTerm, setQueueSearchTerm] =
     useState('');
+  const settledQueueSearchTerm = useDebouncedValue(queueSearchTerm);
 
   const [
     collectionProductSearchTerm,
     setCollectionProductSearchTerm,
   ] = useState('');
+
+  const settledCollectionProductSearchTerm = useDebouncedValue(collectionProductSearchTerm);
 
   const [
     queuedProductIds,
@@ -1037,7 +1042,7 @@ setTelegramChannelId(
 
             const matchesSearch =
               haystack.includes(
-                searchTerm
+                settledSearchTerm
                   .trim()
                   .toLowerCase(),
               );
@@ -1130,7 +1135,7 @@ setTelegramChannelId(
       return next;
     }, [
       products,
-      searchTerm,
+      settledSearchTerm,
       categoryFilter,
       sortOption,
     ]);
@@ -1168,7 +1173,7 @@ setTelegramChannelId(
   const queueFilteredProducts =
     useMemo(() => {
       const needle =
-        queueSearchTerm
+        settledQueueSearchTerm
           .trim()
           .toLowerCase();
 
@@ -1193,7 +1198,7 @@ setTelegramChannelId(
         },
       );
     }, [
-      queueSearchTerm,
+      settledQueueSearchTerm,
       queuedProducts,
     ]);
 
@@ -1306,7 +1311,7 @@ setTelegramChannelId(
 
       const searchValue =
         safeText(
-          collectionProductSearchTerm,
+          settledCollectionProductSearchTerm,
         ).toLowerCase();
 
       if (!searchValue) {
@@ -1336,7 +1341,7 @@ setTelegramChannelId(
       );
     }, [
       expandedProductCategoryGroup,
-      collectionProductSearchTerm,
+      settledCollectionProductSearchTerm,
     ]);
 
   const addableExpandedCategoryProductIds =

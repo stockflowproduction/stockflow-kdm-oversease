@@ -5,6 +5,7 @@ import {
   isTelegramBatchSize,
   isTelegramFrequencyUnit,
   isTelegramRepeatMode,
+  normalizeTelegramFrequencyFloor,
   telegramFrequencyToMs,
   validateTelegramBatchSize,
   validateTelegramFrequency,
@@ -70,6 +71,28 @@ describe('telegramValidation', () => {
         ),
       ).toEqual({
         valid: true,
+      });
+    });
+
+    it('normalizes too-fast frequencies to five seconds', () => {
+      expect(
+        normalizeTelegramFrequencyFloor(
+          1,
+          'seconds',
+        ),
+      ).toEqual({
+        value: 5,
+        unit: 'seconds',
+      });
+
+      expect(
+        normalizeTelegramFrequencyFloor(
+          1,
+          'minutes',
+        ),
+      ).toEqual({
+        value: 1,
+        unit: 'minutes',
       });
     });
 
