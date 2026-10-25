@@ -10617,6 +10617,37 @@ const transactionMap = new Map<string, Transaction>(
       </div>
     );
   }
+  const exportAllExpensesCsv = () => {
+    const headers = [
+      'Date / Time', 'Expense ID', 'Title', 'Amount', 'Category', 'Note',
+      'Payment Method', 'Cash Source', 'Cash Source Code', 'Effective At', 'Created At', 'Updated At',
+    ];
+    const lines = [headers.map(escapeCsvValue).join(',')];
+    // All expense records, independently of register filters and pagination.
+    const rows = [...expenses].sort((a, b) => new Date(getExpenseEffectiveDate(b)).getTime() - new Date(getExpenseEffectiveDate(a)).getTime());
+    for (const expense of rows) {
+      const method = expense.paymentMethod || 'Cash';
+      const isCash = method.trim().toLowerCase() === 'cash';
+      lines.push([
+        formatDateTimeDisplay(getExpenseEffectiveDate(expense)), expense.id, expense.title, expense.amount,
+        expense.category, expense.note || '', method,
+        isCash ? formatCashSourceLabel(expense.cashSource) : '',
+        isCash ? normalizeCashSource(expense.cashSource) : '',
+        expense.effectiveAt || '', expense.createdAt, expense.updatedAt || '',
+      ].map(escapeCsvValue).join(','));
+    }
+    const blob = new Blob(['\uFEFF', lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `All_Expenses_${dateKeyFromDate(new Date())}.csv`;
+    document.body.appendChild(link);
+    try { link.click(); } finally {
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
+
   const exportExpensePDF = () => {
     const doc = new jsPDF({
       orientation: "landscape",
@@ -15163,6 +15194,9 @@ const transactionMap = new Map<string, Transaction>(
                         {/* <p className="mt-1 text-sm text-slate-600">All expenses are shown by default. Use search or category to narrow the register.</p> */}
                       </div>
                       <div className="flex flex-wrap gap-2">
+                        <Button variant="outline" onClick={exportAllExpensesCsv} disabled={!expenses.length}>
+                          Export All CSV
+                        </Button>
                         <Button variant="outline" onClick={exportExpensePDF}>
                           Download PDF
                         </Button>

@@ -14,6 +14,7 @@ import { auth } from '../services/firebase';
 import { ExportModal } from '../components/ExportModal';
 import { exportCustomersToExcel, exportInvoiceToExcel, exportCustomerStatementToExcel } from '../services/excel';
 import { downloadCustomersData } from '../services/importExcel';
+import { buildCustomerSummaryCsv, buildCustomerMasterJsonBlob, downloadCustomerExport } from '../services/customerExports';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button, Select, Input, Label, LightweightLoader } from '../components/ui';
 import { formatItemNameWithVariant } from '../services/productVariants';
 import { Users, Phone, Calendar, ArrowRight, History, X, Eye, IndianRupee, FileText, Download, Filter, Search, ArrowUpDown, ArrowUp, ArrowDown, PhoneCall, ChevronRight, Wallet, CreditCard, Coins, CheckCircle, AlertCircle, Trash2, Plus, UserPlus, Package, Trophy, Star, Activity, Award, Gem, UserCheck, TrendingUp, ShoppingBag, Edit } from 'lucide-react';
@@ -706,6 +707,9 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
   const [transactions, setTransactions] = useState<Transaction[]>(initialData.transactions);
   const [upfrontOrders, setUpfrontOrders] = useState<UpfrontOrder[]>(initialData.upfrontOrders);
   const [products, setProducts] = useState<Product[]>(initialData.products);
+  const [customerExportProgress, setCustomerExportProgress] = useState<string | null>(null);
+  const [customerExportError, setCustomerExportError] = useState<string | null>(null);
+  const customerExportBusyRef = React.useRef(false);
   const [storageHydration, setStorageHydration] = useState(() => getStorageHydrationState());
   
   // Modal States
@@ -1126,6 +1130,31 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
     return result;
   }, [isCustomerSecondaryPending, canonicalCustomers, deferredSearchQuery, filterType, sortBy, sortOrder, highValueThreshold, canonicalDisplayBalanceByCustomerId, transactions.length]);
   const customerSeriesById = useMemo(() => buildCustomerSeriesMap(customers), [customers]);
+  const exportCustomerSummary = () => {
+    try {
+      setCustomerExportError(null);
+      const csv = buildCustomerSummaryCsv(filteredData.displayCustomers, customerSeriesById, canonicalDisplayBalanceByCustomerId);
+      downloadCustomerExport(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `customers-${new Date().toISOString().slice(0, 10)}.csv`);
+    } catch (error) {
+      setCustomerExportError(getFriendlyErrorMessage(error, 'Unable to export customers.'));
+    }
+  };
+  const exportCustomerMaster = async () => {
+    if (customerExportBusyRef.current) return;
+    customerExportBusyRef.current = true;
+    setCustomerExportError(null);
+    setCustomerExportProgress('Preparing JSON...');
+    try {
+      const data = loadData();
+      const blob = await buildCustomerMasterJsonBlob(data, (completed, total) => setCustomerExportProgress(`Exporting ${completed}/${total}...`));
+      downloadCustomerExport(blob, `customers-master-${new Date().toISOString().slice(0, 10)}.json`);
+    } catch (error) {
+      setCustomerExportError(getFriendlyErrorMessage(error, 'Unable to export customer master JSON.'));
+    } finally {
+      customerExportBusyRef.current = false;
+      setCustomerExportProgress(null);
+    }
+  };
   const customerById = useMemo(() => new Map(customers.map((customer) => [customer.id, customer])), [customers]);
   const customerTotalPages = Math.max(1, Math.ceil(filteredData.displayCustomers.length / CUSTOMERS_PAGE_SIZE));
   const paginatedCustomers = useMemo(
@@ -2395,6 +2424,9 @@ export default function Customers({ repairMode = false, hideStandardHeaderAction
                 </Button>
                 {!hideStandardHeaderActions && (
                   <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+                    <Button variant="outline" size="sm" className="h-10 rounded-xl border-slate-200 bg-white px-3 shadow-none" disabled={isCustomerSecondaryPending || Boolean(customerExportProgress)} onClick={exportCustomerSummary} title="Export customer columns across all matching pages">Export CSV</Button>
+                    {can('analytics') && <Button variant="outline" size="sm" className="h-10 rounded-xl border-slate-200 bg-white px-3 shadow-none" disabled={isCustomerSecondaryPending || Boolean(customerExportProgress)} onClick={() => void exportCustomerMaster()} title="Export all customers with transactions, orders, payments, products, costs and ledger movements">{customerExportProgress || 'Master Export JSON'}</Button>}
+                    {customerExportError && <span role="alert" className="text-xs text-red-700">{customerExportError}</span>}
                     <Button variant="outline" size="sm" className="h-10 rounded-xl border-slate-200 bg-white px-3 shadow-none" onClick={() => downloadCustomersData()}>Download Data</Button>
                     {selectedCustomerIds.length > 0 && (
                       <>

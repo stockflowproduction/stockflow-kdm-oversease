@@ -173,6 +173,7 @@ export default function Admin() {
   const settledSearchTerm = useDebouncedValue(searchTerm);
   const [sortOption, setSortOption] = useState('name-asc');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [outOfStockVisibility, setOutOfStockVisibility] = useState<'show' | 'hide-browsing' | 'hide-always'>('show');
   const [inventoryPage, setInventoryPage] = useState(1);
   const [missingPurchasePage, setMissingPurchasePage] = useState(1);
   const OPERATOR_INVENTORY_PAGE_SIZE = 20;
@@ -3646,7 +3647,8 @@ useEffect(() => {
   const filteredProducts = useMemo(() => {
     let result = products.filter(p => 
       (safeLower(getProductSearchTextForAdmin(p)).includes(safeLower(settledSearchTerm))) &&
-      (categoryFilter === 'all' || getProductCategory(p) === categoryFilter)
+      (categoryFilter === 'all' || getProductCategory(p) === categoryFilter) &&
+      (inventoryViewTab !== 'inventory' || outOfStockVisibility === 'show' || (outOfStockVisibility === 'hide-browsing' && settledSearchTerm.trim() !== '') || Number(p.stock || 0) > 0)
     );
 
     result.sort((a, b) => {
@@ -3660,7 +3662,7 @@ useEffect(() => {
     });
 
     return result;
-  }, [products, settledSearchTerm, sortOption, categoryFilter]);
+  }, [products, settledSearchTerm, sortOption, categoryFilter, inventoryViewTab, outOfStockVisibility]);
   const purchaseOrderRowsForAudit = useMemo(
     () => purchaseOrders,
     [purchaseOrders]
@@ -3778,7 +3780,8 @@ useEffect(() => {
         || (operatorStockFilter === 'low' && stock > 0 && stock <= 10)
         || (operatorStockFilter === 'in' && stock > 0)
         || (operatorStockFilter === 'out' && stock <= 0);
-      return matchesSearch && matchesFilter;
+      const matchesVisibility = outOfStockVisibility === 'show' || (outOfStockVisibility === 'hide-browsing' && term.trim() !== '') || stock > 0;
+      return matchesSearch && matchesFilter && matchesVisibility;
     });
 
     result.sort((a, b) => {
@@ -3794,7 +3797,7 @@ useEffect(() => {
     });
 
     return result;
-  }, [products, settledSearchTerm, operatorSortOption, operatorStockFilter]);
+  }, [products, settledSearchTerm, operatorSortOption, operatorStockFilter, outOfStockVisibility]);
   const operatorInventoryTotalPages = Math.max(1, Math.ceil(operatorFilteredProducts.length / OPERATOR_INVENTORY_PAGE_SIZE));
   const operatorPaginatedProducts = useMemo(
     () => operatorFilteredProducts.slice((operatorInventoryPage - 1) * OPERATOR_INVENTORY_PAGE_SIZE, operatorInventoryPage * OPERATOR_INVENTORY_PAGE_SIZE),
@@ -3812,11 +3815,11 @@ useEffect(() => {
 
   useEffect(() => {
     setInventoryPage(1);
-  }, [settledSearchTerm, categoryFilter, sortOption]);
+  }, [settledSearchTerm, categoryFilter, sortOption, outOfStockVisibility]);
 
   useEffect(() => {
     setOperatorInventoryPage(1);
-  }, [settledSearchTerm, operatorSortOption, operatorStockFilter]);
+  }, [settledSearchTerm, operatorSortOption, operatorStockFilter, outOfStockVisibility]);
 
   useEffect(() => {
     setInventoryPage((prev) => Math.min(prev, inventoryTotalPages));
@@ -4048,6 +4051,11 @@ useEffect(() => {
             <option value="in">In Stock</option>
             <option value="out">Out of Stock</option>
           </Select>
+          <Select aria-label="Out of stock visibility" value={outOfStockVisibility} onChange={(e) => setOutOfStockVisibility(e.target.value as 'show' | 'hide-browsing' | 'hide-always')}>
+            <option value="show">Show out of stock</option>
+            <option value="hide-browsing">Hide out of stock while browsing</option>
+            <option value="hide-always">Hide out of stock, including search</option>
+          </Select>
         </div>
         <div><h1 className="text-3xl font-bold tracking-tight">Inventory</h1><p className="text-muted-foreground">Operator view: stock and sell price only. Buy price, valuation, purchase controls, and margin analytics are hidden.</p></div>
         <Card className="bg-amber-50/50 border-amber-100 cursor-pointer hover:bg-amber-100/50 transition-colors" onClick={() => setIsLowStockModalOpen(true)}>
@@ -4245,6 +4253,13 @@ useEffect(() => {
                     <option value="stock-asc">Stock (Low-High)</option>
                   </Select>
                 </div>
+                {inventoryViewTab === 'inventory' && <div>
+                  <Select aria-label="Out of stock visibility" value={outOfStockVisibility} onChange={(e) => setOutOfStockVisibility(e.target.value as 'show' | 'hide-browsing' | 'hide-always')} className="h-11 rounded-xl border-slate-200 bg-slate-50/80">
+                    <option value="show">Show out of stock</option>
+                    <option value="hide-browsing">Hide out of stock while browsing</option>
+                    <option value="hide-always">Hide out of stock, including search</option>
+                  </Select>
+                </div>}
                 {inventoryViewTab === 'inventory' && filteredProducts.length > 0 && (
                   <div>
                     <div className="flex h-11 items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50/80 px-3">

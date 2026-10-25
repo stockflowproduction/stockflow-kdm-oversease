@@ -13,6 +13,10 @@ import { formatDateDisplay, formatDateTimeDisplay } from '../src/utils/dateForma
 import { perfLog } from '../services/perf';
 import { isSimplifiedShiftAccessEnabled } from '../services/simplifiedShift';
 import { getSaleCashAppliedToPreviousDue, getSaleCashKept } from '../services/transactionCashKpis';
+import { buildPurchaseRecords, purchaseRecordsToCsv, type PurchaseRecord } from '../services/purchaseRecords';
+import { buildAdvanceOrderMasterJsonBlob } from '../services/advanceOrderExports';
+import { downloadCustomerExport } from '../services/customerExports';
+import { getStorageHydrationState } from '../services/storage';
 
 type LedgerType = 'sale' | 'payment' | 'purchase' | 'supplier_payment' | 'expense' | 'return' | 'adjustment' | 'credit' | 'deleted_sale' | 'deleted_refund' | 'custom_order_receivable' | 'custom_order_payment' | 'manual_cash_in' | 'manual_cash_out';
 type PayType = 'cash' | 'online' | 'credit' | 'mixed' | 'na';
@@ -438,7 +442,14 @@ export default function Cashbook() {
   const settledSearch = useDebouncedValue(search);
   const [ledgerPage, setLedgerPage] = useState(1);
   const [advancePage, setAdvancePage] = useState(1);
-  const [activeTab, setActiveTab] = useState<'ledger' | 'daily_breakdown' | 'advance_orders' | 'gross_profit'>('ledger');
+  const [advanceExportProgress, setAdvanceExportProgress] = useState<string | null>(null);
+  const [advanceExportError, setAdvanceExportError] = useState<string | null>(null);
+  const advanceExportBusyRef = React.useRef(false);
+  const [activeTab, setActiveTab] = useState<'ledger' | 'daily_breakdown' | 'advance_orders' | 'gross_profit' | 'purchase_records'>('ledger');
+  const [purchaseSearch, setPurchaseSearch] = useState('');
+  const settledPurchaseSearch = useDebouncedValue(purchaseSearch);
+  const [purchaseStatus, setPurchaseStatus] = useState('all');
+  const [purchasePage, setPurchasePage] = useState(1);
   const [selectedDailyBreakdownKey, setSelectedDailyBreakdownKey] = useState<string | null>(null);
   const [grossProfitCustomerSearch, setGrossProfitCustomerSearch] = useState('');
   const [grossProfitProductSearch, setGrossProfitProductSearch] = useState('');
@@ -958,6 +969,30 @@ export default function Cashbook() {
     legacyRows: advanceOrderRows.filter((row) => row.isLegacyInfoOnly).length,
     fulfilledRows: advanceOrderRows.filter((row) => row.isFulfilledInfoOnly).length,
   }), [advanceOrderRows]);
+
+  const exportAdvanceOrderMaster = async () => {
+    if (advanceExportBusyRef.current) return;
+    advanceExportBusyRef.current = true;
+    setAdvanceExportError(null);
+    setAdvanceExportProgress('Preparing JSON...');
+    try {
+      const hydration = getStorageHydrationState();
+      if (hydration.isCloudConfigured && !hydration.hasCompletedInitialCloudLoad) {
+        throw new Error('Advance order data is still loading. Please try again when loading finishes.');
+      }
+      const blob = await buildAdvanceOrderMasterJsonBlob(data, {
+        filters: { datePreset, from: effectiveFrom, to: effectiveTo, payment: payFilter, search: settledSearch, sort },
+        summary: advanceOrderSummary,
+        rows: advanceOrderRows,
+      }, (completed, total) => setAdvanceExportProgress(`Exporting ${completed}/${total}...`));
+      downloadCustomerExport(blob, `advance-orders-master-${new Date().toISOString().slice(0, 10)}.json`);
+    } catch (error) {
+      setAdvanceExportError(error instanceof Error ? error.message : 'Unable to export advance orders.');
+    } finally {
+      advanceExportBusyRef.current = false;
+      setAdvanceExportProgress(null);
+    }
+  };
 
   const currentWindowRows = useMemo(() => asArray<Row>(allLedgerRows).filter((r) => {
     const t = new Date(r.date).getTime();
@@ -1534,6 +1569,71 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
     });
   }, [effectiveFrom, effectiveTo, settledGrossProfitCustomerSearch, settledGrossProfitProductSearch, grossProfitRows]);
 
+  const downloadGrossProfitCsv = () => {
+    const headers = [
+      'Date', 'Invoice', 'Transaction ID', 'Party / Category', 'Product / Expense', 'Type',
+      'Qty', 'Sell Price', 'Revenue', 'Buy Price', 'COGS', 'Gross Profit', 'Margin %', 'Source',
+      'Payment Method', 'Product ID', 'Details', 'Historical Import', 'Date / Time', 'Cost Source Code',
+    ];
+    const csvLines = [headers.map(escapeCsvValue).join(',')];
+    // Export the complete filtered dataset, independently of the current table page.
+    for (const row of filteredGrossProfitRows) {
+      csvLines.push([
+        formatDateDisplay(row.date), row.invoiceRef, row.transactionId, row.customer, row.product,
+        row.transactionType === 'return' ? 'Return' : row.transactionType === 'expense' ? 'Expense' : 'Sale',
+        row.qty, row.sellPrice, row.revenue, row.buyPrice, row.cogs, row.grossProfit, row.marginPct,
+        row.transactionType === 'expense' ? 'Direct loss' : getGrossProfitSourceLabel(row.source),
+        row.paymentMethod, row.productId, row.details, row.isHistoricalImport ? 'Yes' : 'No',
+        row.date, row.transactionType === 'expense' ? '' : row.source,
+      ].map(escapeCsvValue).join(','));
+    }
+    const blob = new Blob(['\uFEFF', csvLines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Gross_Profit_All_Rows_${getLocalDayKey(new Date().toISOString())}.csv`;
+    document.body.appendChild(link);
+    try {
+      link.click();
+    } finally {
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
+
+  const purchaseRecords = useMemo(() => activeTab === 'purchase_records'
+    ? buildPurchaseRecords(safePurchaseOrders, safeProducts) : [], [activeTab, safePurchaseOrders, safeProducts]);
+  const filteredPurchaseRecords = useMemo(() => {
+    const query = settledPurchaseSearch.trim().toLowerCase();
+    return purchaseRecords.filter(row => matchesDateRange(row.date, effectiveFrom, effectiveTo)
+      && (purchaseStatus === 'all' || row.status === purchaseStatus)
+      && (!query || [row.supplier, row.product, row.productId, row.barcode, row.billNumber, row.orderId, row.category, row.variant, row.color, row.notes]
+        .join(' ').toLowerCase().includes(query)));
+  }, [purchaseRecords, effectiveFrom, effectiveTo, settledPurchaseSearch, purchaseStatus]);
+  useEffect(() => setPurchasePage(1), [effectiveFrom, effectiveTo, settledPurchaseSearch, purchaseStatus]);
+  useEffect(() => setPurchasePage(page => Math.min(page, Math.max(1, Math.ceil(filteredPurchaseRecords.length / 50)))), [filteredPurchaseRecords.length]);
+  const purchaseSummary = useMemo(() => {
+    const orders = [...new Map<string, PurchaseRecord>(filteredPurchaseRecords.map(row => [row.orderId, row] as const)).values()];
+    return {
+      orders: orders.length, quantity: filteredPurchaseRecords.reduce((sum, row) => sum + row.quantity, 0),
+      total: orders.reduce((sum, row) => sum + row.orderTotal, 0),
+      paid: orders.reduce((sum, row) => sum + row.orderPaid, 0),
+      balance: orders.reduce((sum, row) => sum + row.orderBalance, 0),
+    };
+  }, [filteredPurchaseRecords]);
+  const downloadPurchaseRecordsCsv = () => {
+    const blob = new Blob([purchaseRecordsToCsv(filteredPurchaseRecords)], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Purchase_Records_All_Rows_${getLocalDayKey(new Date().toISOString())}.csv`;
+    document.body.appendChild(link);
+    try { link.click(); } finally {
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
+
   const grossProfitSummary = useMemo(() => {
     const netSales = filteredGrossProfitRows.reduce((sum, row) => sum + row.revenue, 0);
     const cogs = filteredGrossProfitRows
@@ -1697,8 +1797,9 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
           <button onClick={() => setActiveTab('daily_breakdown')} className={`h-10 rounded-lg border px-4 text-sm font-medium transition ${activeTab === 'daily_breakdown' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Daily Breakdown</button>
           <button onClick={() => setActiveTab('advance_orders')} className={`h-10 rounded-lg border px-4 text-sm font-medium transition ${activeTab === 'advance_orders' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Advance Orders</button>
           <button onClick={() => setActiveTab('gross_profit')} className={`h-10 rounded-lg border px-4 text-sm font-medium transition ${activeTab === 'gross_profit' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Gross Profit</button>
+          <button onClick={() => setActiveTab('purchase_records')} className={`h-10 rounded-lg border px-4 text-sm font-medium transition ${activeTab === 'purchase_records' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Purchase Records</button>
         </div>
-        {(activeTab === 'ledger' || activeTab === 'daily_breakdown' || activeTab === 'advance_orders' || activeTab === 'gross_profit') && (
+        {(activeTab === 'ledger' || activeTab === 'daily_breakdown' || activeTab === 'advance_orders' || activeTab === 'gross_profit' || activeTab === 'purchase_records') && (
         <div className="flex flex-wrap gap-2 xl:justify-end">
           {activeTab === 'ledger' && (
             <>
@@ -1890,6 +1991,11 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
       )}
       {activeTab === 'advance_orders' && (
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
+          <span className="text-xs text-slate-500">{safeUpfrontOrders.length} advance orders available for master export</span>
+          <button type="button" onClick={() => void exportAdvanceOrderMaster()} disabled={Boolean(advanceExportProgress) || search !== settledSearch} title="Export all advance orders with detailed payment history, product costs, fulfillment transactions and ledger effects" className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">{advanceExportProgress || 'Master Export JSON'}</button>
+          {advanceExportError && <span role="alert" className="w-full text-xs text-red-700">{advanceExportError}</span>}
+        </div>
         <Pagination page={advancePage} totalRows={advanceOrderRows.length} pageSize={50} onPageChange={setAdvancePage} />
         <div className="border-b border-slate-200 p-3">
           <input placeholder="Search advance order, customer, product, or reference" value={search} onChange={e => setSearch(e.target.value)} className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm" />
@@ -2034,8 +2140,60 @@ const getGrossProfitSourceLabel = (source: ResolvedCostSource) => {
       <Pagination page={ledgerPage} totalRows={filteredDisplayRows.length} pageSize={50} onPageChange={setLedgerPage} />
       </>
       )}
+      {activeTab === 'purchase_records' && (
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-3 py-2">
+            <span className="text-xs text-muted-foreground">{filteredPurchaseRecords.length.toLocaleString()} matching rows from {purchaseSummary.orders.toLocaleString()} purchase orders across all pages</span>
+            <button type="button" onClick={downloadPurchaseRecordsCsv} disabled={!filteredPurchaseRecords.length || purchaseSearch !== settledPurchaseSearch} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">Export All CSV</button>
+          </div>
+          <div className="grid gap-3 border-b border-slate-200 p-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded border bg-blue-50 p-3"><div className="text-xs uppercase text-blue-700">Purchase Value</div><div className="text-xl font-bold text-blue-700">{fmt(purchaseSummary.total)}</div></div>
+            <div className="rounded border bg-slate-50 p-3"><div className="text-xs uppercase text-slate-700">Quantity</div><div className="text-xl font-bold">{purchaseSummary.quantity.toLocaleString()}</div></div>
+            <div className="rounded border bg-emerald-50 p-3"><div className="text-xs uppercase text-emerald-700">Paid</div><div className="text-xl font-bold text-emerald-700">{fmt(purchaseSummary.paid)}</div></div>
+            <div className="rounded border bg-amber-50 p-3"><div className="text-xs uppercase text-amber-700">Outstanding</div><div className="text-xl font-bold text-amber-700">{fmt(purchaseSummary.balance)}</div></div>
+          </div>
+          <div className="flex flex-wrap gap-3 border-b border-slate-200 p-3">
+            <input value={purchaseSearch} onChange={event => setPurchaseSearch(event.target.value)} placeholder="Search supplier, product, barcode, bill or order" className="h-10 min-w-[240px] flex-1 rounded-lg border border-slate-200 px-3 text-sm" />
+            <FilterSelect value={purchaseStatus} onChange={event => setPurchaseStatus(event.target.value)}>
+              <option value="all">All statuses</option><option value="draft">Draft</option><option value="ordered">Ordered</option><option value="partially_received">Partially received</option><option value="received">Received</option><option value="cancelled">Cancelled</option>
+            </FilterSelect>
+          </div>
+          <p className="px-3 py-2 text-xs text-muted-foreground">One row per product line. Order paid and balance amounts repeat on each line; summary totals count each order once.</p>
+          <div className="overflow-auto">
+            <table className="min-w-[1400px] w-full text-xs">
+              <thead className="bg-slate-50"><tr className="border-b text-left">
+                {['Date', 'Bill / Purchase Order ID', 'Supplier', 'Product', 'Variant / Color', 'Quantity', 'Unit Cost', 'Line Total', 'Order Paid', 'Order Balance', 'Status'].map(label => <th key={label} className="px-3 py-2">{label}</th>)}
+              </tr></thead>
+              <tbody>
+                {filteredPurchaseRecords.slice((purchasePage - 1) * 50, purchasePage * 50).map((row, index) => (
+                  <tr key={row.id} className={`border-b ${index % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}`}>
+                    <td className="px-3 py-2 whitespace-nowrap">{formatDateDisplay(row.date)}</td>
+                    <td className="px-3 py-2"><div className="font-medium">{row.billNumber || '-'}</div><div className="text-slate-500">{row.orderId}</div></td>
+                    <td className="px-3 py-2">{row.supplier}</td><td className="px-3 py-2">{row.product}</td><td className="px-3 py-2">{[row.variant, row.color].filter(Boolean).join(' / ') || '-'}</td>
+                    <td className="px-3 py-2">{row.quantity.toLocaleString()}</td><td className="px-3 py-2">{fmt(row.unitCost)}</td><td className="px-3 py-2 font-medium">{fmt(row.lineTotal)}</td>
+                    <td className="px-3 py-2">{fmt(row.orderPaid)}</td><td className="px-3 py-2">{fmt(row.orderBalance)}</td><td className="px-3 py-2 capitalize">{row.status.replace(/_/g, ' ')}</td>
+                  </tr>
+                ))}
+                {!filteredPurchaseRecords.length && <tr><td colSpan={11} className="px-3 py-8 text-center text-sm text-muted-foreground">No purchase records found for the selected filters.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <Pagination page={purchasePage} totalRows={filteredPurchaseRecords.length} pageSize={50} onPageChange={setPurchasePage} />
+        </div>
+      )}
       {activeTab === 'gross_profit' && (
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-3 py-2">
+            <span className="text-xs text-muted-foreground">{filteredGrossProfitRows.length.toLocaleString()} matching rows across all pages</span>
+            <button
+              type="button"
+              onClick={downloadGrossProfitCsv}
+              disabled={!filteredGrossProfitRows.length || grossProfitCustomerSearch !== settledGrossProfitCustomerSearch || grossProfitProductSearch !== settledGrossProfitProductSearch}
+              className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Export All CSV
+            </button>
+          </div>
           <div className="grid gap-3 border-b border-slate-200 p-3 md:grid-cols-2 xl:grid-cols-4">
             <button
               type="button"

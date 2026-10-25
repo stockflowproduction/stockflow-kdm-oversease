@@ -30,6 +30,8 @@ import { auth } from '../services/firebase';
 import { buildPurchasePartyCanonicalView, buildPurchasePartyDuplicateCheckReport, classifyPurchasePartyReference, normalizePurchasePartyNameForMatch, type PurchasePartyReferenceStatus } from '../services/purchasePartyIdentity';
 import { formatDateDisplay, formatDateTimeDisplay } from '../src/utils/dateFormat';
 import { createPerfRunId, perfLog, perfMeasureAsync, perfMeasureSync } from '../services/perf';
+import { buildPurchasePartyMasterJsonBlob, downloadPurchasePartyMaster } from '../services/purchasePartyExports';
+import { getStorageHydrationState } from '../services/storage';
 
 type PurchaseTab = 'orders' | 'parties';
 type WizardStep = 'source' | 'product' | 'variants' | 'pricing' | 'review' | 'newProduct';
@@ -701,6 +703,9 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [parties, setParties] = useState<PurchaseParty[]>([]);
+  const [masterExportProgress, setMasterExportProgress] = useState<string | null>(null);
+  const [masterExportError, setMasterExportError] = useState<string | null>(null);
+  const masterExportBusyRef = useRef(false);
 
   const [homeSearch, setHomeSearch] = useState('.');
   const settledHomeSearch = useDebouncedValue(homeSearch);
@@ -1124,6 +1129,26 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
     ];
   };
   const getRelatedPartyIdSet = (partyId: string): Set<string> => new Set<string>(getRelatedPartyIds(partyId));
+  const exportPurchasePartyMaster = async () => {
+    if (masterExportBusyRef.current) return;
+    masterExportBusyRef.current = true;
+    setMasterExportError(null);
+    setMasterExportProgress('Preparing JSON...');
+    try {
+      const hydration = getStorageHydrationState();
+      if (hydration.isCloudConfigured && !hydration.hasCompletedInitialCloudLoad) {
+        throw new Error('Supplier data is still loading. Please try again when loading finishes.');
+      }
+      const targets = visibleParties.map((party) => ({ party, relatedPartyIds: getRelatedPartyIds(party.id) }));
+      const blob = await buildPurchasePartyMasterJsonBlob(loadData(), targets, (completed, total) => setMasterExportProgress(`Exporting ${completed}/${total}...`));
+      downloadPurchasePartyMaster(blob);
+    } catch (error) {
+      setMasterExportError(error instanceof Error ? error.message : 'Unable to export purchase parties.');
+    } finally {
+      masterExportBusyRef.current = false;
+      setMasterExportProgress(null);
+    }
+  };
   const partyRecordMatches = (
     party: PurchaseParty,
     relatedIds: Set<string>,
@@ -3437,9 +3462,11 @@ export default function PurchasePanel({ repairMode = false, embeddedRepairCenter
         </div>
       </div>
 
-      <div className="flex gap-2 border-b pb-2">
+      <div className="flex flex-wrap items-center gap-2 border-b pb-2">
         <Button size="sm" variant={partyManagementTab === 'list' ? 'default' : 'outline'} onClick={() => setPartyManagementTab('list')}>Supplier List</Button>
         <Button size="sm" variant={partyManagementTab === 'create' ? 'default' : 'outline'} onClick={() => setPartyManagementTab('create')}>{editingPartyId ? 'Update Party' : 'Create Party'}</Button>
+        <Button size="sm" variant="outline" className="sm:ml-auto" disabled={Boolean(masterExportProgress)} onClick={() => void exportPurchasePartyMaster()} title="Export all supplier parties, purchases, product costs, payments, credits, ledger movements and available history">{masterExportProgress || 'Master Export JSON'}</Button>
+        {masterExportError && <span role="alert" className="w-full text-xs text-red-700">{masterExportError}</span>}
       </div>
 
       {true ? (
